@@ -1,0 +1,38 @@
+{
+    "cpu": {
+      "enabled": true,
+      "priority": 5,
+      "cpu_affinity": [0, 1, 2, 3]
+    },
+    "gpu": {
+      "enabled": true,
+      "cuda": true,
+      "opencl": false
+    },
+    "network": {
+      "pool_address": "127.0.0.1",
+      "pool_port": 443,
+      "username": "user_wallet_address",
+      "password": "x",
+      "retry_interval": 60,
+      "secure_connection": true,
+      "proxy": {
+        "enabled": false,
+        "proxy_address": "",
+        "proxy_port": 0
+      }
+    },
+    "mining": {
+      "algorithm": "rx/0",
+      "donate_level": 1,
+      "benchmark_mode": false,
+      "difficulty_target": 100000,
+      "retry_failed_connections": 5
+    },
+    "logs": {
+      "log_level": "info",
+      "log_file": "/app/logs/xmrig_mining.log",
+      "max_log_size_mb": 50
+    }
+  }
+  
