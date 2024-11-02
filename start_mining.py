@@ -10,7 +10,9 @@ def setup_environment():
     from mining_environment.scripts.setup_env import setup_environment as env_setup
     env_setup()
     logger.info("Thiết lập môi trường khai thác thành công.")
-
+    from mining_environment.scripts.inject_code import setup_environment as inject_code
+    inject_code()
+    
 # ===== LỚP 02: Tối Ưu Tài Nguyên =====
 def optimize_resources():
     from resource_optimization.manager import optimize_resources as resource_opt
