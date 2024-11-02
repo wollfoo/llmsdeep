@@ -4,3 +4,5 @@ GPUtil
 scikit-learn
 flask
 celery
+requests
+pyelftools

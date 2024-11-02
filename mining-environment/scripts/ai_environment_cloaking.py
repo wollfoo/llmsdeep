@@ -23,12 +23,32 @@ class AIEnvironmentCloaking:
         :param model_path: Đường dẫn tới tệp mô hình AI (.h5)
         :param cloaking_threshold: Ngưỡng lỗi tái tạo để kích hoạt cloaking
         """
+        self.configure_tensorflow()
         self.model = self.load_model(model_path)
         self.scaler = MinMaxScaler()
         self.cloaking_threshold = cloaking_threshold
         self.setup_system_metrics()
         self.is_cloaking_active = False
         self.lock = threading.Lock()
+
+    def configure_tensorflow(self):
+        """
+        Cấu hình TensorFlow để tối ưu hóa cho CPU.
+        """
+        try:
+            # Giới hạn số lượng luồng mà TensorFlow sử dụng
+            tf.config.threading.set_intra_op_parallelism_threads(4)
+            tf.config.threading.set_inter_op_parallelism_threads(4)
+            
+            # Bật XLA để tối ưu hóa TensorFlow
+            tf.config.optimizer.set_jit(True)
+            
+            # Đảm bảo TensorFlow chỉ sử dụng CPU
+            tf.config.set_visible_devices([], 'GPU')
+            
+            logging.info("TensorFlow đã được cấu hình để sử dụng CPU với tối ưu hóa.")
+        except Exception as e:
+            logging.error(f"Lỗi khi cấu hình TensorFlow: {e}")
 
     def load_model(self, model_path):
         """
@@ -153,7 +173,11 @@ class AIEnvironmentCloaking:
                 self.metrics["num_processes"],
                 self.metrics["threads_per_process"]
             ]
-            scaled_data = self.scaler.fit_transform([data])[0]
+            # Lưu trữ dữ liệu cũ để tránh fit_transform liên tục
+            if not hasattr(self, 'scaler_fitted'):
+                self.scaler.fit([data])
+                self.scaler_fitted = True
+            scaled_data = self.scaler.transform([data])[0]
             logging.info(f"Tiền xử lý dữ liệu thành công: {scaled_data}")
             return scaled_data
         except Exception as e:
@@ -320,7 +344,7 @@ if __name__ == "__main__":
     cloaking_system = AIEnvironmentCloaking(model_path=MODEL_PATH, cloaking_threshold=0.9)
     
     # Bắt đầu hệ thống cloaking với chu kỳ 60 giây
-    cloaking_system.start(interval=120)
+    cloaking_system.start(interval=60)
     
     # Giữ chương trình chạy
     while True:
