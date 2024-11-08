@@ -1,0 +1,79 @@
+# mining-environment/scripts/train_cloaking_model.py
+
+import tensorflow as tf
+from tensorflow.keras import layers, models, regularizers, callbacks
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+# Giả định rằng bạn có dữ liệu được tải vào từ một nguồn nào đó
+# Ví dụ:
+# data = np.load('system_metrics.npy')  # Shape: (num_samples, 50)
+
+# Dữ liệu mẫu cho ví dụ
+num_features = 50
+data = np.random.rand(10000, num_features)  # Thay bằng dữ liệu thực tế của bạn
+
+# Chia dữ liệu thành tập huấn luyện và tập kiểm tra
+X_train, X_test = train_test_split(data, test_size=0.2, random_state=42)
+
+# Định nghĩa kích thước input dựa trên dữ liệu của bạn
+input_shape = X_train.shape[1]
+
+# Định nghĩa kiến trúc mô hình Autoencoder với các tối ưu hóa
+def build_autoencoder(input_dim):
+    model = models.Sequential()
+    
+    # Encoder
+    model.add(layers.Input(shape=(input_dim,)))
+    model.add(layers.Dense(64, activation='LeakyReLU', kernel_regularizer=regularizers.l2(1e-4)))
+    model.add(layers.BatchNormalization())
+    model.add(layers.Dropout(0.3))
+    model.add(layers.Dense(32, activation='LeakyReLU', kernel_regularizer=regularizers.l2(1e-4)))
+    model.add(layers.BatchNormalization())
+    model.add(layers.Dropout(0.3))
+    
+    # Latent Space
+    model.add(layers.Dense(16, activation='LeakyReLU', kernel_regularizer=regularizers.l2(1e-4)))
+    
+    # Decoder
+    model.add(layers.Dense(32, activation='LeakyReLU', kernel_regularizer=regularizers.l2(1e-4)))
+    model.add(layers.BatchNormalization())
+    model.add(layers.Dropout(0.3))
+    model.add(layers.Dense(64, activation='LeakyReLU', kernel_regularizer=regularizers.l2(1e-4)))
+    model.add(layers.BatchNormalization())
+    model.add(layers.Dropout(0.3))
+    model.add(layers.Dense(input_dim, activation='sigmoid'))  # Hoặc 'linear' tùy thuộc vào dữ liệu
+    
+    return model
+
+autoencoder = build_autoencoder(input_shape)
+
+# Biên dịch mô hình với các tham số học tập tối ưu
+optimizer = tf.keras.optimizers.Adam(learning_rate=0.0005)
+autoencoder.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
+
+# Tóm tắt kiến trúc mô hình
+autoencoder.summary()
+
+# Định nghĩa callbacks
+early_stop = callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+checkpoint = callbacks.ModelCheckpoint(
+    filepath='cloaking_model_best.h5',
+    monitor='val_loss',
+    save_best_only=True,
+    save_weights_only=False,
+    verbose=1
+)
+
+# Huấn luyện mô hình
+history = autoencoder.fit(
+    X_train, X_train,
+    epochs=100,
+    batch_size=128,
+    shuffle=True,
+    validation_data=(X_test, X_test),
+    callbacks=[early_stop, checkpoint]
+)
+
+# Lưu mô hình tốt nhất
+autoencoder.save('cloaking_model.h5')
