@@ -1,0 +1,40 @@
+{
+  "baseline_monitoring": {
+      "cpu_percent_threshold": 85,
+      "gpu_percent_threshold": 90,
+      "cache_percent_threshold": 70,
+      "network_bandwidth_threshold_mbps": 1000,
+      "disk_io_threshold_mbps": 500,
+      "power_consumption_threshold_watts": 300
+  },
+  "temperature_limits": {
+      "cpu": {
+          "max_celsius": 75
+      },
+      "gpu": {
+          "max_celsius": 85
+      }
+  },
+  "power_limits": {
+      "total_power_watts": {
+          "max": 300
+      },
+      "per_device_power_watts": {
+          "cpu": {
+              "max": 150
+          },
+          "gpu": {
+              "max": 150
+          }
+      }
+  },
+  "memory_limits": {
+      "ram_percent_threshold": 70
+  },
+  "gpu_optimization": {
+      "gpu_utilization_percent_optimal": {
+          "min": 70,
+          "max": 90
+      }
+  }
+}
