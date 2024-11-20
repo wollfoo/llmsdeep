@@ -80,13 +80,13 @@ class ResourceManager(BaseManager):
         self.cloaking_request_queue = Queue()
 
         # Khởi tạo các client Azure
-        self.azure_monitor_client = AzureMonitorClient()
-        self.azure_sentinel_client = AzureSentinelClient()
-        self.azure_log_analytics_client = AzureLogAnalyticsClient()
-        self.azure_security_center_client = AzureSecurityCenterClient()
-        self.azure_network_watcher_client = AzureNetworkWatcherClient()
-        self.azure_traffic_analytics_client = AzureTrafficAnalyticsClient()
-        self.azure_ml_client = AzureMLClient()  # Khởi tạo AzureMLClient
+        self.azure_monitor_client = AzureMonitorClient(self.logger)
+        self.azure_sentinel_client = AzureSentinelClient(self.logger)
+        self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
+        self.azure_security_center_client = AzureSecurityCenterClient(self.logger)
+        self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
+        self.azure_traffic_analytics_client = AzureTrafficAnalyticsClient(self.logger)
+        self.azure_ml_client = AzureMLClient(self.logger)  # Khởi tạo AzureMLClient
 
         # Khám phá tài nguyên Azure
         self.discover_azure_resources()

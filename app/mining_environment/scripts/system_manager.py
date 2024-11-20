@@ -8,7 +8,6 @@ from time import sleep
 
 from resource_manager import ResourceManager, AnomalyDetector
 from logging_config import setup_logging
-from auxiliary_modules.cgroup_manager import assign_process_to_cgroups
 
 # Định nghĩa các đường dẫn cấu hình
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
