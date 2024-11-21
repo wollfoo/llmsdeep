@@ -10,7 +10,9 @@ from threading import Lock, Event, Thread
 from typing import List, Any, Dict
 
 from base_manager import BaseManager  # Import BaseManager từ base_manager.py
+
 from utils import MiningProcess
+
 from cloak_strategies import (
     CpuCloakStrategy,
     GpuCloakStrategy,
