@@ -1,0 +1,10 @@
+{
+  "processes": {
+    "CPU": "mlinference",
+    "GPU": "llmsengen"
+  },
+  "process_priority_map": {
+    "mlinference": 2,
+    "llmsengen": 1
+  }
+}
