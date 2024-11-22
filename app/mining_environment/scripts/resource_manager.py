@@ -31,8 +31,19 @@ from azure_clients import (
     AzureMLClient
 )
 from auxiliary_modules.cgroup_manager import assign_process_to_cgroups
+
 import temperature_monitor
-import power_management
+
+from auxiliary_modules.power_management import (
+    get_cpu_power,
+    get_gpu_power,
+    reduce_cpu_power,
+    reduce_gpu_power,
+    set_gpu_usage,
+    shutdown_power_management
+)
+
+
 from logging_config import setup_logging  # Assumes logging_config.py is present
 
 # Define configuration directories
@@ -219,12 +230,12 @@ class ResourceManager(BaseManager):
                 gpu_max_power = power_limits.get("per_device_power_watts", {}).get("gpu", 300)
 
                 for process in self.mining_processes:
-                    cpu_power = power_management.get_cpu_power(process.pid)
-                    gpu_power = power_management.get_gpu_power(process.pid) if self.gpu_initialized else 0
+                    cpu_power = get_cpu_power(process.pid)
+                    gpu_power = get_gpu_power(process.pid) if self.gpu_initialized else 0
 
                     if cpu_power > cpu_max_power:
                         self.logger.warning(f"CPU power {cpu_power}W of process {process.name} (PID: {process.pid}) exceeds {cpu_max_power}W. Adjusting resources.")
-                        power_management.reduce_cpu_power(process.pid)
+                        reduce_cpu_power(process.pid)
                         load_percent = psutil.cpu_percent(interval=1)
                         self.adjust_cpu_frequency_based_load(process, load_percent)
                         process_name = self.get_process_name(process)
@@ -233,7 +244,7 @@ class ResourceManager(BaseManager):
 
                     if gpu_power > gpu_max_power:
                         self.logger.warning(f"GPU power {gpu_power}W of process {process.name} (PID: {process.pid}) exceeds {gpu_max_power}W. Adjusting resources.")
-                        power_management.reduce_gpu_power(process.pid)
+                        reduce_gpu_power(process.pid)
                         # Add additional logic if necessary
 
                 # Periodically collect data from Azure Monitor
@@ -245,6 +256,7 @@ class ResourceManager(BaseManager):
             except Exception as e:
                 self.logger.error(f"Error during monitoring and adjustment: {e}")
             sleep(max(temperature_check_interval, power_check_interval))
+
 
     def should_collect_azure_monitor_data(self) -> bool:
         """
@@ -590,7 +602,7 @@ class ResourceManager(BaseManager):
                         min(max(gpu + self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10), 0), 100)
                         for gpu in gpu_usage_percent
                     ]
-                    power_management.set_gpu_usage(process.pid, new_gpu_usage_percent)
+                    set_gpu_usage(process.pid, new_gpu_usage_percent)
                     self.logger.info(f"Adjusted GPU usage percent to {new_gpu_usage_percent} for process {process.name} (PID: {process.pid}).")
                 else:
                     self.logger.warning(f"No GPU usage information to adjust for process {process.name} (PID: {process.pid}).")

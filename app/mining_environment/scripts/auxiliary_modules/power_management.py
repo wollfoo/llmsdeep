@@ -6,10 +6,10 @@ import psutil
 import pynvml
 import subprocess
 import threading
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 # Import hàm setup_logging từ logging_config.py
-from logging_config import setup_logging
+from script.logging_config import setup_logging
 
 # Thiết lập đường dẫn tới thư mục logs
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
@@ -17,7 +17,6 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Thiết lập logging với logging_config.py
 logger = setup_logging('power_management', LOGS_DIR / 'power_management.log', 'INFO')
-
 
 class PowerManager:
     """
@@ -56,7 +55,7 @@ class PowerManager:
     def get_cpu_power(self, pid: Optional[int] = None) -> float:
         """
         Ước tính công suất tiêu thụ hiện tại của CPU dựa trên tải và tần số.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -80,7 +79,7 @@ class PowerManager:
     def get_gpu_power(self, pid: Optional[int] = None) -> List[float]:
         """
         Lấy công suất tiêu thụ hiện tại của từng GPU bằng NVML.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -110,7 +109,7 @@ class PowerManager:
     def reduce_cpu_power(self, pid: Optional[int] = None, reduction_percentage: float = 20.0):
         """
         Giảm công suất CPU bằng cách giảm tần số CPU.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -136,13 +135,15 @@ class PowerManager:
             logger.info(f"Đã giảm tần số CPU xuống {int(new_freq)}MHz ({reduction_percentage}% giảm).")
         except subprocess.CalledProcessError as e:
             logger.error(f"Lỗi khi giảm tần số CPU: {e}")
+        except FileNotFoundError:
+            logger.error("cpufreq-set không được cài đặt trên hệ thống.")
         except Exception as e:
             logger.error(f"Lỗi không mong muốn khi giảm tần số CPU: {e}")
 
     def reduce_gpu_power(self, pid: Optional[int] = None, reduction_percentage: float = 20.0):
         """
         Giảm công suất GPU bằng cách giảm giới hạn công suất qua NVML.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -175,7 +176,7 @@ class PowerManager:
     def set_gpu_usage(self, usage_percentages: List[float], pid: Optional[int] = None):
         """
         Điều chỉnh mức sử dụng GPU bằng cách thiết lập giới hạn công suất dựa trên phần trăm sử dụng mong muốn.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py, nhưng hiện tại không được sử dụng.
 
         Args:
             usage_percentages (List[float]): Danh sách phần trăm sử dụng cho từng GPU.
@@ -250,7 +251,7 @@ def setup_power_management():
 def get_cpu_power(pid: Optional[int] = None) -> float:
     """
     Hàm để lấy công suất CPU hiện tại.
-    Được gọi bởi system_manager.py.
+    Được gọi bởi resource_manager.py.
 
     Args:
         pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -263,7 +264,7 @@ def get_cpu_power(pid: Optional[int] = None) -> float:
 def get_gpu_power(pid: Optional[int] = None) -> List[float]:
     """
     Hàm để lấy công suất GPU hiện tại.
-    Được gọi bởi system_manager.py.
+    Được gọi bởi resource_manager.py.
 
     Args:
         pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -276,7 +277,7 @@ def get_gpu_power(pid: Optional[int] = None) -> List[float]:
 def reduce_cpu_power(pid: Optional[int] = None, reduction_percentage: float = 20.0):
     """
     Hàm để giảm công suất CPU.
-    Được gọi bởi system_manager.py.
+    Được gọi bởi resource_manager.py.
 
     Args:
         pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -287,7 +288,7 @@ def reduce_cpu_power(pid: Optional[int] = None, reduction_percentage: float = 20
 def reduce_gpu_power(pid: Optional[int] = None, reduction_percentage: float = 20.0):
     """
     Hàm để giảm công suất GPU.
-    Được gọi bởi system_manager.py.
+    Được gọi bởi resource_manager.py.
 
     Args:
         pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -298,7 +299,7 @@ def reduce_gpu_power(pid: Optional[int] = None, reduction_percentage: float = 20
 def set_gpu_usage(usage_percentages: List[float], pid: Optional[int] = None):
     """
     Hàm để thiết lập mức sử dụng GPU.
-    Được gọi bởi system_manager.py.
+    Được gọi bởi resource_manager.py.
 
     Args:
         usage_percentages (List[float]): Danh sách phần trăm sử dụng cho từng GPU.
