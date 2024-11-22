@@ -176,7 +176,7 @@ class ResourceManager(BaseManager):
                 if cpu_process_name.lower() in proc_name or gpu_process_name.lower() in proc_name:
                     priority = self.get_process_priority(proc.info['name'])
                     network_interface = self.config.get('network_interface', 'eth0')
-                    mining_proc = MiningProcess(proc.info['pid'], proc.info['name'], priority, network_interface)
+                    mining_proc = MiningProcess(proc.info['pid'], proc.info['name'], priority, network_interface, self.logger)
                     self.mining_processes.append(mining_proc)
             self.logger.info(f"Discovered {len(self.mining_processes)} mining processes.")
 
