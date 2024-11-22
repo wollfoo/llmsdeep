@@ -11,7 +11,16 @@ from typing import List, Any, Dict
 
 from base_manager import BaseManager
 from utils import MiningProcess
-import temperature_monitor
+
+from auxiliary_modules.temperature_monitor import (
+    get_cpu_temperature,
+    get_gpu_temperature,
+    set_cpu_threads,
+    set_ram_allocation,
+    set_disk_io_limit,
+    set_network_bandwidth_limit,
+    set_cache_limit
+)
 
 
 class AnomalyDetector(BaseManager):
@@ -215,16 +224,16 @@ class AnomalyDetector(BaseManager):
         current_state = {
             'cpu_percent': process.cpu_usage,
             'cpu_count': psutil.cpu_count(logical=True),
-            'cpu_freq_mhz': temperature_monitor.get_cpu_freq(process.pid),
+            'cpu_freq_mhz': self.get_cpu_freq(process.pid),
             'ram_percent': process.memory_usage,
             'ram_total_mb': psutil.virtual_memory().total / (1024 * 1024),
             'ram_available_mb': psutil.virtual_memory().available / (1024 * 1024),
-            'cache_percent': temperature_monitor.get_cache_percent(),
+            'cache_percent': self.get_cache_percent(),
             'gpus': [
                 {
                     'gpu_percent': process.gpu_usage,
-                    'memory_percent': temperature_monitor.get_gpu_memory_percent(process.pid),
-                    'temperature_celsius': temperature_monitor.get_gpu_temperature(process.pid)
+                    'memory_percent': self.get_gpu_memory_percent(process.pid),
+                    'temperature_celsius': self.get_gpu_temperature(process.pid)
                 }
             ],
             'disk_io_limit_mbps': process.disk_io,
@@ -261,3 +270,138 @@ class AnomalyDetector(BaseManager):
 
         self.logger.debug(f"Prepared input features for AI model: {input_features}")
         return input_features
+
+    def get_cpu_freq(self, pid: Optional[int] = None) -> Optional[float]:
+        """
+        Lấy tần số CPU hiện tại của tiến trình khai thác.
+        Sử dụng từ temperature_monitor.py.
+    
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+    
+        Returns:
+            Optional[float]: Tần số CPU hiện tại (MHz) hoặc None nếu không thể lấy.
+        """
+        try:
+            freq = psutil.cpu_freq().current  # Tần số CPU hiện tại trên toàn hệ thống
+            logger.debug(f"Tần số CPU hiện tại: {freq} MHz")
+            return freq
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy tần số CPU: {e}")
+            return None
+
+    def get_cache_percent(self) -> Optional[float]:
+        """
+        Lấy phần trăm Cache hiện tại của hệ thống.
+        Sử dụng từ temperature_monitor.py.
+    
+        Returns:
+            Optional[float]: Phần trăm Cache hiện tại (%) hoặc None nếu không thể lấy.
+        """
+        try:
+            mem = psutil.virtual_memory()
+            cache_percent = mem.cached / mem.total * 100
+            logger.debug(f"Cache hiện tại: {cache_percent:.2f}%")
+            return cache_percent
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy phần trăm Cache: {e}")
+            return None
+
+    def get_gpu_memory_percent(self, pid: Optional[int] = None) -> List[float]:
+        """
+        Lấy phần trăm bộ nhớ GPU hiện tại.
+        Sử dụng từ temperature_monitor.py.
+    
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+    
+        Returns:
+            List[float]: Danh sách phần trăm bộ nhớ GPU hiện tại (%).
+        """
+        gpu_memory_percents = []
+        if not self.gpu_initialized:
+            logger.warning("GPU not initialized. Cannot get GPU memory percent.")
+            return gpu_memory_percents
+
+        try:
+            for i in range(pynvml.nvmlDeviceGetCount()):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                mem_percent = (mem_info.used / mem_info.total) * 100
+                gpu_memory_percents.append(mem_percent)
+                logger.debug(f"GPU {i} Memory Usage: {mem_percent}%")
+            return gpu_memory_percents
+        except pynvml.NVMLError as e:
+            logger.error(f"Error getting GPU memory percent: {e}")
+            return gpu_memory_percents
+        except Exception as e:
+            logger.error(f"Unexpected error getting GPU memory percent: {e}")
+            return gpu_memory_percents
+
+    def get_gpu_temperature(self, pid: Optional[int] = None) -> List[float]:
+        """
+        Lấy nhiệt độ GPU hiện tại.
+        Sử dụng từ temperature_monitor.py.
+    
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+    
+        Returns:
+            List[float]: Danh sách nhiệt độ GPU hiện tại (°C).
+        """
+        return get_gpu_temperature(pid)
+
+    def set_cpu_threads(self, new_threads: int, pid: Optional[int] = None):
+        """
+        Gán số lượng CPU threads cho tiến trình khai thác.
+        Sử dụng từ temperature_monitor.py.
+    
+        Args:
+            new_threads (int): Số lượng CPU threads mới.
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        set_cpu_threads(new_threads, pid)
+
+    def set_ram_allocation(self, new_ram_mb: int, pid: Optional[int] = None):
+        """
+        Thiết lập lượng RAM được cấp phát cho tiến trình khai thác.
+        Sử dụng từ temperature_monitor.py.
+    
+        Args:
+            new_ram_mb (int): Lượng RAM mới (MB).
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        set_ram_allocation(new_ram_mb, pid)
+
+    def set_disk_io_limit(self, new_disk_io_mbps: float, pid: Optional[int] = None):
+        """
+        Thiết lập giới hạn Disk I/O cho tiến trình khai thác.
+        Sử dụng từ temperature_monitor.py.
+    
+        Args:
+            new_disk_io_mbps (float): Giới hạn Disk I/O mới (Mbps).
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        set_disk_io_limit(new_disk_io_mbps, pid)
+
+    def set_network_bandwidth_limit(self, new_network_bw_mbps: float, pid: Optional[int] = None):
+        """
+        Thiết lập giới hạn băng thông mạng cho tiến trình khai thác.
+        Sử dụng từ temperature_monitor.py.
+    
+        Args:
+            new_network_bw_mbps (float): Giới hạn băng thông mạng mới (Mbps).
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        set_network_bandwidth_limit(new_network_bw_mbps, pid)
+
+    def set_cache_limit(self, new_cache_limit_percent: float, pid: Optional[int] = None):
+        """
+        Thiết lập giới hạn Cache cho tiến trình khai thác.
+        Sử dụng từ temperature_monitor.py.
+    
+        Args:
+            new_cache_limit_percent (float): Giới hạn Cache mới (%).
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        set_cache_limit(new_cache_limit_percent, pid)

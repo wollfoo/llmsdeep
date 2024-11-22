@@ -7,7 +7,7 @@ import pynvml
 import subprocess
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # Import hàm setup_logging từ logging_config.py
 from logging_config import setup_logging
@@ -24,6 +24,7 @@ class TemperatureMonitor:
     """
     TemperatureMonitor là một singleton class chịu trách nhiệm giám sát nhiệt độ của CPU và GPU.
     Nó cung cấp các phương thức để lấy nhiệt độ hiện tại và quản lý các tham số liên quan đến nhiệt độ.
+    Đồng thời, nó tích hợp với ResourceManager và AnomalyDetector để phản ứng với các bất thường về nhiệt độ.
     """
 
     _instance = None
@@ -54,12 +55,12 @@ class TemperatureMonitor:
         self.monitor_lock = threading.Lock()
 
         # Cache limit percentage
-        self.cache_limit_percent = 70  # Default value, có thể được cập nhật qua set_cache_limit
+        self.cache_limit_percent = 70.0  # Default value, có thể được cập nhật qua set_cache_limit
 
     def get_cpu_temperature(self, pid: Optional[int] = None) -> Optional[float]:
         """
         Lấy nhiệt độ hiện tại của CPU.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -89,7 +90,7 @@ class TemperatureMonitor:
     def get_gpu_temperature(self, pid: Optional[int] = None) -> List[float]:
         """
         Lấy nhiệt độ hiện tại của từng GPU.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -119,7 +120,7 @@ class TemperatureMonitor:
     def get_current_cpu_threads(self, pid: Optional[int] = None) -> int:
         """
         Lấy số lượng CPU threads hiện tại được gán cho tiến trình khai thác.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -132,10 +133,10 @@ class TemperatureMonitor:
             if proc:
                 affinity = proc.cpu_affinity()
                 num_threads = len(affinity)
-                logger.debug(f"Số lượng CPU threads hiện tại cho tiến trình 'mlinference': {num_threads}")
+                logger.debug(f"Số lượng CPU threads hiện tại cho tiến trình 'mlinference' hoặc 'llmsengen': {num_threads}")
                 return num_threads
             else:
-                logger.warning("Không tìm thấy tiến trình 'mlinference'.")
+                logger.warning("Không tìm thấy tiến trình 'mlinference' hoặc 'llmsengen'.")
                 return 0
         except Exception as e:
             logger.error(f"Lỗi khi lấy số lượng CPU threads: {e}")
@@ -144,7 +145,7 @@ class TemperatureMonitor:
     def set_cpu_threads(self, new_threads: int, pid: Optional[int] = None):
         """
         Gán số lượng CPU threads cho tiến trình khai thác.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             new_threads (int): Số lượng CPU threads mới.
@@ -161,16 +162,16 @@ class TemperatureMonitor:
                 # Chọn các CPU cores đầu tiên để gán
                 new_affinity = list(range(new_threads))
                 proc.cpu_affinity(new_affinity)
-                logger.info(f"Đã gán tiến trình 'mlinference' (PID: {proc.pid}) vào các CPU cores: {new_affinity}")
+                logger.info(f"Đã gán tiến trình 'mlinference' hoặc 'llmsengen' (PID {proc.pid}) vào các CPU cores: {new_affinity}")
             else:
-                logger.warning("Không tìm thấy tiến trình 'mlinference' để gán CPU threads.")
+                logger.warning("Không tìm thấy tiến trình 'mlinference' hoặc 'llmsengen' để gán CPU threads.")
         except Exception as e:
             logger.error(f"Lỗi khi gán CPU threads: {e}")
 
     def get_current_ram_allocation(self, pid: Optional[int] = None) -> Optional[int]:
         """
         Lấy lượng RAM hiện tại được cấp phát cho tiến trình khai thác (MB).
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -183,10 +184,10 @@ class TemperatureMonitor:
             if proc:
                 mem_info = proc.memory_info()
                 ram_mb = mem_info.rss / (1024 * 1024)
-                logger.debug(f"Lượng RAM hiện tại cho tiến trình 'mlinference': {ram_mb} MB")
+                logger.debug(f"Lượng RAM hiện tại cho tiến trình 'mlinference' hoặc 'llmsengen': {ram_mb} MB")
                 return int(ram_mb)
             else:
-                logger.warning("Không tìm thấy tiến trình 'mlinference' để lấy RAM allocation.")
+                logger.warning("Không tìm thấy tiến trình 'mlinference' hoặc 'llmsengen' để lấy RAM allocation.")
                 return None
         except Exception as e:
             logger.error(f"Lỗi khi lấy RAM allocation: {e}")
@@ -195,7 +196,7 @@ class TemperatureMonitor:
     def set_ram_allocation(self, new_ram_mb: int, pid: Optional[int] = None):
         """
         Thiết lập lượng RAM được cấp phát cho tiến trình khai thác.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             new_ram_mb (int): Lượng RAM mới (MB).
@@ -205,16 +206,22 @@ class TemperatureMonitor:
             proc = self._find_mining_process()
             if proc:
                 # Sử dụng cgroups để giới hạn RAM nếu đã được thiết lập
-                cgroup_path = f"/sys/fs/cgroup/memory/mlinference/{proc.pid}/memory.limit_in_bytes"
+                cgroup_path = f"/sys/fs/cgroup/memory/mlinference_llmsengen/{proc.pid}/memory.limit_in_bytes"
                 if Path(cgroup_path).exists():
                     new_limit_bytes = new_ram_mb * 1024 * 1024
                     with open(cgroup_path, 'w') as f:
                         f.write(str(new_limit_bytes))
-                    logger.info(f"Đã thiết lập giới hạn RAM cho tiến trình 'mlinference' thành {new_ram_mb} MB.")
+                    logger.info(f"Đã thiết lập giới hạn RAM cho tiến trình 'mlinference' hoặc 'llmsengen' thành {new_ram_mb} MB.")
                 else:
-                    logger.warning(f"Cgroup RAM không được thiết lập cho tiến trình 'mlinference'. Không thể giới hạn RAM.")
+                    # Tạo cgroup nếu chưa tồn tại
+                    cgroup_dir = Path(f"/sys/fs/cgroup/memory/mlinference_llmsengen/{proc.pid}")
+                    cgroup_dir.mkdir(parents=True, exist_ok=True)
+                    new_limit_bytes = new_ram_mb * 1024 * 1024
+                    with open(cgroup_path, 'w') as f:
+                        f.write(str(new_limit_bytes))
+                    logger.info(f"Đã tạo và thiết lập giới hạn RAM cho tiến trình 'mlinference' hoặc 'llmsengen' thành {new_ram_mb} MB.")
             else:
-                logger.warning("Không tìm thấy tiến trình 'mlinference' để thiết lập RAM allocation.")
+                logger.warning("Không tìm thấy tiến trình 'mlinference' hoặc 'llmsengen' để thiết lập RAM allocation.")
         except PermissionError:
             logger.error("Không có quyền để thiết lập RAM allocation thông qua cgroup.")
         except Exception as e:
@@ -223,7 +230,7 @@ class TemperatureMonitor:
     def get_current_gpu_usage(self, pid: Optional[int] = None) -> List[float]:
         """
         Lấy mức sử dụng GPU hiện tại (phần trăm).
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
@@ -253,15 +260,15 @@ class TemperatureMonitor:
     def get_current_disk_io_limit(self, pid: Optional[int] = None) -> Optional[float]:
         """
         Lấy giới hạn Disk I/O hiện tại (Mbps).
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Returns:
             Optional[float]: Giới hạn Disk I/O hiện tại (Mbps) hoặc None nếu không thể lấy.
         """
         try:
             # Giả sử sử dụng cgroups blkio để lấy giới hạn Disk I/O
-            cgroup_path_read = f"/sys/fs/cgroup/blkio/mlinference/{pid}/blkio.throttle.read_bps_device" if pid else None
-            cgroup_path_write = f"/sys/fs/cgroup/blkio/mlinference/{pid}/blkio.throttle.write_bps_device" if pid else None
+            cgroup_path_read = f"/sys/fs/cgroup/blkio/mlinference_llmsengen/{pid}/blkio.throttle.read_bps_device" if pid else None
+            cgroup_path_write = f"/sys/fs/cgroup/blkio/mlinference_llmsengen/{pid}/blkio.throttle.write_bps_device" if pid else None
 
             read_limit = None
             write_limit = None
@@ -306,7 +313,7 @@ class TemperatureMonitor:
     def set_disk_io_limit(self, new_disk_io_mbps: float, pid: Optional[int] = None):
         """
         Thiết lập giới hạn Disk I/O cho tiến trình khai thác.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             new_disk_io_mbps (float): Giới hạn Disk I/O mới (Mbps).
@@ -326,20 +333,21 @@ class TemperatureMonitor:
                 write_limit_bytes = int(new_disk_io_mbps * 1024 * 1024 / 8)
 
                 # Thiết lập giới hạn đọc
-                cgroup_path_read = f"/sys/fs/cgroup/blkio/mlinference/{pid}/blkio.throttle.read_bps_device"
-                cgroup_path_write = f"/sys/fs/cgroup/blkio/mlinference/{pid}/blkio.throttle.write_bps_device"
+                cgroup_path_read = f"/sys/fs/cgroup/blkio/mlinference_llmsengen/{pid}/blkio.throttle.read_bps_device"
+                cgroup_path_write = f"/sys/fs/cgroup/blkio/mlinference_llmsengen/{pid}/blkio.throttle.write_bps_device"
 
                 # Đảm bảo cgroup blkio đã được tạo cho tiến trình
-                os.makedirs(f"/sys/fs/cgroup/blkio/mlinference/{pid}", exist_ok=True)
+                cgroup_dir = Path(f"/sys/fs/cgroup/blkio/mlinference_llmsengen/{pid}")
+                cgroup_dir.mkdir(parents=True, exist_ok=True)
 
                 with open(cgroup_path_read, 'w') as f:
                     f.write(f"{device_major}:{device_minor} {read_limit_bytes}\n")
                 with open(cgroup_path_write, 'w') as f:
                     f.write(f"{device_major}:{device_minor} {write_limit_bytes}\n")
 
-                logger.info(f"Đã thiết lập giới hạn Disk I/O cho tiến trình 'mlinference' thành {new_disk_io_mbps} Mbps.")
+                logger.info(f"Đã thiết lập giới hạn Disk I/O cho tiến trình 'mlinference' hoặc 'llmsengen' thành {new_disk_io_mbps} Mbps.")
             else:
-                logger.warning("Không tìm thấy tiến trình 'mlinference' để thiết lập Disk I/O limit.")
+                logger.warning("Không tìm thấy tiến trình 'mlinference' hoặc 'llmsengen' để thiết lập Disk I/O limit.")
         except PermissionError:
             logger.error("Không có quyền để thiết lập Disk I/O limit thông qua cgroup.")
         except Exception as e:
@@ -348,7 +356,7 @@ class TemperatureMonitor:
     def get_current_network_bandwidth_limit(self, pid: Optional[int] = None) -> Optional[float]:
         """
         Lấy giới hạn băng thông mạng hiện tại (Mbps).
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Returns:
             Optional[float]: Giới hạn băng thông mạng hiện tại (Mbps) hoặc None nếu không thể lấy.
@@ -383,7 +391,7 @@ class TemperatureMonitor:
     def set_network_bandwidth_limit(self, new_network_bw_mbps: float, pid: Optional[int] = None):
         """
         Thiết lập giới hạn băng thông mạng cho giao diện eth0.
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             new_network_bw_mbps (float): Giới hạn băng thông mạng mới (Mbps).
@@ -425,18 +433,24 @@ class TemperatureMonitor:
                 logger.error(f"Lỗi khi thêm hoặc cập nhật class {class_id}: {e}")
                 return
 
-            # Thêm hoặc cập nhật filter để gán các gói liên quan đến 'mlinference' vào class 1:12
+            # Thêm hoặc cập nhật filter để gán các gói liên quan đến 'mlinference' và 'llmsengen' vào class 1:12
             try:
-                # Sử dụng iptables để đánh dấu các gói từ tiến trình 'mlinference'
+                # Sử dụng iptables để đánh dấu các gói từ tiến trình 'mlinference' và 'llmsengen'
                 # Giả sử tiến trình 'mlinference' sử dụng một port cụ thể, ví dụ: 12345
+                # và 'llmsengen' sử dụng một port khác, ví dụ: 12346
                 # Cần điều chỉnh theo thực tế
 
-                # Thiết lập iptables để đánh dấu các gói từ tiến trình 'mlinference'
-                # Trước tiên, thêm quy tắc để đánh dấu các gói
+                # Thiết lập iptables để đánh dấu các gói từ 'mlinference'
                 subprocess.run([
                     'iptables', '-t', 'mangle', '-A', 'OUTPUT', '-p', 'tcp', '--sport', '12345', '-j', 'MARK', '--set-mark', '12'
                 ], check=True)
                 logger.info("Đã thiết lập iptables để đánh dấu các gói từ 'mlinference' vào mark 12.")
+
+                # Thiết lập iptables để đánh dấu các gói từ 'llmsengen'
+                subprocess.run([
+                    'iptables', '-t', 'mangle', '-A', 'OUTPUT', '-p', 'tcp', '--sport', '12346', '-j', 'MARK', '--set-mark', '12'
+                ], check=True)
+                logger.info("Đã thiết lập iptables để đánh dấu các gói từ 'llmsengen' vào mark 12.")
 
                 # Thêm filter tc để gán các gói đã đánh dấu vào class 1:12
                 existing_filters = subprocess.check_output(['tc', 'filter', 'show', 'dev', network_interface, 'parent', '1:0']).decode()
@@ -454,15 +468,11 @@ class TemperatureMonitor:
                 logger.error(f"Lỗi không mong muốn khi thiết lập filter tc: {e}")
 
             logger.info(f"Giới hạn băng thông mạng cho giao diện {network_interface} đã được thiết lập thành {new_network_bw_mbps} Mbps.")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Lỗi khi thiết lập giới hạn băng thông mạng: {e}")
-        except Exception as e:
-            logger.error(f"Lỗi không mong muốn khi thiết lập giới hạn băng thông mạng: {e}")
 
     def get_current_cache_limit(self, pid: Optional[int] = None) -> Optional[float]:
         """
         Lấy giới hạn Cache hiện tại (phần trăm).
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Returns:
             Optional[float]: Giới hạn Cache hiện tại (%) hoặc None nếu không thể lấy.
@@ -480,7 +490,7 @@ class TemperatureMonitor:
     def set_cache_limit(self, new_cache_limit_percent: float, pid: Optional[int] = None):
         """
         Thiết lập giới hạn Cache (phần trăm).
-        Tham số `pid` được thêm vào để tương thích với system_manager.py, nhưng hiện tại không được sử dụng.
+        Tham số `pid` được thêm vào để tương thích với resource_manager.py và anomaly_detector.py, nhưng hiện tại không được sử dụng.
 
         Args:
             new_cache_limit_percent (float): Giới hạn Cache mới (%).
@@ -535,20 +545,20 @@ class TemperatureMonitor:
 
     def _find_mining_process(self) -> Optional[psutil.Process]:
         """
-        Tìm tiến trình khai thác 'mlinference'.
+        Tìm tiến trình khai thác 'mlinference' hoặc 'llmsengen'.
 
         Returns:
             Optional[psutil.Process]: Đối tượng tiến trình hoặc None nếu không tìm thấy.
         """
         try:
             for proc in psutil.process_iter(['pid', 'name']):
-                if proc.info['name'] == 'mlinference':
-                    logger.debug(f"Tiến trình 'mlinference' được tìm thấy: PID {proc.pid}")
+                if proc.info['name'] in ['mlinference', 'llmsengen']:
+                    logger.debug(f"Tiến trình '{proc.info['name']}' được tìm thấy: PID {proc.pid}")
                     return proc
-            logger.debug("Không tìm thấy tiến trình 'mlinference'.")
+            logger.debug("Không tìm thấy tiến trình 'mlinference' hoặc 'llmsengen'.")
             return None
         except Exception as e:
-            logger.error(f"Lỗi khi tìm tiến trình 'mlinference': {e}")
+            logger.error(f"Lỗi khi tìm tiến trình 'mlinference' hoặc 'llmsengen': {e}")
             return None
 
     def setup_temperature_monitoring(self):
@@ -575,179 +585,171 @@ class TemperatureMonitor:
         except Exception as e:
             logger.error(f"Lỗi không mong muốn khi shutdown NVML: {e}")
 
+    # Singleton instance of TemperatureMonitor
+    _temperature_monitor_instance = TemperatureMonitor()
 
-# Singleton instance of TemperatureMonitor
-_temperature_monitor_instance = TemperatureMonitor()
+    def setup_temperature_monitoring():
+        """
+        Hàm để thiết lập giám sát nhiệt độ.
+        Được gọi bởi setup_env.py.
+        """
+        _temperature_monitor_instance.setup_temperature_monitoring()
 
-def setup_temperature_monitoring():
-    """
-    Hàm để thiết lập giám sát nhiệt độ.
-    Được gọi bởi setup_env.py.
-    """
-    _temperature_monitor_instance.setup_temperature_monitoring()
+    def get_cpu_temperature(pid: Optional[int] = None) -> Optional[float]:
+        """
+        Hàm để lấy nhiệt độ CPU hiện tại.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def get_cpu_temperature(pid: Optional[int] = None) -> Optional[float]:
-    """
-    Hàm để lấy nhiệt độ CPU hiện tại.
-    Được gọi bởi system_manager.py.
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        Returns:
+            Optional[float]: Nhiệt độ CPU hiện tại (°C) hoặc None nếu không thể lấy.
+        """
+        return _temperature_monitor_instance.get_cpu_temperature(pid)
 
-    Returns:
-        Optional[float]: Nhiệt độ CPU hiện tại (°C) hoặc None nếu không thể lấy.
-    """
-    return _temperature_monitor_instance.get_cpu_temperature(pid)
+    def get_gpu_temperature(pid: Optional[int] = None) -> List[float]:
+        """
+        Hàm để lấy nhiệt độ GPU hiện tại.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def get_gpu_temperature(pid: Optional[int] = None) -> List[float]:
-    """
-    Hàm để lấy nhiệt độ GPU hiện tại.
-    Được gọi bởi system_manager.py.
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        Returns:
+            List[float]: Danh sách nhiệt độ GPU hiện tại (°C).
+        """
+        return _temperature_monitor_instance.get_gpu_temperature(pid)
 
-    Returns:
-        List[float]: Danh sách nhiệt độ GPU hiện tại (°C).
-    """
-    return _temperature_monitor_instance.get_gpu_temperature(pid)
+    def get_current_cpu_threads(pid: Optional[int] = None) -> int:
+        """
+        Hàm để lấy số lượng CPU threads hiện tại được gán cho tiến trình khai thác.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def get_current_cpu_threads(pid: Optional[int] = None) -> int:
-    """
-    Hàm để lấy số lượng CPU threads hiện tại được gán cho tiến trình khai thác.
-    Được gọi bởi system_manager.py.
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        Returns:
+            int: Số lượng CPU threads.
+        """
+        return _temperature_monitor_instance.get_current_cpu_threads(pid)
 
-    Returns:
-        int: Số lượng CPU threads.
-    """
-    return _temperature_monitor_instance.get_current_cpu_threads(pid)
+    def set_cpu_threads(new_threads: int, pid: Optional[int] = None):
+        """
+        Hàm để gán số lượng CPU threads cho tiến trình khai thác.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def set_cpu_threads(new_threads: int, pid: Optional[int] = None):
-    """
-    Hàm để gán số lượng CPU threads cho tiến trình khai thác.
-    Được gọi bởi system_manager.py.
+        Args:
+            new_threads (int): Số lượng CPU threads mới.
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        _temperature_monitor_instance.set_cpu_threads(new_threads, pid)
 
-    Args:
-        new_threads (int): Số lượng CPU threads mới.
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
-    """
-    _temperature_monitor_instance.set_cpu_threads(new_threads, pid)
+    def get_current_ram_allocation(pid: Optional[int] = None) -> Optional[int]:
+        """
+        Hàm để lấy lượng RAM hiện tại được cấp phát cho tiến trình khai thác.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def get_current_ram_allocation(pid: Optional[int] = None) -> Optional[int]:
-    """
-    Hàm để lấy lượng RAM hiện tại được cấp phát cho tiến trình khai thác.
-    Được gọi bởi system_manager.py.
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        Returns:
+            Optional[int]: Lượng RAM hiện tại (MB) hoặc None nếu không thể lấy.
+        """
+        return _temperature_monitor_instance.get_current_ram_allocation(pid)
 
-    Returns:
-        Optional[int]: Lượng RAM hiện tại (MB) hoặc None nếu không thể lấy.
-    """
-    return _temperature_monitor_instance.get_current_ram_allocation(pid)
+    def set_ram_allocation(new_ram_mb: int, pid: Optional[int] = None):
+        """
+        Hàm để thiết lập lượng RAM được cấp phát cho tiến trình khai thác.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def set_ram_allocation(new_ram_mb: int, pid: Optional[int] = None):
-    """
-    Hàm để thiết lập lượng RAM được cấp phát cho tiến trình khai thác.
-    Được gọi bởi system_manager.py.
+        Args:
+            new_ram_mb (int): Lượng RAM mới (MB).
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        _temperature_monitor_instance.set_ram_allocation(new_ram_mb, pid)
 
-    Args:
-        new_ram_mb (int): Lượng RAM mới (MB).
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
-    """
-    _temperature_monitor_instance.set_ram_allocation(new_ram_mb, pid)
+    def get_current_gpu_usage(pid: Optional[int] = None) -> List[float]:
+        """
+        Hàm để lấy mức sử dụng GPU hiện tại.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def get_current_gpu_usage(pid: Optional[int] = None) -> List[float]:
-    """
-    Hàm để lấy mức sử dụng GPU hiện tại.
-    Được gọi bởi system_manager.py.
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        Returns:
+            List[float]: Danh sách mức sử dụng GPU hiện tại (%).
+        """
+        return _temperature_monitor_instance.get_current_gpu_usage(pid)
 
-    Returns:
-        List[float]: Danh sách mức sử dụng GPU hiện tại (%).
-    """
-    return _temperature_monitor_instance.get_current_gpu_usage(pid)
+    def get_current_disk_io_limit(pid: Optional[int] = None) -> Optional[float]:
+        """
+        Hàm để lấy giới hạn Disk I/O hiện tại.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def get_current_disk_io_limit(pid: Optional[int] = None) -> Optional[float]:
-    """
-    Hàm để lấy giới hạn Disk I/O hiện tại.
-    Được gọi bởi system_manager.py.
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        Returns:
+            Optional[float]: Giới hạn Disk I/O hiện tại (Mbps) hoặc None nếu không thể lấy.
+        """
+        return _temperature_monitor_instance.get_current_disk_io_limit(pid)
 
-    Returns:
-        Optional[float]: Giới hạn Disk I/O hiện tại (Mbps) hoặc None nếu không thể lấy.
-    """
-    return _temperature_monitor_instance.get_current_disk_io_limit(pid)
+    def set_disk_io_limit(new_disk_io_mbps: float, pid: Optional[int] = None):
+        """
+        Hàm để thiết lập giới hạn Disk I/O.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def set_disk_io_limit(new_disk_io_mbps: float, pid: Optional[int] = None):
-    """
-    Hàm để thiết lập giới hạn Disk I/O.
-    Được gọi bởi system_manager.py.
+        Args:
+            new_disk_io_mbps (float): Giới hạn Disk I/O mới (Mbps).
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        _temperature_monitor_instance.set_disk_io_limit(new_disk_io_mbps, pid)
 
-    Args:
-        new_disk_io_mbps (float): Giới hạn Disk I/O mới (Mbps).
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
-    """
-    _temperature_monitor_instance.set_disk_io_limit(new_disk_io_mbps, pid)
+    def get_current_network_bandwidth_limit(pid: Optional[int] = None) -> Optional[float]:
+        """
+        Hàm để lấy giới hạn băng thông mạng hiện tại.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def get_current_network_bandwidth_limit(pid: Optional[int] = None) -> Optional[float]:
-    """
-    Hàm để lấy giới hạn băng thông mạng hiện tại.
-    Được gọi bởi system_manager.py.
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        Returns:
+            Optional[float]: Giới hạn băng thông mạng hiện tại (Mbps) hoặc None nếu không thể lấy.
+        """
+        return _temperature_monitor_instance.get_current_network_bandwidth_limit(pid)
 
-    Returns:
-        Optional[float]: Giới hạn băng thông mạng hiện tại (Mbps) hoặc None nếu không thể lấy.
-    """
-    return _temperature_monitor_instance.get_current_network_bandwidth_limit(pid)
+    def set_network_bandwidth_limit(new_network_bw_mbps: float, pid: Optional[int] = None):
+        """
+        Hàm để thiết lập giới hạn băng thông mạng.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def set_network_bandwidth_limit(new_network_bw_mbps: float, pid: Optional[int] = None):
-    """
-    Hàm để thiết lập giới hạn băng thông mạng.
-    Được gọi bởi system_manager.py.
+        Args:
+            new_network_bw_mbps (float): Giới hạn băng thông mạng mới (Mbps).
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        _temperature_monitor_instance.set_network_bandwidth_limit(new_network_bw_mbps, pid)
 
-    Args:
-        new_network_bw_mbps (float): Giới hạn băng thông mạng mới (Mbps).
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
-    """
-    _temperature_monitor_instance.set_network_bandwidth_limit(new_network_bw_mbps, pid)
+    def get_current_cache_limit(pid: Optional[int] = None) -> Optional[float]:
+        """
+        Hàm để lấy giới hạn Cache hiện tại.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def get_current_cache_limit(pid: Optional[int] = None) -> Optional[float]:
-    """
-    Hàm để lấy giới hạn Cache hiện tại.
-    Được gọi bởi system_manager.py.
+        Args:
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        Returns:
+            Optional[float]: Giới hạn Cache hiện tại (%) hoặc None nếu không thể lấy.
+        """
+        return _temperature_monitor_instance.get_current_cache_limit(pid)
 
-    Returns:
-        Optional[float]: Giới hạn Cache hiện tại (%) hoặc None nếu không thể lấy.
-    """
-    return _temperature_monitor_instance.get_current_cache_limit(pid)
+    def set_cache_limit(new_cache_limit_percent: float, pid: Optional[int] = None):
+        """
+        Hàm để thiết lập giới hạn Cache.
+        Được gọi bởi resource_manager.py và anomaly_detector.py.
 
-def set_cache_limit(new_cache_limit_percent: float, pid: Optional[int] = None):
-    """
-    Hàm để thiết lập giới hạn Cache.
-    Được gọi bởi system_manager.py.
-
-    Args:
-        new_cache_limit_percent (float): Giới hạn Cache mới (%).
-        pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
-    """
-    _temperature_monitor_instance.set_cache_limit(new_cache_limit_percent, pid)
-
-def shutdown_temperature_monitoring():
-    """
-    Hàm để dừng giám sát nhiệt độ và giải phóng tài nguyên.
-    Được gọi khi hệ thống dừng lại.
-    """
-    _temperature_monitor_instance.shutdown()
+        Args:
+            new_cache_limit_percent (float): Giới hạn Cache mới (%).
+            pid (Optional[int]): PID của tiến trình (không được sử dụng hiện tại).
+        """
+        _temperature_monitor_instance.set_cache_limit(new_cache_limit_percent, pid)
