@@ -13,6 +13,7 @@ cryptography
 torch torchvision torchaudio
 torch
 pynvml
+readerwriterlock
 azure-identity
 azure-mgmt-resource
 azure-mgmt-monitor

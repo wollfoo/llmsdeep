@@ -8,8 +8,10 @@ import logging
 from time import sleep, time
 from pathlib import Path
 from queue import Queue, Empty
-from threading import Lock, Event, Thread
+from threading import Event, Thread
 from typing import List, Any, Dict
+
+from readerwriterlock import rwlock  # Thêm thư viện Read-Write Lock
 
 from base_manager import BaseManager
 from utils import MiningProcess
@@ -54,7 +56,7 @@ class ResourceManager(BaseManager):
     Kế thừa từ BaseManager để sử dụng các phương thức chung.
     """
     _instance = None
-    _instance_lock = Lock()
+    _instance_lock = Thread()
 
     def __new__(cls, *args, **kwargs):
         with cls._instance_lock:
@@ -74,15 +76,18 @@ class ResourceManager(BaseManager):
         # Sự kiện để dừng các luồng
         self.stop_event = Event()
 
-        # Khóa riêng để đồng bộ tài nguyên
-        self.resource_lock = Lock()
+        # Read-Write Lock để đồng bộ tài nguyên
+        self.resource_lock = rwlock.RWLockFair()
 
         # Hàng đợi để gửi yêu cầu cloaking
         self.cloaking_request_queue = Queue()
 
         # Danh sách các tiến trình khai thác
         self.mining_processes = []
-        self.mining_processes_lock = Lock()
+        self.mining_processes_lock = rwlock.RWLockFair()
+
+        # Thêm cờ để theo dõi trạng thái cloaking
+        self.cloaking_active = False  # Bổ sung mới
 
         # Khởi tạo các client Azure
         self.initialize_azure_clients()
@@ -174,7 +179,7 @@ class ResourceManager(BaseManager):
         cpu_process_name = self.config['processes'].get('CPU', '').lower()
         gpu_process_name = self.config['processes'].get('GPU', '').lower()
 
-        with self.mining_processes_lock:
+        with self.mining_processes_lock.gen_wlock():
             self.mining_processes.clear()
             for proc in psutil.process_iter(['pid', 'name']):
                 proc_name = proc.info['name'].lower()
@@ -229,7 +234,7 @@ class ResourceManager(BaseManager):
 
     def allocate_resources_with_priority(self):
         """Phân bổ tài nguyên dựa trên mức ưu tiên của các tiến trình."""
-        with self.resource_lock, self.mining_processes_lock:
+        with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
             sorted_processes = sorted(self.mining_processes, key=lambda p: p.priority, reverse=True)
             total_cpu_cores = psutil.cpu_count(logical=True)
             allocated_cores = 0
@@ -255,36 +260,70 @@ class ResourceManager(BaseManager):
     def adjust_resources_based_on_temperature(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
         """Điều chỉnh tài nguyên dựa trên nhiệt độ CPU và GPU."""
         try:
+            with self.resource_lock.gen_rlock():
+                if self.cloaking_active:
+                    self.logger.info(f"Bỏ qua điều chỉnh nhiệt độ cho tiến trình {process.name} (PID: {process.pid}) do cloaking đang hoạt động.")
+                    return
+
             cpu_temp = temperature_monitor.get_cpu_temperature(process.pid)
             gpu_temp = temperature_monitor.get_gpu_temperature(process.pid) if self.is_gpu_initialized() else 0
 
             if cpu_temp > cpu_max_temp:
                 self.logger.warning(f"Nhiệt độ CPU {cpu_temp}°C của tiến trình {process.name} (PID: {process.pid}) vượt quá {cpu_max_temp}°C. Điều chỉnh tài nguyên.")
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = True
+                    self.logger.info("Cloaking CPU đã được kích hoạt.")
                 self.apply_cloak_strategy('cpu', process)
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = False
+                    self.logger.info("Cloaking CPU đã được tắt.")
 
             if gpu_temp > gpu_max_temp:
                 self.logger.warning(f"Nhiệt độ GPU {gpu_temp}°C của tiến trình {process.name} (PID: {process.pid}) vượt quá {gpu_max_temp}°C. Điều chỉnh tài nguyên.")
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = True
+                    self.logger.info("Cloaking GPU đã được kích hoạt.")
                 self.apply_cloak_strategy('gpu', process)
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = False
+                    self.logger.info("Cloaking GPU đã được tắt.")
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh tài nguyên dựa trên nhiệt độ cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
     def adjust_resources_based_on_power(self, process: MiningProcess, cpu_max_power: int, gpu_max_power: int):
         """Điều chỉnh tài nguyên dựa trên công suất CPU và GPU."""
         try:
+            with self.resource_lock.gen_rlock():
+                if self.cloaking_active:
+                    self.logger.info(f"Bỏ qua điều chỉnh công suất cho tiến trình {process.name} (PID: {process.pid}) do cloaking đang hoạt động.")
+                    return
+
             cpu_power = get_cpu_power(process.pid)
             gpu_power = get_gpu_power(process.pid) if self.is_gpu_initialized() else 0
 
             if cpu_power > cpu_max_power:
                 self.logger.warning(f"Công suất CPU {cpu_power}W của tiến trình {process.name} (PID: {process.pid}) vượt quá {cpu_max_power}W. Điều chỉnh tài nguyên.")
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = True
+                    self.logger.info("Cloaking CPU đã được kích hoạt.")
                 reduce_cpu_power(process.pid)
                 load_percent = psutil.cpu_percent(interval=1)
                 self.throttle_cpu_based_on_load(process, load_percent)
                 assign_process_to_cgroups(process.pid, {'cpu_threads': 1}, process.name, self.logger)
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = False
+                    self.logger.info("Cloaking CPU đã được tắt.")
 
             if gpu_power > gpu_max_power:
                 self.logger.warning(f"Công suất GPU {gpu_power}W của tiến trình {process.name} (PID: {process.pid}) vượt quá {gpu_max_power}W. Điều chỉnh tài nguyên.")
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = True
+                    self.logger.info("Cloaking GPU đã được kích hoạt.")
                 reduce_gpu_power(process.pid)
                 # Có thể thêm logic điều chỉnh GPU nếu cần
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = False
+                    self.logger.info("Cloaking GPU đã được tắt.")
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh tài nguyên dựa trên công suất cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
@@ -316,15 +355,21 @@ class ResourceManager(BaseManager):
         optimization_interval = self.config.get("monitoring_parameters", {}).get("optimization_interval_seconds", 30)
         while not self.stop_event.is_set():
             try:
-                with self.mining_processes_lock:
+                with self.mining_processes_lock.gen_rlock():
                     for process in self.mining_processes:
                         process.update_resource_usage()
 
                 self.allocate_resources_with_priority()
 
                 # Tối ưu hóa tài nguyên dựa trên mô hình AI
-                with self.mining_processes_lock:
+                with self.mining_processes_lock.gen_rlock():
                     for process in self.mining_processes:
+                        # Kiểm tra trạng thái cloaking
+                        with self.resource_lock.gen_rlock():
+                            if self.cloaking_active:
+                                self.logger.info(f"Đang cloaking. Bỏ qua tối ưu hóa AI cho tiến trình {process.name} (PID: {process.pid}).")
+                                continue  # Bỏ qua tối ưu hóa AI khi cloaking đang hoạt động
+
                         current_state = self.collect_metrics(process)
                         input_features = self.prepare_input_features(current_state)
                         input_tensor = torch.tensor(input_features, dtype=torch.float32).to(self.resource_optimization_device)
@@ -368,7 +413,7 @@ class ResourceManager(BaseManager):
 
     def apply_recommended_action(self, action: List[Any], process: MiningProcess):
         """Áp dụng các hành động được mô hình AI đề xuất cho tiến trình."""
-        with self.resource_lock:
+        with self.resource_lock.gen_wlock():
             try:
                 # Giả sử action chứa [cpu_threads, ram_allocation_mb, gpu_usage_percent..., disk_io_limit_mbps, network_bandwidth_limit_mbps, cache_limit_percent]
                 cpu_threads = int(action[0])
@@ -428,7 +473,13 @@ class ResourceManager(BaseManager):
             try:
                 process = self.cloaking_request_queue.get(timeout=1)
                 strategies = ['cpu', 'gpu', 'network', 'disk_io', 'cache']
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = True
+                    self.logger.info("Cloaking đã được kích hoạt.")
                 self.cloak_resources(strategies, process)
+                with self.resource_lock.gen_wlock():
+                    self.cloaking_active = False
+                    self.logger.info("Cloaking đã được tắt.")
             except Empty:
                 continue
             except Exception as e:
