@@ -27,8 +27,8 @@ from azure_clients import (
     AzureTrafficAnalyticsClient,
     AzureMLClient
 )
-from auxiliary_modules.cgroup_manager import assign_process_to_cgroups
 
+from auxiliary_modules.cgroup_manager import assign_process_to_cgroups
 
 from auxiliary_modules import temperature_monitor
 
