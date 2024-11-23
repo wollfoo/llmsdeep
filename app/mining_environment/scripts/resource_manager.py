@@ -477,12 +477,9 @@ class ResourceManager(BaseManager):
                     self.apply_cloak_strategy('cpu', process)
                 if adjustments.get('gpu_cloak'):
                     self.apply_cloak_strategy('gpu', process)
-                if adjustments.get('gpu_cloak'):
-                    self.apply_cloak_strategy('gpu', process)
                 if adjustments.get('throttle_cpu'):
                     load_percent = psutil.cpu_percent(interval=1)
                     self.throttle_cpu_based_on_load(process, load_percent)
-                if adjustments.get('gpu_cloak'):
                     # Có thể thêm logic điều chỉnh GPU nếu cần
                     pass
                 self.logger.info(f"Áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}).")
