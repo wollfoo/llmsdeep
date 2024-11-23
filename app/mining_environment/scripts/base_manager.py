@@ -1,6 +1,6 @@
 # base_manager.py
 
-import torch
+
 from pathlib import Path
 import logging
 from typing import Dict, Any, Tuple
