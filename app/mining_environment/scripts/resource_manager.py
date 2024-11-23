@@ -17,6 +17,7 @@ from readerwriterlock import rwlock  # Read-Write Lock
 from base_manager import BaseManager
 from utils import MiningProcess
 from cloak_strategies import CloakStrategyFactory
+
 from azure_clients import (
     AzureMonitorClient,
     AzureSentinelClient,
@@ -27,7 +28,9 @@ from azure_clients import (
     AzureMLClient
 )
 from auxiliary_modules.cgroup_manager import assign_process_to_cgroups
-import temperature_monitor
+
+
+from auxiliary_modules import temperature_monitor
 
 from auxiliary_modules.power_management import (
     get_cpu_power,
