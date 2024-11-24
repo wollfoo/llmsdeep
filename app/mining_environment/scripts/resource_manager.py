@@ -39,14 +39,6 @@ from auxiliary_modules.power_management import (
     shutdown_power_management
 )
 
-from logging_config import setup_logging  # Giả sử có tệp logging_config.py
-
-# Định nghĩa thư mục cấu hình
-CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
-LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
-
-# Thiết lập logger cho ResourceManager
-resource_logger = setup_logging('resource_manager', LOGS_DIR / 'resource_manager.log', 'INFO')
 
 # ----------------------------
 # SharedResourceManager Class
@@ -407,6 +399,11 @@ class ResourceManager(BaseManager):
         if hasattr(self, '_initialized') and self._initialized:
             return
         self._initialized = True
+        
+        # Cấu hình
+        self.config = config
+        self.model_path = model_path
+        self.logger = logger
 
         # Tải mô hình AI riêng cho tối ưu hóa tài nguyên
         self.resource_optimization_model, self.resource_optimization_device = self.load_model(model_path)

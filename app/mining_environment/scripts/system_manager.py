@@ -22,6 +22,7 @@ ANOMALY_CLOAKING_MODEL_PATH = MODELS_DIR / "anomaly_cloaking_model.pt"
 # Setup loggers
 system_logger = setup_logging('system_manager', LOGS_DIR / 'system_manager.log', 'INFO')
 resource_logger = setup_logging('resource_manager', LOGS_DIR / 'resource_manager.log', 'INFO')
+anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.log', 'INFO')
 
 
 class SystemManager:
@@ -33,7 +34,7 @@ class SystemManager:
         self.config = config
         self.system_logger = system_logger
         self.resource_manager = ResourceManager(config, RESOURCE_OPTIMIZATION_MODEL_PATH, resource_logger)
-        self.anomaly_detector = AnomalyDetector(config, ANOMALY_CLOAKING_MODEL_PATH, resource_logger)
+        self.anomaly_detector = AnomalyDetector(config, ANOMALY_CLOAKING_MODEL_PATH, anomaly_detector)
         
         # Gán ResourceManager cho AnomalyDetector
         self.anomaly_detector.set_resource_manager(self.resource_manager)

@@ -188,6 +188,11 @@ class AnomalyDetector(BaseManager):
             return
         self._initialized = True
 
+        # # Cấu hình
+        self.logger = logger
+        self.config = config
+        self.model_path = model_path
+
         # Tải mô hình AI riêng cho Anomaly Detection
         self.anomaly_cloaking_model, self.anomaly_cloaking_device = self.load_model(model_path)
 
