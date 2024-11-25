@@ -1,17 +1,6 @@
-# .github/workflows/ci.yml
-
-name: CI
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     strategy:
       matrix:
@@ -30,15 +19,15 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/app/requirements.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/app/requirements.txt', '**/test/requirements.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
     - name: Install dependencies
       run: |
         pip install --upgrade pip
-        pip install -r llmsdeep/app/requirements.txt
-        pip install -r llmsdeep/test/requirements.txt
+        pip install -r app/requirements.txt
+        pip install -r test/requirements.txt
         pip install pytest pytest-cov flake8 pylint bandit
 
     - name: Lint with flake8
