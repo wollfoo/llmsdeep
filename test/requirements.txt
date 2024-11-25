@@ -18,12 +18,11 @@ readerwriterlock
 azure-identity
 azure-mgmt-resource
 azure-mgmt-monitor
-azure-sentinel
 azure-loganalytics
 azure-mgmt-security
 azure-mgmt-network
-azure-mgmt-trafficanalytics
-azure-resourcegraph
+
+
 
 # Testing dependencies
 pytest
