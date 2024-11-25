@@ -1,4 +1,3 @@
-tensorflow-cpu
 GPUtil
 scikit-learn
 flask
@@ -10,3 +9,18 @@ psutil
 tensorflow
 joblib
 numpy
+cryptography
+torch
+torchvision
+torchaudio
+pynvml
+readerwriterlock
+
+azure-identity
+azure-monitor-query
+azure-mgmt-resource
+azure-loganalytics
+azure-mgmt-security
+azure-mgmt-network
+azure-mgmt-resourcegraph
+azure-mgmt-machinelearningservices
