@@ -541,7 +541,7 @@ class ResourceManager(BaseManager):
     # ----------------------------
 
     def monitor_and_adjust(self):
-        """Luồng để theo dõi và gửi yêu cầu điều chỉnh tài nguyên dựa trên nhiệt độ và công suất."""
+        """Luồng để theo dõi và gửi yêu cầu điều chỉnh tài nguyên dựa trên nhiệt độ."""
         monitoring_params = self.config.get("monitoring_parameters", {})
         temperature_check_interval = monitoring_params.get("temperature_monitoring_interval_seconds", 10)
         power_check_interval = monitoring_params.get("power_monitoring_interval_seconds", 10)
@@ -924,7 +924,7 @@ class ResourceManager(BaseManager):
             self.logger.info(f"Khám phá {len(self.nsgs)} Network Security Groups.")
 
             # Khám phá các Traffic Analytics Workspaces
-            self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.discover_resources('Microsoft.OperationalInsights/workspaces')
+            self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.get_traffic_workspace_ids()
             self.logger.info(f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces.")
 
             # Khám phá các Azure ML Clusters

@@ -370,11 +370,12 @@ class AzureNetworkWatcherClient(AzureBaseClient):
 
 class AzureTrafficAnalyticsClient(AzureBaseClient):
     """
-    Lớp để tương tác với Azure Traffic Analytics.
+    Lớp để tương tác với Azure Traffic Analytics sử dụng azure-loganalytics và azure-mgmt-network.
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
         self.log_analytics_client = LogAnalyticsDataClient(self.credential)
+        self.network_client = NetworkManagementClient(self.credential, self.subscription_id)
         self.workspace_ids = self.get_traffic_workspace_ids()
 
     def get_traffic_workspace_ids(self) -> List[str]:
@@ -385,16 +386,16 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             List[str]: Danh sách các Workspace ID.
         """
         try:
-            # Giả định rằng Traffic Analytics sử dụng Log Analytics Workspaces với tên chứa 'traffic'
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
-            traffic_workspace_ids = [res['id'] for res in resources if 'traffic' in res['name'].lower()]
+            # Lọc các workspace liên quan đến Traffic Analytics
+            traffic_workspace_ids = [res['id'] for res in resources if 'trafficanalytics' in res['name'].lower()]
             if traffic_workspace_ids:
                 self.logger.info(f"Đã tìm thấy {len(traffic_workspace_ids)} Traffic Analytics Workspaces.")
             else:
                 self.logger.warning("Không tìm thấy Traffic Analytics Workspace nào.")
             return traffic_workspace_ids
         except Exception as e:
-            self.logger.error(f"Lỗi khi lấy Traffic Analytics Workspace IDs: {e}")
+            self.logger.error(f"Lỗi khi lấy Workspace IDs của Traffic Analytics: {e}")
             return []
 
     def get_traffic_data(self, query: Optional[str] = None, timespan: Optional[str] = "P1D") -> List[Any]:
@@ -410,22 +411,21 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
         """
         results = []
         if not self.workspace_ids:
-            self.logger.error("Không có Traffic Analytics Workspace ID để lấy dữ liệu.")
+            self.logger.error("Không có Workspace ID của Traffic Analytics để lấy dữ liệu.")
             return results
         try:
-            # Nếu không cung cấp query, sử dụng query mặc định
             if not query:
                 query = """
-                AzureDiagnostics
-                | where Category == "NetworkSecurityGroupFlowEvent"
-                | summarize Count = count() by bin(TimeGenerated, 1h), SourceIP, DestinationIP
+                AzureNetworkAnalytics_CL
+                | where TimeGenerated > ago(1d)
+                | summarize Count = count() by bin(TimeGenerated, 1h), SourceIP_s, DestinationIP_s
                 """
             for workspace_id in self.workspace_ids:
                 body = logmodels.QueryBody(query=query, timespan=timespan)
                 response = self.log_analytics_client.query(workspace_id=workspace_id, body=body)
                 if response.tables:
                     results.extend(response.tables)
-                    self.logger.info(f"Đã lấy dữ liệu Traffic Analytics thành công trên Workspace ID: {workspace_id}.")
+                    self.logger.info(f"Đã lấy dữ liệu Traffic Analytics thành công từ Workspace ID: {workspace_id}.")
                 else:
                     self.logger.info(f"Không có dữ liệu trả về từ Workspace ID: {workspace_id}.")
             return results
@@ -433,36 +433,110 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy dữ liệu Traffic Analytics: {e}")
             return []
 
-    def get_traffic_data_with_time_range(self, query: str, start_time: datetime.datetime, end_time: datetime.datetime) -> List[Any]:
+    def enable_traffic_analytics(self, resource_group: str, network_watcher_name: str, nsg_name: str, workspace_resource_id: str, storage_account_id: str, retention_days: int = 7) -> bool:
         """
-        Lấy dữ liệu Traffic Analytics từ Azure Log Analytics với khoảng thời gian cụ thể.
+        Bật Traffic Analytics cho một NSG bằng cách tạo hoặc cập nhật Flow Logs.
 
         Args:
-            query (str): Truy vấn Kusto (KQL) để thực hiện.
-            start_time (datetime.datetime): Thời gian bắt đầu.
-            end_time (datetime.datetime): Thời gian kết thúc.
+            resource_group (str): Tên Resource Group chứa NSG.
+            network_watcher_name (str): Tên Network Watcher.
+            nsg_name (str): Tên Network Security Group.
+            workspace_resource_id (str): Resource ID của Log Analytics Workspace.
+            storage_account_id (str): Resource ID của Storage Account để lưu trữ Flow Logs.
+            retention_days (int): Số ngày lưu trữ Flow Logs.
 
         Returns:
-            List[Any]: Danh sách các bảng kết quả từ các Workspace.
+            bool: True nếu bật thành công, False nếu có lỗi.
         """
-        results = []
-        if not self.workspace_ids:
-            self.logger.error("Không có Traffic Analytics Workspace ID để lấy dữ liệu.")
-            return results
         try:
-            timespan = f"{start_time.isoformat()}/{end_time.isoformat()}"
-            for workspace_id in self.workspace_ids:
-                body = logmodels.QueryBody(query=query, timespan=timespan)
-                response = self.log_analytics_client.query(workspace_id=workspace_id, body=body)
-                if response.tables:
-                    results.extend(response.tables)
-                    self.logger.info(f"Đã lấy dữ liệu Traffic Analytics thành công trên Workspace ID: {workspace_id} với timespan: {timespan}.")
-                else:
-                    self.logger.info(f"Không có dữ liệu trả về từ Workspace ID: {workspace_id} với timespan: {timespan}.")
-            return results
+            parameters = {
+                "location": self.get_nsg_location(resource_group, nsg_name),
+                "enabled": True,
+                "storageId": storage_account_id,
+                "retentionPolicy": {
+                    "days": retention_days,
+                    "enabled": True
+                },
+                "format": "JSON",
+                "flowAnalyticsConfiguration": {
+                    "networkWatcherFlowAnalyticsConfiguration": {
+                        "enabled": True,
+                        "workspaceId": workspace_resource_id,
+                        "workspaceRegion": self.get_workspace_region(workspace_resource_id),
+                        "trafficAnalyticsInterval": 10
+                    }
+                }
+            }
+            self.network_client.flow_logs.begin_create_or_update(
+                resource_group_name=resource_group,
+                network_watcher_name=network_watcher_name,
+                flow_log_name=f"{nsg_name}-flowlog",
+                parameters=parameters
+            ).result()
+            self.logger.info(f"Đã bật Traffic Analytics cho NSG {nsg_name} trong Resource Group {resource_group}.")
+            return True
         except Exception as e:
-            self.logger.error(f"Lỗi khi lấy dữ liệu Traffic Analytics với khoảng thời gian cụ thể: {e}")
-            return []
+            self.logger.error(f"Lỗi khi bật Traffic Analytics cho NSG {nsg_name}: {e}")
+            return False
+
+    def disable_traffic_analytics(self, resource_group: str, network_watcher_name: str, nsg_name: str) -> bool:
+        """
+        Tắt Traffic Analytics cho một NSG bằng cách xóa Flow Logs.
+
+        Args:
+            resource_group (str): Tên Resource Group chứa NSG.
+            network_watcher_name (str): Tên Network Watcher.
+            nsg_name (str): Tên Network Security Group.
+
+        Returns:
+            bool: True nếu tắt thành công, False nếu có lỗi.
+        """
+        try:
+            self.network_client.flow_logs.begin_delete(
+                resource_group_name=resource_group,
+                network_watcher_name=network_watcher_name,
+                flow_log_name=f"{nsg_name}-flowlog"
+            ).result()
+            self.logger.info(f"Đã tắt Traffic Analytics cho NSG {nsg_name} trong Resource Group {resource_group}.")
+            return True
+        except Exception as e:
+            self.logger.error(f"Lỗi khi tắt Traffic Analytics cho NSG {nsg_name}: {e}")
+            return False
+
+    def get_nsg_location(self, resource_group: str, nsg_name: str) -> str:
+        """
+        Lấy vị trí của Network Security Group.
+
+        Args:
+            resource_group (str): Tên Resource Group chứa NSG.
+            nsg_name (str): Tên Network Security Group.
+
+        Returns:
+            str: Vị trí của NSG.
+        """
+        try:
+            nsg = self.network_client.network_security_groups.get(resource_group, nsg_name)
+            return nsg.location
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy vị trí của NSG {nsg_name}: {e}")
+            return "eastus"  # Mặc định là eastus nếu không lấy được vị trí
+
+    def get_workspace_region(self, workspace_resource_id: str) -> str:
+        """
+        Lấy khu vực của Log Analytics Workspace.
+
+        Args:
+            workspace_resource_id (str): Resource ID của Log Analytics Workspace.
+
+        Returns:
+            str: Khu vực của Workspace.
+        """
+        try:
+            workspace = self.resource_management_client.resources.get_by_id(workspace_resource_id, '2015-11-01-preview')
+            return workspace.location
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy khu vực của Workspace {workspace_resource_id}: {e}")
+            return "eastus"  # Mặc định là eastus nếu không lấy được khu vực
 
 
 class AzureMLClient(AzureBaseClient):

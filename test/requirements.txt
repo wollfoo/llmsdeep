@@ -17,10 +17,13 @@ pynvml
 readerwriterlock
 azure-identity
 azure-mgmt-resource
-azure-mgmt-monitor
 azure-loganalytics
 azure-mgmt-security
 azure-mgmt-network
+azure-monitor-query
+azure-mgmt-resourcegraph
+azure-mgmt-machinelearningservices
+azure-mgmt-trafficanalytics
 
 
 
