@@ -16,14 +16,13 @@ torchaudio
 pynvml
 readerwriterlock
 azure-identity
+azure-monitor-query
 azure-mgmt-resource
 azure-loganalytics
 azure-mgmt-security
 azure-mgmt-network
-azure-monitor-query
 azure-mgmt-resourcegraph
 azure-mgmt-machinelearningservices
-azure-mgmt-trafficanalytics
 
 
 
