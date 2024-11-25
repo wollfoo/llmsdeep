@@ -3,14 +3,14 @@ name: Python CI
 on:
   push:
     branches:
-      - main  # Chạy kiểm thử khi có thay đổi trên nhánh main
+      - main
   pull_request:
     branches:
-      - main  # Chạy kiểm thử khi có pull request vào nhánh main
+      - main
 
 jobs:
   test:
-    runs-on: ubuntu-latest  # Chạy trên môi trường Ubuntu mới nhất
+    runs-on: ubuntu-latest
 
     steps:
     # Lấy mã nguồn từ repo
@@ -19,17 +19,17 @@ jobs:
 
     # Thiết lập môi trường Python
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v3
       with:
-        python-version: '3.8'  # Bạn có thể thay đổi phiên bản Python nếu cần
+        python-version: 3.9  # Thay đổi phiên bản Python nếu cần
 
-    # Cài đặt các dependencies
+    # Cài đặt các phụ thuộc
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt  # Cài các thư viện từ requirements.txt
+        pip install -r app/requirements.txt  # Đường dẫn đến requirements.txt trong thư mục app
 
-    # Chạy kiểm thử với pytest (hoặc unittest)
+    # Chạy kiểm thử
     - name: Run tests
       run: |
-        pytest tests  # Thư mục tests chứa các bài kiểm thử của bạn
+        pytest app/tests  # Đường dẫn đến thư mục kiểm thử trong thư mục app
