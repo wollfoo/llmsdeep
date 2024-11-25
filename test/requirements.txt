@@ -10,7 +10,9 @@ tensorflow
 joblib
 numpy
 cryptography
-torch torchvision torchaudio
+torch
+torchvision
+torchaudio
 pynvml
 readerwriterlock
 azure-identity
