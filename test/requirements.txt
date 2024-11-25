@@ -26,7 +26,7 @@ azure-mgmt-machinelearningservices
 
 
 
-# Testing dependencies
+
 pytest
 pytest-cov
 mock
