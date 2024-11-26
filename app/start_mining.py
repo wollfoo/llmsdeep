@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*
-
 """
 start_mining.py
 
@@ -20,19 +17,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent / "mining_environment" / "scripts"
 sys.path.append(str(SCRIPT_DIR))
 
-# Import các module Lớp 1: Môi Trường Khai Thác và tối ưu tài nguyên
+# Import các module
 import setup_env
 import system_manager
-
-
-# Import các module Lớp 2 đến lớp 9
-# Giả sử bạn có các module như layer2, layer3, ..., layer9
-# import layer2
-# import layer3
-# ...
-# import layer9
-
-# Import cấu hình logging từ logging_config.py
 from logging_config import setup_logging
 
 # Thiết lập đường dẫn tới thư mục logs
@@ -48,6 +35,7 @@ stop_event = threading.Event()
 # Định nghĩa sự kiện để đồng bộ giữa các phần của script
 mining_started_event = threading.Event()
 
+
 def signal_handler(signum, frame):
     """
     Xử lý tín hiệu dừng (SIGINT, SIGTERM).
@@ -56,12 +44,11 @@ def signal_handler(signum, frame):
     logger.info(f"Nhận tín hiệu dừng ({signum}). Đang dừng hệ thống khai thác...")
     stop_event.set()
 
+
 # Đăng ký xử lý tín hiệu ngay sau khi định nghĩa hàm xử lý
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-
-# Thiết Lập Lớp 1: Môi Trường Khai Thác và tối ưu tài nguyên
 
 def initialize_environment():
     """
@@ -75,17 +62,19 @@ def initialize_environment():
         logger.error(f"Lỗi khi thiết lập môi trường: {e}")
         sys.exit(1)
 
+
 def start_system_manager():
     """
-    Khởi động quản lý tài nguyên bằng cách gọi resource_manager.py.
+    Khởi động quản lý tài nguyên bằng cách gọi system_manager.py.
     """
     logger.info("Khởi động Resource Manager.")
     try:
-        system_manager.start()  # Gọi hàm start() trong system_manager.py
+        system_manager.start()
         logger.info("Resource Manager đã được khởi động.")
     except Exception as e:
         logger.error(f"Lỗi khi khởi động Resource Manager: {e}")
         stop_event.set()
+
 
 def is_mining_process_running(mining_process):
     """
@@ -98,6 +87,7 @@ def is_mining_process_running(mining_process):
         bool: True nếu đang chạy, False nếu không.
     """
     return mining_process and mining_process.poll() is None
+
 
 def start_mining_process(retries=3, delay=5):
     """
@@ -115,36 +105,36 @@ def start_mining_process(retries=3, delay=5):
         os.getenv('CONFIG_DIR', '/app/mining_environment/config'),
         os.getenv('MINING_CONFIG', 'mlinference_config.json')
     )
-    
+
     for attempt in range(1, retries + 1):
         logger.info(f"Thử khởi chạy quá trình khai thác (Cố gắng {attempt}/{retries})...")
         try:
             mining_process = subprocess.Popen([mining_command, '--config', mining_config])
             logger.info(f"Quá trình khai thác đã được khởi động với PID: {mining_process.pid}")
-            
+
             # Kiểm tra xem quá trình có đang chạy không
             time.sleep(2)  # Chờ một thời gian ngắn để tiến trình khởi chạy
             if mining_process.poll() is not None:
-                # Nếu poll() không phải None, quá trình đã kết thúc
-                logger.error(f"Quá trình khai thác đã kết thúc ngay sau khi khởi động với mã trả về: {mining_process.returncode}")
+                logger.error(
+                    f"Quá trình khai thác đã kết thúc ngay sau khi khởi động với mã trả về: {mining_process.returncode}"
+                )
                 mining_process = None
             else:
                 logger.info("Quá trình khai thác đang chạy.")
-                mining_started_event.set()  # Đánh dấu sự kiện khai thác đã bắt đầu
+                mining_started_event.set()
                 return mining_process
         except Exception as e:
             logger.error(f"Lỗi khi khởi động quá trình khai thác: {e}")
             mining_process = None
-        
+
         if attempt < retries:
             logger.info(f"Đang đợi {delay} giây trước khi thử lại...")
             time.sleep(delay)
-    
+
     logger.error("Tất cả các cố gắng khởi chạy quá trình khai thác đã thất bại.")
     stop_event.set()
     return None
 
-# Thiết Lập Các hàm chức năng từ các lớp khác (Lớp 2 đến Lớp 9)
 
 def main():
     """
@@ -154,7 +144,7 @@ def main():
 
     # Bước 1: Thiết lập môi trường
     initialize_environment()
-    
+
     # Bước 2: Bắt đầu khai thác trong thread chính với cơ chế thử lại
     mining_process = start_mining_process(retries=3, delay=5)
 
@@ -162,13 +152,11 @@ def main():
     if not is_mining_process_running(mining_process):
         logger.error("Quá trình khai thác không khởi động thành công sau nhiều cố gắng. Dừng hệ thống khai thác.")
         sys.exit(1)
-    
+
     # Bước 3: Khởi động Resource Manager trong thread riêng
     resource_thread = threading.Thread(target=start_system_manager, daemon=True)
     resource_thread.start()
-    
-    # Bước 4: Khởi chạy các hàm chức năng từ các lớp khác (Lớp 2 đến Lớp 9)
-    
+
     # Chờ tín hiệu dừng
     try:
         while not stop_event.is_set():
@@ -181,9 +169,9 @@ def main():
     except KeyboardInterrupt:
         logger.info("Đã nhận tín hiệu KeyboardInterrupt. Đang dừng hệ thống khai thác...")
         stop_event.set()
-    
+
     logger.info("Đang dừng các thành phần khai thác...")
-    
+
     # Dừng quá trình khai thác nếu vẫn đang chạy
     try:
         if mining_process and mining_process.poll() is None:
@@ -192,8 +180,8 @@ def main():
             logger.info("Quá trình khai thác đã được dừng.")
     except Exception as e:
         logger.error(f"Lỗi khi dừng quá trình khai thác: {e}")
-    
-    # Dừng Resource Manager
+
+    # Dừng System Manager
     try:
         system_manager.stop()
         logger.info("Đã dừng tất cả các quản lý tài nguyên.")
@@ -201,6 +189,7 @@ def main():
         logger.error(f"Lỗi khi dừng các quản lý tài nguyên: {e}")
 
     logger.info("===== Hoạt động khai thác tiền điện tử đã dừng thành công =====")
+
 
 if __name__ == "__main__":
     main()
