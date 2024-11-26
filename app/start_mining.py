@@ -15,12 +15,21 @@ from pathlib import Path
 
 # Thêm đường dẫn tới các module trong mining_environment/scripts
 SCRIPT_DIR = Path(__file__).resolve().parent / "mining_environment" / "scripts"
-sys.path.append(str(SCRIPT_DIR))
+sys.path.append(str(SCRIPT_DIR))  # noqa: E402
 
-# Import các module
-import setup_env
-import system_manager
-from logging_config import setup_logging
+# Import các module Lớp 1: Môi Trường Khai Thác và tối ưu tài nguyên
+import setup_env  # noqa: E402
+import system_manager  # noqa: E402
+
+# Import các module Lớp 2 đến lớp 9
+# Giả sử bạn có các module như layer2, layer3, ..., layer9
+# import layer2  # noqa: E402
+# import layer3  # noqa: E402
+# ...
+# import layer9  # noqa: E402
+
+# Import cấu hình logging từ logging_config.py
+from logging_config import setup_logging  # noqa: E402
 
 # Thiết lập đường dẫn tới thư mục logs
 LOGS_DIR = os.getenv('LOGS_DIR', '/app/mining_environment/logs')
@@ -128,11 +137,10 @@ def start_mining_process(retries=3, delay=5):
             )
 
             # Kiểm tra xem quá trình có đang chạy không
-            time.sleep(2)
+            time.sleep(2)  # Chờ một thời gian ngắn để tiến trình khởi chạy
             if mining_process.poll() is not None:
                 logger.error(
-                    "Quá trình khai thác đã kết thúc ngay sau khi khởi động "
-                    f"với mã trả về: {mining_process.returncode}"
+                    f"Quá trình khai thác đã kết thúc ngay sau khi khởi động với mã trả về: {mining_process.returncode}"
                 )
                 mining_process = None
             else:
