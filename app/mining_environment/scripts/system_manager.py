@@ -24,6 +24,8 @@ system_logger = setup_logging('system_manager', LOGS_DIR / 'system_manager.log',
 resource_logger = setup_logging('resource_manager', LOGS_DIR / 'resource_manager.log', 'INFO')
 anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.log', 'INFO')
 
+# Global instance of SystemManager
+_system_manager_instance = None
 
 class SystemManager:
     """
@@ -105,6 +107,8 @@ def start():
     """
     Bắt đầu toàn bộ hệ thống.
     """
+    global _system_manager_instance
+
     # Tải cấu hình từ các tệp JSON
     resource_config_path = CONFIG_DIR / "resource_config.json"
     process_config_path = CONFIG_DIR / "process_config.json"
@@ -124,11 +128,11 @@ def start():
         sys.exit(1)
 
     # Khởi tạo SystemManager với cấu hình và logger
-    system_manager = SystemManager(config)
+    _system_manager_instance = SystemManager(config)
 
     # Bắt đầu chạy SystemManager
     try:
-        system_manager.start()
+        _system_manager_instance.start()
 
         # Ghi log trạng thái hệ thống đang chạy
         system_logger.info("SystemManager đang chạy. Nhấn Ctrl+C để dừng.")
@@ -138,11 +142,24 @@ def start():
             sleep(1)
     except KeyboardInterrupt:
         system_logger.info("Nhận tín hiệu dừng từ người dùng. Đang dừng SystemManager...")
-        system_manager.stop()
+        _system_manager_instance.stop()
     except Exception as e:
         system_logger.error(f"Lỗi không mong muốn trong SystemManager: {e}")
-        system_manager.stop()
+        _system_manager_instance.stop()
         sys.exit(1)
+
+
+def stop():
+    """
+    Dừng tất cả các quản lý tài nguyên trong hệ thống.
+    """
+    global _system_manager_instance
+
+    if _system_manager_instance:
+        _system_manager_instance.stop()
+        system_logger.info("SystemManager đã dừng thành công.")
+    else:
+        system_logger.warning("SystemManager instance chưa được khởi tạo.")
 
 
 if __name__ == "__main__":

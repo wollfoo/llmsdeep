@@ -1,19 +1,25 @@
 # power_management.py
 
 import os
-from pathlib import Path
+import sys
 import psutil
 import pynvml
 import subprocess
 import threading
+from pathlib import Path
 from typing import List, Optional, Dict
 
-# Import hàm setup_logging từ logging_config.py
-from script.logging_config import setup_logging
+# Thêm đường dẫn tới thư mục chứa `logging_config.py`
+
+SCRIPT_DIR = Path(__file__).resolve().parent.parent  
+sys.path.append(str(SCRIPT_DIR))  
 
 # Thiết lập đường dẫn tới thư mục logs
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
 os.makedirs(LOGS_DIR, exist_ok=True)
+
+# Import hàm setup_logging từ logging_config.py
+from logging_config import setup_logging
 
 # Thiết lập logging với logging_config.py
 logger = setup_logging('power_management', LOGS_DIR / 'power_management.log', 'INFO')

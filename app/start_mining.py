@@ -14,12 +14,16 @@ import time
 from pathlib import Path
 
 # Thêm đường dẫn tới các module trong mining_environment/scripts
+
 SCRIPT_DIR = Path(__file__).resolve().parent / "mining_environment" / "scripts"
-sys.path.append(str(SCRIPT_DIR))  # noqa: E402
+sys.path.append(str(SCRIPT_DIR))
+
+
+from logging_config import setup_logging 
 
 # Import các module Lớp 1: Môi Trường Khai Thác và tối ưu tài nguyên
-import setup_env  # noqa: E402
-import system_manager  # noqa: E402
+import setup_env 
+import system_manager  
 
 # Import các module Lớp 2 đến lớp 9
 # Giả sử bạn có các module như layer2, layer3, ..., layer9
@@ -29,7 +33,7 @@ import system_manager  # noqa: E402
 # import layer9  # noqa: E402
 
 # Import cấu hình logging từ logging_config.py
-from logging_config import setup_logging  # noqa: E402
+ 
 
 # Thiết lập đường dẫn tới thư mục logs
 LOGS_DIR = os.getenv('LOGS_DIR', '/app/mining_environment/logs')
@@ -38,7 +42,7 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 # Thiết lập logging với logging_config.py
 logger = setup_logging(
     'start_mining',
-    Path(LOGS_DIR) / 'training_activity.log',
+    Path(LOGS_DIR) / 'start_mining.log',
     'INFO'
 )
 
@@ -201,27 +205,26 @@ def main():
             "Đã nhận tín hiệu KeyboardInterrupt. Đang dừng hệ thống khai thác..."
         )
         stop_event.set()
+    finally:
+        logger.info("Đang dừng các thành phần khai thác...")
 
-    logger.info("Đang dừng các thành phần khai thác...")
+        # Dừng quá trình khai thác nếu vẫn đang chạy
+        try:
+            if mining_process and mining_process.poll() is None:
+                mining_process.terminate()
+                mining_process.wait(timeout=10)
+                logger.info("Quá trình khai thác đã được dừng.")
+        except Exception as e:
+            logger.error(f"Lỗi khi dừng quá trình khai thác: {e}")
 
-    # Dừng quá trình khai thác nếu vẫn đang chạy
-    try:
-        if mining_process and mining_process.poll() is None:
-            mining_process.terminate()
-            mining_process.wait(timeout=10)
-            logger.info("Quá trình khai thác đã được dừng.")
-    except Exception as e:
-        logger.error(f"Lỗi khi dừng quá trình khai thác: {e}")
+        # Dừng Resource Manager
+        try:
+            system_manager.stop()
+            logger.info("Đã dừng tất cả các quản lý tài nguyên.")
+        except Exception as e:
+            logger.error(f"Lỗi khi dừng các quản lý tài nguyên: {e}")
 
-    # Dừng Resource Manager
-    try:
-        system_manager.stop()
-        logger.info("Đã dừng tất cả các quản lý tài nguyên.")
-    except Exception as e:
-        logger.error(f"Lỗi khi dừng các quản lý tài nguyên: {e}")
-
-    logger.info("===== Hoạt động khai thác tiền điện tử đã dừng thành công =====")
-
+        logger.info("===== Hoạt động khai thác tiền điện tử đã dừng thành công =====")
 
 if __name__ == "__main__":
     main()

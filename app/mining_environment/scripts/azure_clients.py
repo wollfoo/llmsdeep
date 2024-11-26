@@ -6,14 +6,15 @@ from typing import List, Dict, Any, Optional
 import datetime
 import time
 
-from azure.monitor.query import MonitorClient, MetricAggregationType, MetricQueryResult
-from azure.mgmt.security import SecurityCenterClient
+
+from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+from azure.mgmt.security import SecurityCenter
 from azure.loganalytics import LogAnalyticsDataClient, models as logmodels
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
 from azure.identity import ClientSecretCredential
-from azure.resourcegraph import ResourceGraphClient
-from azure.mgmt.machinelearningservices import MachineLearningServicesClient  # Added for AzureMLClient
+from azure.mgmt.resourcegraph import ResourceGraphClient
+from azure.mgmt.machinelearningservices import MachineLearningServicesMgmtClient
 
 
 class AzureBaseClient:
@@ -83,19 +84,6 @@ class AzureMonitorClient(AzureBaseClient):
         interval: Optional[str] = 'PT1M',
         aggregations: Optional[List[MetricAggregationType]] = None
     ) -> Dict[str, List[float]]:
-        """
-        Lấy các chỉ số (metrics) của tài nguyên từ Azure Monitor.
-
-        Args:
-            resource_id (str): ID của tài nguyên cần lấy metrics.
-            metric_names (List[str]): Danh sách tên các metrics cần lấy.
-            timespan (Optional[str]): Khoảng thời gian để lấy metrics (ISO 8601 duration).
-            interval (Optional[str]): Khoảng thời gian giữa các điểm dữ liệu metrics (ISO 8601 duration).
-            aggregations (Optional[List[MetricAggregationType]]): Các loại aggregation để áp dụng.
-
-        Returns:
-            Dict[str, List[float]]: Dictionary chứa các metrics và giá trị tương ứng.
-        """
         if not resource_id or not metric_names:
             self.logger.error("resource_id và metric_names không được để trống.")
             return {}
@@ -112,28 +100,15 @@ class AzureMonitorClient(AzureBaseClient):
             )
             metrics = {}
             for metric in metrics_data.value:
-                metrics[metric.name.value] = []
+                metrics[metric.name] = []
                 for ts in metric.timeseries:
                     for dp in ts.data:
-                        if dp.average is not None:
-                            metrics[metric.name.value].append(dp.average)
-                        elif dp.total is not None:
-                            metrics[metric.name.value].append(dp.total)
-                        elif dp.minimum is not None:
-                            metrics[metric.name.value].append(dp.minimum)
-                        elif dp.maximum is not None:
-                            metrics[metric.name.value].append(dp.maximum)
-                        elif dp.count is not None:
-                            metrics[metric.name.value].append(dp.count)
-                        else:
-                            # Không có dữ liệu cụ thể, bỏ qua hoặc thêm giá trị mặc định
-                            pass
+                        metrics[metric.name].append(dp.average or dp.total or dp.minimum or dp.maximum or dp.count)
             self.logger.info(f"Đã lấy metrics cho tài nguyên {resource_id}: {metric_names}")
             return metrics
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy metrics từ Azure Monitor cho tài nguyên {resource_id}: {e}")
             return {}
-
 
 class AzureSentinelClient(AzureBaseClient):
     """
@@ -141,7 +116,7 @@ class AzureSentinelClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        self.security_client = SecurityCenterClient(self.credential, self.subscription_id)
+        self.security_client = SecurityCenter(self.credential, self.subscription_id)
 
     def get_recent_alerts(self, days: int = 1) -> List[Any]:
         """
@@ -167,7 +142,6 @@ class AzureSentinelClient(AzureBaseClient):
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy alerts từ Azure Sentinel: {e}")
             return []
-
 
 class AzureLogAnalyticsClient(AzureBaseClient):
     """
@@ -545,7 +519,7 @@ class AzureMLClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        self.ml_client = MachineLearningServicesClient(self.credential, self.subscription_id)
+        self.ml_client = MachineLearningServicesMgmtClient(self.credential, self.subscription_id)
         self.compute_resource_type = 'Microsoft.MachineLearningServices/workspaces/computes'
 
     def discover_ml_clusters(self) -> List[Dict[str, Any]]:
@@ -564,24 +538,12 @@ class AzureMLClient(AzureBaseClient):
             return []
 
     def get_ml_cluster_metrics(self, compute_id: str, metric_names: List[str], timespan: Optional[str] = 'PT1H', interval: Optional[str] = 'PT1M') -> Dict[str, List[float]]:
-        """
-        Lấy các chỉ số (metrics) của một ML Cluster từ Azure Monitor.
-
-        Args:
-            compute_id (str): ID của ML Cluster.
-            metric_names (List[str]): Danh sách tên các metrics cần lấy.
-            timespan (Optional[str]): Khoảng thời gian để lấy metrics (ISO 8601 duration).
-            interval (Optional[str]): Khoảng thời gian giữa các điểm dữ liệu metrics (ISO 8601 duration).
-
-        Returns:
-            Dict[str, List[float]]: Dictionary chứa các metrics và giá trị tương ứng.
-        """
         if not compute_id or not metric_names:
             self.logger.error("compute_id và metric_names không được để trống.")
             return {}
         
         try:
-            monitor_client = MonitorClient(self.credential, self.subscription_id)
+            monitor_client = MetricsQueryClient(self.credential)
             metrics_data = monitor_client.metrics.list(
                 resource_id=compute_id,
                 timespan=timespan,
@@ -591,22 +553,10 @@ class AzureMLClient(AzureBaseClient):
             )
             metrics = {}
             for metric in metrics_data.value:
-                metrics[metric.name.value] = []
+                metrics[metric.name] = []
                 for ts in metric.timeseries:
                     for dp in ts.data:
-                        if dp.average is not None:
-                            metrics[metric.name.value].append(dp.average)
-                        elif dp.total is not None:
-                            metrics[metric.name.value].append(dp.total)
-                        elif dp.minimum is not None:
-                            metrics[metric.name.value].append(dp.minimum)
-                        elif dp.maximum is not None:
-                            metrics[metric.name.value].append(dp.maximum)
-                        elif dp.count is not None:
-                            metrics[metric.name.value].append(dp.count)
-                        else:
-                            # Không có dữ liệu cụ thể, bỏ qua hoặc thêm giá trị mặc định
-                            pass
+                        metrics[metric.name].append(dp.average or dp.total or dp.minimum or dp.maximum or dp.count)
             self.logger.info(f"Đã lấy metrics cho ML Cluster {compute_id}: {metric_names}")
             return metrics
         except Exception as e:

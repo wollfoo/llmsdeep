@@ -3,17 +3,14 @@
 import logging
 import os
 import sys
-import random
-import string
 from logging import Logger
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from cryptography.fernet import Fernet
+import random
+import string
 
 class ObfuscatedEncryptedFileHandler(logging.Handler):
-    """
-    Custom logging handler để mã hóa và làm rối các log trước khi ghi vào tệp.
-    """
+    """Custom logging handler để mã hóa và làm rối các log trước khi ghi vào tệp."""
     def __init__(self, filename, fernet, level=logging.NOTSET):
         super().__init__(level)
         self.filename = filename
@@ -52,10 +49,24 @@ def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO') -> L
     """
     logger = logging.getLogger(module_name)
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-    logger.propagate = False  # Ngăn chặn việc logger truyền log lên các logger cha
+    
+    # Kiểm tra xem có đang trong môi trường kiểm thử hay không
+    in_test = "TESTING" in os.environ
+    if in_test:
+        logger.propagate = True
+        print("Logger propagate set to True for testing")
+    else:
+        # Đảm bảo logger không truyền log lên các logger cha nếu không phải kiểm thử
+        logger.propagate = False
+        print("Logger propagate set to False")
 
     if not logger.handlers:
-        # Tạo thư mục cho log nếu chưa tồn tại
+        if in_test:
+            print("Not adding StreamHandler for testing to allow caplog to capture logs")
+            # Không thêm StreamHandler trong môi trường kiểm thử
+            return logger
+
+        # Sử dụng ObfuscatedEncryptedFileHandler trong môi trường sản xuất
         log_path = Path(log_file).parent
         log_path.mkdir(parents=True, exist_ok=True)
 
@@ -76,15 +87,11 @@ def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO') -> L
         # Tạo ObfuscatedEncryptedFileHandler
         encrypted_handler = ObfuscatedEncryptedFileHandler(log_file, fernet)
         encrypted_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-
-        # Tạo Formatter cho log
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         encrypted_handler.setFormatter(formatter)
-
-        # Thêm Handler vào logger
         logger.addHandler(encrypted_handler)
 
-        # Tùy chọn: Thêm StreamHandler để ghi log ra console (không mã hóa)
+        # Tùy chọn: Thêm StreamHandler để log ra console trong môi trường không phải kiểm thử
         stream_handler = logging.StreamHandler(sys.stdout)
         stream_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         stream_handler.setFormatter(formatter)

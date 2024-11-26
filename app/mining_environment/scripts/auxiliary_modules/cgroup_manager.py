@@ -8,10 +8,16 @@ import psutil
 import logging
 from typing import Dict, Any, Tuple
 
-from script.logging_config import setup_logging
+
+# Thêm đường dẫn tới thư mục chứa `logging_config.py`
+
+SCRIPT_DIR = Path(__file__).resolve().parent.parent  
+sys.path.append(str(SCRIPT_DIR))  
 
 # Define configuration directories (assumed to be set in environment variables)
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
+
+from logging_config import setup_logging
 
 # Setup logger for cgroup_manager
 cgroup_manager_logger = setup_logging('cgroup_manager', LOGS_DIR / 'cgroup_manager.log', 'INFO')
