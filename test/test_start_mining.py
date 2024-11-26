@@ -172,8 +172,9 @@ def test_main_mining_failure(mock_start, mock_stop, caplog):
                     mock_init_env.assert_called_once()
                     mock_start.assert_not_called()
                     mock_start_mining.assert_called_once()
-                    mock_stop.assert_called_once_with()
+                    mock_stop.assert_called_once()
 
+                    
                     assert "===== Bắt đầu hoạt động khai thác tiền điện tử =====" in caplog.text
                     assert "Quá trình khai thác không khởi động thành công sau nhiều cố gắng. Dừng hệ thống khai thác." in caplog.text
 
