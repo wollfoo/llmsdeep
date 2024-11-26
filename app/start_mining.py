@@ -195,7 +195,7 @@ def main():
     
     # Dừng Resource Manager
     try:
-        resource_manager.stop()
+        system_manager.stop()
         logger.info("Đã dừng tất cả các quản lý tài nguyên.")
     except Exception as e:
         logger.error(f"Lỗi khi dừng các quản lý tài nguyên: {e}")
