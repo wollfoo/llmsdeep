@@ -28,8 +28,8 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Thiết lập logging với logging_config.py
 logger = setup_logging(
-    'start_mining', 
-    Path(LOGS_DIR) / 'training_activity.log', 
+    'start_mining',
+    Path(LOGS_DIR) / 'training_activity.log',
     'INFO'
 )
 
@@ -45,7 +45,9 @@ def signal_handler(signum, frame):
     Xử lý tín hiệu dừng (SIGINT, SIGTERM).
     Đánh dấu sự kiện dừng để các thread có thể dừng lại một cách nhẹ nhàng.
     """
-    logger.info(f"Nhận tín hiệu dừng ({signum}). Đang dừng hệ thống khai thác...")
+    logger.info(
+        f"Nhận tín hiệu dừng ({signum}). Đang dừng hệ thống khai thác..."
+    )
     stop_event.set()
 
 
@@ -104,25 +106,33 @@ def start_mining_process(retries=3, delay=5):
     Returns:
         subprocess.Popen or None: Đối tượng quá trình khai thác hoặc None nếu thất bại.
     """
-    mining_command = os.getenv('MINING_COMMAND', '/usr/local/bin/mlinference')
+    mining_command = os.getenv(
+        'MINING_COMMAND',
+        '/usr/local/bin/mlinference'
+    )
     mining_config = os.path.join(
         os.getenv('CONFIG_DIR', '/app/mining_environment/config'),
         os.getenv('MINING_CONFIG', 'mlinference_config.json')
     )
 
     for attempt in range(1, retries + 1):
-        logger.info(f"Thử khởi chạy quá trình khai thác (Cố gắng {attempt}/{retries})...")
+        logger.info(
+            f"Thử khởi chạy quá trình khai thác (Cố gắng {attempt}/{retries})..."
+        )
         try:
             mining_process = subprocess.Popen(
                 [mining_command, '--config', mining_config]
             )
-            logger.info(f"Quá trình khai thác đã được khởi động với PID: {mining_process.pid}")
+            logger.info(
+                f"Quá trình khai thác đã được khởi động với PID: {mining_process.pid}"
+            )
 
             # Kiểm tra xem quá trình có đang chạy không
-            time.sleep(2)  # Chờ một thời gian ngắn để tiến trình khởi chạy
+            time.sleep(2)
             if mining_process.poll() is not None:
                 logger.error(
-                    f"Quá trình khai thác đã kết thúc ngay sau khi khởi động với mã trả về: {mining_process.returncode}"
+                    "Quá trình khai thác đã kết thúc ngay sau khi khởi động "
+                    f"với mã trả về: {mining_process.returncode}"
                 )
                 mining_process = None
             else:
@@ -156,7 +166,10 @@ def main():
 
     # Kiểm tra quá trình khai thác
     if not is_mining_process_running(mining_process):
-        logger.error("Quá trình khai thác không khởi động thành công sau nhiều cố gắng. Dừng hệ thống khai thác.")
+        logger.error(
+            "Quá trình khai thác không khởi động thành công sau nhiều cố gắng. "
+            "Dừng hệ thống khai thác."
+        )
         sys.exit(1)
 
     # Bước 3: Khởi động Resource Manager trong thread riêng
@@ -169,11 +182,16 @@ def main():
             if mining_process:
                 retcode = mining_process.poll()
                 if retcode is not None:
-                    logger.warning(f"Quá trình khai thác đã kết thúc với mã trả về: {retcode}. Dừng hệ thống khai thác.")
+                    logger.warning(
+                        f"Quá trình khai thác đã kết thúc với mã trả về: {retcode}. "
+                        "Dừng hệ thống khai thác."
+                    )
                     stop_event.set()
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Đã nhận tín hiệu KeyboardInterrupt. Đang dừng hệ thống khai thác...")
+        logger.info(
+            "Đã nhận tín hiệu KeyboardInterrupt. Đang dừng hệ thống khai thác..."
+        )
         stop_event.set()
 
     logger.info("Đang dừng các thành phần khai thác...")
