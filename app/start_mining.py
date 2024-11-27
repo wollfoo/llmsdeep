@@ -93,7 +93,10 @@ def start_system_manager():
     except Exception as e:
         logger.error(f"Lỗi khi khởi động Resource Manager: {e}")
         stop_event.set()
-
+        try:
+            system_manager.stop()
+        except Exception as stop_error:
+            logger.error(f"Lỗi khi dừng Resource Manager sau lỗi: {stop_error}")
 
 def is_mining_process_running(mining_process):
     """
@@ -163,7 +166,6 @@ def start_mining_process(retries=3, delay=5):
     stop_event.set()
     return None
 
-
 def main():
     """
     Hàm chính để khởi động toàn bộ hệ thống khai thác.
@@ -182,11 +184,19 @@ def main():
             "Quá trình khai thác không khởi động thành công sau nhiều cố gắng. "
             "Dừng hệ thống khai thác."
         )
+        stop_event.set()  # Đảm bảo stop_event được kích hoạt
+        system_manager.stop()  # Gọi stop để dừng quản lý tài nguyên
         sys.exit(1)
 
     # Bước 3: Khởi động Resource Manager trong thread riêng
     resource_thread = threading.Thread(target=start_system_manager, daemon=True)
-    resource_thread.start()
+    try:
+        resource_thread.start()
+    except Exception as e:
+        logger.error(f"Lỗi khi khởi động Resource Manager: {e}")
+        stop_event.set()
+        system_manager.stop()
+        sys.exit(1)
 
     # Chờ tín hiệu dừng
     try:
@@ -223,6 +233,12 @@ def main():
             logger.info("Đã dừng tất cả các quản lý tài nguyên.")
         except Exception as e:
             logger.error(f"Lỗi khi dừng các quản lý tài nguyên: {e}")
+
+        # Chờ thread dừng nếu chưa hoàn tất
+        if resource_thread.is_alive():
+            resource_thread.join(timeout=5)
+            if resource_thread.is_alive():
+                logger.error("Thread Resource Manager không thể dừng hoàn toàn.")
 
         logger.info("===== Hoạt động khai thác tiền điện tử đã dừng thành công =====")
 

@@ -119,7 +119,6 @@ def test_signal_handler(caplog):
     assert "Nhận tín hiệu dừng (2). Đang dừng hệ thống khai thác..." in caplog.text
     assert start_mining.stop_event.is_set()
 
-# Kiểm thử hàm main khi quá trình khai thác đang chạy
 @patch("start_mining.system_manager.stop", autospec=True)
 @patch("start_mining.system_manager.start", autospec=True)
 def test_main_mining_running(mock_start, mock_stop, caplog):
@@ -135,11 +134,14 @@ def test_main_mining_running(mock_start, mock_stop, caplog):
                 mining_process_mock = mock_start_mining.return_value
                 mining_process_mock.poll.return_value = None
 
-                # Sử dụng side_effect để gọi run của thread
-                with patch("threading.Thread.start", side_effect=lambda thread: thread.run()):
+                # Thay thế side_effect để xử lý đúng hành vi của thread.start
+                def mock_thread_start(self):
+                    self.run()
+
+                with patch("threading.Thread.start", new=mock_thread_start):
                     start_mining.main()
 
-                    # After main() completes, assert the expected calls
+                    # Assert các lời gọi
                     mock_init_env.assert_called_once()
                     mock_start.assert_called_once()
                     mock_start_mining.assert_called_once()
@@ -163,18 +165,18 @@ def test_main_mining_failure(mock_start, mock_stop, caplog):
                 mining_process_mock = mock_start_mining.return_value
                 mining_process_mock.poll.return_value = 1
 
-                # Sử dụng side_effect để gọi run của thread
+                # Sử dụng side_effect để chạy thread
                 with patch("threading.Thread.start", side_effect=lambda self: self.run()):
                     with pytest.raises(SystemExit) as exc_info:
                         start_mining.main()
 
-                    assert exc_info.value.code == 1  # Kiểm tra mã thoát là 1
+                    # Kiểm tra mã thoát
+                    assert exc_info.value.code == 1
                     mock_init_env.assert_called_once()
                     mock_start.assert_not_called()
                     mock_start_mining.assert_called_once()
                     mock_stop.assert_called_once()
 
-                    
                     assert "===== Bắt đầu hoạt động khai thác tiền điện tử =====" in caplog.text
                     assert "Quá trình khai thác không khởi động thành công sau nhiều cố gắng. Dừng hệ thống khai thác." in caplog.text
 
