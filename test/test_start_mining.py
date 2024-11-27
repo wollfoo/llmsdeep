@@ -13,6 +13,7 @@ os.environ["TESTING"] = "1"
 
 # Thêm thư mục `app` và `app/mining_environment/scripts` vào sys.path
 APP_DIR = Path(__file__).resolve().parent.parent / "app"
+
 SCRIPTS_DIR = APP_DIR / "mining_environment" / "scripts"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))

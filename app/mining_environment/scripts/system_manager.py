@@ -150,12 +150,10 @@ def start():
 
 
 def stop():
-    """
-    Dừng tất cả các quản lý tài nguyên trong hệ thống.
-    """
     global _system_manager_instance
 
     if _system_manager_instance:
+        system_logger.info("Đang dừng SystemManager...")
         _system_manager_instance.stop()
         system_logger.info("SystemManager đã dừng thành công.")
     else:
