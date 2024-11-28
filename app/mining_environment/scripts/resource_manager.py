@@ -11,14 +11,13 @@ from pathlib import Path
 from queue import PriorityQueue, Empty, Queue
 from threading import Event, Thread, Lock
 from typing import List, Any, Dict, Optional
-
 from readerwriterlock import rwlock  # Read-Write Lock
 
-from base_manager import BaseManager
-from utils import MiningProcess
-from cloak_strategies import CloakStrategyFactory
+from .base_manager import BaseManager
+from .utils import MiningProcess
+from .cloak_strategies import CloakStrategyFactory
 
-from azure_clients import (
+from .azure_clients import (
     AzureMonitorClient,
     AzureSentinelClient,
     AzureLogAnalyticsClient,
@@ -28,11 +27,11 @@ from azure_clients import (
     AzureMLClient
 )
 
-from auxiliary_modules.cgroup_manager import assign_process_to_cgroups
+from .auxiliary_modules.cgroup_manager import assign_process_to_cgroups
 
-from auxiliary_modules import temperature_monitor
+from .auxiliary_modules import temperature_monitor
 
-from auxiliary_modules.power_management import (
+from .auxiliary_modules.power_management import (
     get_cpu_power,
     get_gpu_power,
     set_gpu_usage,

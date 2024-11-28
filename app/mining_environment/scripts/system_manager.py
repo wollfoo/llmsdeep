@@ -6,9 +6,10 @@ import json
 from pathlib import Path
 from time import sleep
 from typing import Dict, Any
-from resource_manager import ResourceManager
-from anomaly_detector import AnomalyDetector  # Import lớp AnomalyDetector từ anomaly_detector.py
-from logging_config import setup_logging
+
+from .resource_manager import ResourceManager
+from .anomaly_detector import AnomalyDetector  # Import lớp AnomalyDetector từ anomaly_detector.py
+from .logging_config import setup_logging
 
 # Định nghĩa các thư mục cấu hình, mô hình, và logs
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
@@ -43,7 +44,7 @@ class SystemManager:
         # Khởi tạo ResourceManager và AnomalyDetector với logger tương ứng
         self.resource_manager = ResourceManager(config, RESOURCE_OPTIMIZATION_MODEL_PATH, resource_logger)
         self.anomaly_detector = AnomalyDetector(config, ANOMALY_CLOAKING_MODEL_PATH, anomaly_logger)
-        
+
         # Gán ResourceManager cho AnomalyDetector để đảm bảo sự liên kết giữa các thành phần
         self.anomaly_detector.set_resource_manager(self.resource_manager)
 
