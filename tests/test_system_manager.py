@@ -57,8 +57,6 @@ def mock_system_manager_start_stop():
          patch.object(SystemManager, 'stop') as mock_stop:
         yield mock_start, mock_stop
 
-
-
 # 1. Kiểm thử cho hàm load_config
 def test_load_config_success(mock_logging):
     config_content = {"key": "value"}
