@@ -382,7 +382,6 @@ def test_apply_network_cloaking(mock_apply_cloaking, shared_resource_manager):
     # Vì phương thức chưa thực hiện gì, chỉ kiểm tra gọi hàm cloaking và log lỗi nếu có
 
 
-
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.configure_network_interface', side_effect=Exception("Network Cloaking Exception"))
 def test_apply_network_cloaking_exception(mock_configure_network, shared_resource_manager):
     """Kiểm thử phương thức apply_network_cloaking khi có ngoại lệ."""
@@ -417,6 +416,7 @@ def test_throttle_cpu_based_on_load_high_load(mock_adjust_cpu_freq, shared_resou
     shared_resource_manager.logger.info.assert_called_with(
         f"Điều chỉnh tần số CPU xuống 2000MHz cho tiến trình {process.name} (PID: {process.pid}) dựa trên tải {load_percent}%."
     )
+
 
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_cpu_frequency')
 def test_throttle_cpu_based_on_load_medium_load(mock_adjust_cpu_freq, shared_resource_manager):
@@ -536,22 +536,48 @@ def test_apply_cloak_strategy_strategy_creation_failure(mock_create_strategy, sh
         f"Chiến lược cloaking {strategy_name} không được tạo thành công cho tiến trình {process.name} (PID: {process.pid})."
     )
 
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.execute_adjustments')
+
 @patch('mining_environment.scripts.resource_manager.CloakStrategyFactory.create_strategy', side_effect=Exception("Strategy Creation Error"))
-def test_apply_cloak_strategy_creation_exception(mock_create_strategy, mock_execute_adjustments, shared_resource_manager):
-    """Kiểm thử phương thức apply_cloak_strategy khi tạo chiến lược ném ra ngoại lệ."""
+@patch('mining_environment.scripts.resource_manager.SharedResourceManager.execute_adjustments')
+@patch('mining_environment.scripts.resource_manager.SharedResourceManager.is_gpu_initialized', return_value=False)
+def test_apply_cloak_strategy_creation_exception(
+    mock_is_gpu_initialized,
+    mock_execute_adjustments,
+    mock_create_strategy,
+    shared_resource_manager
+):
+    """Kiểm thử phương thức apply_cloak_strategy khi xảy ra lỗi trong quá trình tạo chiến lược."""
+    # Mock logger để kiểm tra
+    shared_resource_manager.logger = MagicMock()
+
     strategy_name = "error_strategy"
     process = MagicMock()
     process.pid = 2022
     process.name = "error_cloak_process"
 
-    shared_resource_manager.apply_cloak_strategy(strategy_name, process)
+    # Sử dụng pytest.raises để bắt ngoại lệ
+    with pytest.raises(Exception) as exc_info:
+        shared_resource_manager.apply_cloak_strategy(strategy_name, process)
 
-    mock_create_strategy.assert_called_once_with(strategy_name, shared_resource_manager.config, shared_resource_manager.logger, shared_resource_manager.is_gpu_initialized())
-    shared_resource_manager.logger.error.assert_called_with(
-        f"Lỗi khi áp dụng chiến lược cloaking {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): Strategy Creation Error"
+    # Kiểm tra nội dung ngoại lệ
+    assert str(exc_info.value) == "Strategy Creation Error"
+
+    # Kiểm tra rằng create_strategy được gọi đúng cách
+    mock_create_strategy.assert_called_once_with(
+        strategy_name,
+        shared_resource_manager.config,
+        shared_resource_manager.logger,
+        shared_resource_manager.is_gpu_initialized()
     )
+
+    # Kiểm tra rằng logger.error đã được gọi với thông điệp đúng
+    shared_resource_manager.logger.error.assert_called_once_with(
+        f"Không thể tạo chiến lược {strategy_name}: Strategy Creation Error"
+    )
+
+    # Kiểm tra rằng execute_adjustments không được gọi
     mock_execute_adjustments.assert_not_called()
+
 
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_cpu_frequency')
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_cpu_threads')
@@ -609,6 +635,8 @@ def test_restore_resources(mock_drop_caches, mock_adjust_network_bw, mock_adjust
     )
     assert process.pid not in shared_resource_manager.original_resource_limits
 
+
+
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_cpu_frequency', side_effect=Exception("Restore CPU Frequency Error"))
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_cpu_threads')
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_ram_allocation')
@@ -616,9 +644,20 @@ def test_restore_resources(mock_drop_caches, mock_adjust_network_bw, mock_adjust
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_disk_io_priority')
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_network_bandwidth')
 @patch('mining_environment.scripts.resource_manager.SharedResourceManager.drop_caches')
-def test_restore_resources_exception(mock_drop_caches, mock_adjust_network_bw, mock_adjust_disk_io, mock_adjust_gpu_power, 
-                                    mock_adjust_ram, mock_adjust_cpu_threads, mock_adjust_cpu_freq, shared_resource_manager):
+def test_restore_resources_exception(
+    mock_drop_caches, 
+    mock_adjust_network_bw, 
+    mock_adjust_disk_io, 
+    mock_adjust_gpu_power, 
+    mock_adjust_ram, 
+    mock_adjust_cpu_threads, 
+    mock_adjust_cpu_freq, 
+    shared_resource_manager
+):
     """Kiểm thử phương thức restore_resources khi có ngoại lệ trong quá trình khôi phục."""
+    # Mock logger để kiểm tra
+    shared_resource_manager.logger = MagicMock()
+
     process = MagicMock()
     process.pid = 2121
     process.name = "restore_process_exception"
@@ -635,8 +674,14 @@ def test_restore_resources_exception(mock_drop_caches, mock_adjust_network_bw, m
         }
     }
 
-    shared_resource_manager.restore_resources(process)
+    # Gọi phương thức restore_resources và kiểm tra ngoại lệ
+    with pytest.raises(Exception) as exc_info:
+        shared_resource_manager.restore_resources(process)
 
+    # Kiểm tra ngoại lệ đúng loại và nội dung
+    assert str(exc_info.value) == "Restore CPU Frequency Error"
+
+    # Kiểm tra các hàm điều chỉnh được gọi đúng cách
     mock_adjust_cpu_freq.assert_called_once_with(process.pid, 3000, process.name)
     mock_adjust_cpu_threads.assert_called_once_with(process.pid, 4, process.name)
     mock_adjust_ram.assert_called_once_with(process.pid, 2048, process.name)
@@ -645,9 +690,12 @@ def test_restore_resources_exception(mock_drop_caches, mock_adjust_network_bw, m
     mock_adjust_network_bw.assert_called_once_with(process, 100.0)
     mock_drop_caches.assert_not_called()  # Không có yêu cầu drop_caches trong restore
 
-    shared_resource_manager.logger.error.assert_called_with(
+    # Kiểm tra logger.error đã được gọi
+    shared_resource_manager.logger.error.assert_called_once_with(
         f"Lỗi khi khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}): Restore CPU Frequency Error"
     )
+
+
 
 @patch('mining_environment.scripts.resource_manager.psutil.cpu_freq')
 def test_get_current_cpu_frequency(mock_cpu_freq, shared_resource_manager):

