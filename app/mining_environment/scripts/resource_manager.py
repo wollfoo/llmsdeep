@@ -13,6 +13,7 @@ from threading import Event, Thread, Lock
 from typing import List, Any, Dict, Optional
 from readerwriterlock import rwlock  # Read-Write Lock
 
+
 from .base_manager import BaseManager
 from .utils import MiningProcess
 from .cloak_strategies import CloakStrategyFactory
@@ -231,6 +232,7 @@ class SharedResourceManager:
             warning_message = f"Chiến lược cloaking {strategy_name} không được tạo thành công cho tiến trình {process.name} (PID: {process.pid})."
             self.logger.warning(warning_message)
             raise RuntimeError(warning_message)  # Đảm bảo lỗi được ném ra nếu chiến lược không được tạo
+        
 
     def restore_resources(self, process: MiningProcess):
         """
