@@ -233,7 +233,6 @@ class SharedResourceManager:
             self.logger.warning(warning_message)
             raise RuntimeError(warning_message)  # Đảm bảo lỗi được ném ra nếu chiến lược không được tạo
         
-
     def restore_resources(self, process: MiningProcess):
         """
         Khôi phục tài nguyên cho tiến trình sau khi đã xác nhận an toàn từ AnomalyDetector.
