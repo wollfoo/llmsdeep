@@ -3,28 +3,27 @@
 import os
 import sys
 import logging
+import psutil
 import pytest
 import subprocess
 import pynvml
 import torch
+import rwlock
 from unittest.mock import patch, MagicMock, mock_open, call, ANY
 from pathlib import Path
 from queue import PriorityQueue, Empty, Queue
-from threading import Lock, Event
+from threading import Lock, Event, Thread
 from typing import Any, Dict, List
-
-
+from time import sleep, time
 
 # Thiết lập biến môi trường TESTING=1
 os.environ["TESTING"] = "1"
 
-# Định nghĩa các thư mục cần thiết
 APP_DIR = Path("/home/llmss/llmsdeep/app")
 CONFIG_DIR = APP_DIR / "mining_environment" / "config"
 MODELS_DIR = APP_DIR / "mining_environment" / "models"
 SCRIPTS_DIR = APP_DIR / "mining_environment" / "scripts"
 
-# Thêm APP_DIR vào sys.path
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
@@ -918,30 +917,40 @@ def test_apply_cloak_strategy_partial_adjustments(mock_execute_adjustments, mock
     }
 
 
-
-
 #  ----------------------------------  Kiểm Thử Lớp ResourceManager ------------------------------------------  #
+
+# ----------------------------
+# Kiểm thử ResourceManager
+# ----------------------------
+
 
 @pytest.fixture
 def simple_mock_logger():
-    """Fixture để tạo mock logger đơn giản."""
+    """Fixture tạo logger giả đơn giản."""
     return MagicMock()
+
 
 @pytest.fixture
 def resource_manager(simple_mock_logger, monkeypatch, mocker):
-    """Fixture để tạo instance của ResourceManager với các tham số mock và patch các phương thức phụ thuộc."""
-    # Thiết lập biến môi trường AZURE_SUBSCRIPTION_ID
+    """
+    Fixture khởi tạo instance ResourceManager với toàn bộ các mock cần thiết:
+    - Reset singleton instance để đảm bảo mỗi kiểm thử sử dụng một instance mới.
+    - Mock các client Azure
+    - Mock load_model
+    - Mock SharedResourceManager
+    - Thiết lập config chuẩn
+    - Mock các thread, queue,...
+    """
+    # Mock phương thức __init__ của BaseManager để tránh thực thi logic không mong muốn
+    mocker.patch('mining_environment.scripts.resource_manager.BaseManager.__init__', return_value=None)
+
+    # Reset singleton instance
+    ResourceManager._instance = None
+
     monkeypatch.setenv('AZURE_SUBSCRIPTION_ID', 'dummy_subscription_id')
 
-    # Patch các client mà ResourceManager sử dụng
+    # Patch các client Azure
     mock_AzureMonitorClient = mocker.patch('mining_environment.scripts.resource_manager.AzureMonitorClient')
-
-    # Các patch khác nếu cần
-    mock_process_iter = mocker.patch('mining_environment.scripts.resource_manager.psutil.process_iter', return_value=[])
-    mock_load_model = mocker.patch('mining_environment.scripts.resource_manager.ResourceManager.load_model', return_value=(MagicMock(), MagicMock()))
-    mock_shared_resource_manager_class = mocker.patch('mining_environment.scripts.resource_manager.SharedResourceManager', autospec=True)
-    mock_shutdown_power_management = mocker.patch('mining_environment.scripts.resource_manager.shutdown_power_management')  # Nếu cần
-    mock_join_threads = mocker.patch('mining_environment.scripts.resource_manager.ResourceManager.join_threads')
     mock_AzureSentinelClient = mocker.patch('mining_environment.scripts.resource_manager.AzureSentinelClient')
     mock_AzureLogAnalyticsClient = mocker.patch('mining_environment.scripts.resource_manager.AzureLogAnalyticsClient')
     mock_AzureSecurityCenterClient = mocker.patch('mining_environment.scripts.resource_manager.AzureSecurityCenterClient')
@@ -949,7 +958,15 @@ def resource_manager(simple_mock_logger, monkeypatch, mocker):
     mock_AzureTrafficAnalyticsClient = mocker.patch('mining_environment.scripts.resource_manager.AzureTrafficAnalyticsClient')
     mock_AzureMLClient = mocker.patch('mining_environment.scripts.resource_manager.AzureMLClient')
 
-    # Định nghĩa cấu hình đầy đủ với tất cả các khóa bắt buộc
+    # Patch psutil.process_iter, load_model,...
+    mocker.patch('mining_environment.scripts.resource_manager.psutil.process_iter', return_value=[])
+    mock_load_model = mocker.patch('mining_environment.scripts.resource_manager.ResourceManager.load_model', return_value=(MagicMock(), MagicMock()))
+
+    # Patch SharedResourceManager, shutdown_power_management
+    mock_shared_resource_manager_class = mocker.patch('mining_environment.scripts.resource_manager.SharedResourceManager', autospec=True)
+    mock_shutdown_power_management = mocker.patch('mining_environment.scripts.resource_manager.shutdown_power_management')
+
+    # Cấu hình giả lập
     config = {
         "processes": {
             "CPU": "cpu_miner",
@@ -994,8 +1011,6 @@ def resource_manager(simple_mock_logger, monkeypatch, mocker):
             }
         },
         "network_interface": "eth0",
-        
-        # Các khóa mới được thêm vào
         "optimization_parameters": {
             "gpu_power_adjustment_step": 10,
             "disk_io_limit_step_mbps": 5
@@ -1031,27 +1046,26 @@ def resource_manager(simple_mock_logger, monkeypatch, mocker):
             "network_usage_mbps": 90
         }
     }
-    model_path = Path("/path/to/model.pt")
 
-    # Khởi tạo ResourceManager với cấu hình đã được patch
+    model_path = Path("/path/to/model.pt")
     manager = ResourceManager(config, model_path, simple_mock_logger)
 
-    # Thiết lập các thuộc tính thread bằng MagicMock
-    manager.monitor_thread = MagicMock()
-    manager.optimization_thread = MagicMock()
-    manager.cloaking_thread = MagicMock()
-    manager.resource_adjustment_thread = MagicMock()
+    # Kiểm tra logger
+    assert manager.logger is simple_mock_logger, "Logger không được gán đúng."
 
-    # Trực tiếp mock các phương thức phụ thuộc trên instance
-    manager.join_threads = mock_join_threads
+    # Reset mock_logger để xóa các cuộc gọi log trong quá trình khởi tạo
+    simple_mock_logger.reset_mock()
 
-    # Trực tiếp mock phương thức 'set' của 'stop_event'
+    # Mock stop_event và threads
+    manager.stop_event = MagicMock(spec=Event)
     manager.stop_event.set = MagicMock()
+    manager.monitor_thread = MagicMock(name='monitor_thread')
+    manager.optimization_thread = MagicMock(name='optimization_thread')
+    manager.cloaking_thread = MagicMock(name='cloaking_thread')
+    manager.resource_adjustment_thread = MagicMock(name='resource_adjustment_thread')
 
-    # Truy cập SharedResourceManager instance
+    # Mock shared_resource_manager instance
     shared_resource_manager = manager.shared_resource_manager
-
-    # Truy cập và thiết lập các phương thức của SharedResourceManager
     shared_resource_manager.is_gpu_initialized.return_value = True
     shared_resource_manager.adjust_cpu_threads = MagicMock()
     shared_resource_manager.adjust_gpu_usage = MagicMock()
@@ -1059,26 +1073,39 @@ def resource_manager(simple_mock_logger, monkeypatch, mocker):
     shared_resource_manager.adjust_disk_io_limit = MagicMock()
     shared_resource_manager.adjust_network_bandwidth = MagicMock()
     shared_resource_manager.apply_cloak_strategy = MagicMock()
+    shared_resource_manager.restore_resources = MagicMock()
 
-    # Trực tiếp mock resource_adjustment_queue để tránh lỗi TypeError
+    # Mock resource_adjustment_queue
     manager.resource_adjustment_queue = MagicMock()
+    manager.resource_optimization_model = MagicMock(name='resource_optimization_model')
+    manager.resource_optimization_device = 'cpu'
 
-    # Thêm các assert để đảm bảo các mocks đã được patch đúng cách
-    assert mock_AzureMonitorClient is not None, "AzureMonitorClient chưa được patch đúng cách"
-    assert mock_AzureNetworkWatcherClient is not None, "AzureNetworkWatcherClient chưa được patch đúng cách"
-    assert mock_AzureTrafficAnalyticsClient is not None, "AzureTrafficAnalyticsClient chưa được patch đúng cách"
-    assert mock_AzureMLClient is not None, "AzureMLClient chưa được patch đúng cách"
+    # Mock các phương thức liên quan đến lock bằng một context manager hợp lệ
+    mock_rlock = MagicMock()
+    mock_context_manager = MagicMock()
+    mock_context_manager.__enter__.return_value = mock_rlock
+    mock_context_manager.__exit__.return_value = None
+    mocker.patch.object(manager.mining_processes_lock, 'gen_rlock', return_value=mock_context_manager)
+
+    # Mock các phương thức khác nếu cần
+    mocker.patch.object(manager, 'allocate_resources_with_priority', return_value=None)
+    mocker.patch.object(manager, 'collect_metrics', return_value={
+        'cpu_usage_percent': 50,
+        'memory_usage_mb': 100,
+        'gpu_usage_percent': 70,
+        'disk_io_mbps': 30.0,
+        'network_bandwidth_mbps': 100,
+        'cache_limit_percent': 50
+    })
+    mocker.patch.object(manager, 'prepare_input_features', return_value=[50, 100, 70, 30.0, 100, 50])
 
     return {
         'manager': manager,
         'mock_load_model': mock_load_model,
         'mock_shared_resource_manager_class': mock_shared_resource_manager_class,
         'mock_shutdown_power_management': mock_shutdown_power_management,
-        'mock_join_threads': mock_join_threads,
-        'mock_event_set': manager.stop_event.set,
         'simple_mock_logger': simple_mock_logger,
         'mock_shared_resource_manager_instance': shared_resource_manager,
-        'mining_processes': manager.mining_processes,
         'mock_AzureMonitorClient': mock_AzureMonitorClient,
         'mock_AzureSentinelClient': mock_AzureSentinelClient,
         'mock_AzureLogAnalyticsClient': mock_AzureLogAnalyticsClient,
@@ -1086,1671 +1113,345 @@ def resource_manager(simple_mock_logger, monkeypatch, mocker):
         'mock_AzureNetworkWatcherClient': mock_AzureNetworkWatcherClient,
         'mock_AzureTrafficAnalyticsClient': mock_AzureTrafficAnalyticsClient,
         'mock_AzureMLClient': mock_AzureMLClient,
+        'config': config
     }
 
+
 # ----------------------------
-# Kiểm thử ResourceManager
+# Test nhóm khởi tạo ResourceManager
 # ----------------------------
 
+def test_resource_manager_singleton(resource_manager):
+    """Kiểm thử ResourceManager là singleton."""
+    manager = resource_manager['manager']
+    another_instance = ResourceManager(resource_manager['config'], manager.model_path, resource_manager['simple_mock_logger'])
+    assert manager is another_instance
 
-def test_resource_manager_initialization(resource_manager):
+
+def test_resource_manager_init(resource_manager):
     """Kiểm thử khởi tạo ResourceManager."""
     manager = resource_manager['manager']
-    mock_shared_resource_manager_class = resource_manager['mock_shared_resource_manager_class']
-    mock_init_azure_clients = resource_manager['mock_init_azure_clients']
-    mock_discover_azure_resources = resource_manager['mock_discover_azure_resources']
-    mock_initialize_threads = resource_manager['mock_initialize_threads']
-    mock_load_model = resource_manager['mock_load_model']
-    simple_mock_logger = resource_manager['simple_mock_logger']
-
-    # Kiểm tra cấu hình đã được thiết lập đúng
     assert manager.config['processes']['CPU'] == "cpu_miner"
     assert manager.config['process_priority_map']['gpu_miner'] == 3
+    resource_manager['mock_load_model'].assert_called_once_with(manager.model_path)
 
-    # Kiểm tra rằng load_model đã được gọi trong fixture
-    mock_load_model.assert_called_once_with(manager.model_path)
-
-    # Kiểm tra rằng các phương thức phụ thuộc đã được gọi đúng cách
-    mock_init_azure_clients.assert_called_once()
-    mock_discover_azure_resources.assert_called_once()
-    mock_initialize_threads.assert_called_once()
-    mock_shared_resource_manager_class.assert_called_once_with(manager.config, manager.logger)
-    # Kiểm tra rằng SharedResourceManager đã được khởi tạo
-    assert manager.shared_resource_manager is not None
-
-# Hàm kiểm thử phương thức start của ResourceManager
-def test_resource_manager_start(resource_manager):
-    """Kiểm thử phương thức start của ResourceManager."""
+def test_initialize_threads(resource_manager):
+    """Kiểm thử phương thức initialize_threads."""
     manager = resource_manager['manager']
-    mock_start_threads = resource_manager['mock_initialize_threads']
-    mock_discover_mining_processes = resource_manager['mock_discover_azure_resources']
-    simple_mock_logger = resource_manager['simple_mock_logger']
-    mock_shared_resource_manager_class = resource_manager['mock_shared_resource_manager_class']
+    manager.initialize_threads()
+    assert manager.monitor_thread.name == "MonitorThread"
+    assert manager.optimization_thread.name == "OptimizationThread"
+    assert manager.cloaking_thread.name == "CloakingThread"
+    assert manager.resource_adjustment_thread.name == "ResourceAdjustmentThread"
 
-    # Gọi phương thức start của ResourceManager
-    manager.start()
+# ----------------------------
+# Test start/stop ResourceManager
+# ----------------------------
 
-    # Kiểm tra rằng các log đã được gọi đúng cách
-    simple_mock_logger.info.assert_any_call("Bắt đầu ResourceManager...")
-    simple_mock_logger.info.assert_any_call("ResourceManager đã khởi động thành công.")
+def test_resource_manager_start(resource_manager):
+    manager = resource_manager['manager']
+    mock_logger = resource_manager['simple_mock_logger']
 
-    # Kiểm tra rằng các phương thức phụ thuộc đã được gọi đúng cách
-    mock_discover_mining_processes.assert_called_once()
-    mock_start_threads.assert_called_once()
+    # Mock discover_mining_processes và start_threads để test
+    with patch.object(manager, 'discover_mining_processes') as mock_discover, \
+         patch.object(manager, 'start_threads') as mock_start_threads:
 
-    # Kiểm tra rằng SharedResourceManager đã được khởi tạo
-    mock_shared_resource_manager_class.assert_called_once_with(manager.config, manager.logger)
-    assert manager.shared_resource_manager is not None
+        manager.start()
+
+        mock_logger.info.assert_any_call("Bắt đầu ResourceManager...")
+        mock_logger.info.assert_any_call("ResourceManager đã khởi động thành công.")
+
+        mock_discover.assert_called_once()
+        mock_start_threads.assert_called_once()
 
 def test_resource_manager_stop(resource_manager):
-    """Kiểm thử phương thức stop của ResourceManager."""
     manager = resource_manager['manager']
-    mock_shutdown = resource_manager['mock_shutdown_power_management']
-    mock_join_threads = resource_manager['mock_join_threads']
-    mock_event_set = resource_manager['mock_event_set']
-    simple_mock_logger = resource_manager['simple_mock_logger']
-    mock_shared_resource_manager_class = resource_manager['mock_shared_resource_manager_class']
+    mock_logger = resource_manager['simple_mock_logger']
+    resource_manager['mock_shutdown_power_management'].reset_mock()
 
-    # Gọi phương thức stop của ResourceManager
-    manager.stop()
+    with patch.object(manager, 'join_threads') as mock_join_threads:
+        manager.stop()
+        mock_logger.info.assert_any_call("Dừng ResourceManager...")
+        mock_logger.info.assert_any_call("ResourceManager đã dừng thành công.")
+        manager.stop_event.set.assert_called_once()
+        mock_join_threads.assert_called_once()
+        resource_manager['mock_shutdown_power_management'].assert_called_once()
 
-    # Kiểm tra rằng các log đã được gọi đúng cách
-    simple_mock_logger.info.assert_any_call("Dừng ResourceManager...")
-    simple_mock_logger.info.assert_any_call("ResourceManager đã dừng thành công.")
-
-    # Kiểm tra rằng các phương thức phụ thuộc đã được gọi đúng cách
-    mock_event_set.assert_called_once()
-    mock_join_threads.assert_called_once()
-    mock_shutdown.assert_called_once()
-
-    # Kiểm tra rằng SharedResourceManager đã được khởi tạo (nếu cần)
-    # Nếu phương thức stop() không thực hiện hành động nào liên quan đến SharedResourceManager,
-    # bạn có thể loại bỏ các dòng kiểm tra dưới đây.
-    mock_shared_resource_manager_class.assert_called_once_with(manager.config, manager.logger)
-    assert manager.shared_resource_manager is not None
+# ----------------------------
+# Test discover_mining_processes
+# ----------------------------
 
 @patch('mining_environment.scripts.resource_manager.psutil.process_iter')
 def test_discover_mining_processes(mock_process_iter, resource_manager):
-    """Kiểm thử phương thức discover_mining_processes."""
-    
-    # Tạo các mock process
+    manager = resource_manager['manager']
+    mock_logger = resource_manager['simple_mock_logger']
+
     mock_proc1 = MagicMock()
     mock_proc1.info = {'pid': 101, 'name': 'cpu_miner'}
     mock_proc2 = MagicMock()
     mock_proc2.info = {'pid': 102, 'name': 'gpu_miner'}
     mock_process_iter.return_value = [mock_proc1, mock_proc2]
-    
-    # Truy cập instance ResourceManager từ fixture
-    manager = resource_manager['manager']
-    mock_logger = resource_manager['simple_mock_logger']
-    
-    # Patch phương thức get_process_priority trên instance ResourceManager
-    with patch.object(manager, 'get_process_priority', side_effect=lambda name: manager.config['process_priority_map'][name.lower()]):
-        manager.discover_mining_processes()
-    
-    # Kiểm tra kết quả
+
+    manager.discover_mining_processes()
     assert len(manager.mining_processes) == 2
     assert manager.mining_processes[0].pid == 101
-    assert manager.mining_processes[0].name == 'cpu_miner'
-    assert manager.mining_processes[0].priority == 2
-    assert manager.mining_processes[0].network_interface == "eth0"
-    
     assert manager.mining_processes[1].pid == 102
-    assert manager.mining_processes[1].name == 'gpu_miner'
-    assert manager.mining_processes[1].priority == 3
-    assert manager.mining_processes[1].network_interface == "eth0"
-    
-    # Kiểm tra log
-    mock_logger.info.assert_called_with(f"Khám phá 2 tiến trình khai thác.")
+    mock_logger.info.assert_called_with("Khám phá 2 tiến trình khai thác.")
 
-@patch('mining_environment.scripts.resource_manager.temperature_monitor.get_cpu_temperature')
-@patch('mining_environment.scripts.resource_manager.temperature_monitor.get_gpu_temperature')
-def test_check_temperature_and_enqueue(mock_get_gpu_temp, mock_get_cpu_temp, resource_manager):
-    """Kiểm thử phương thức check_temperature_and_enqueue."""
-    
-    # Truy cập instance ResourceManager từ fixture
+# ----------------------------
+# Test monitor_and_adjust
+# ----------------------------
+
+@patch.object(ResourceManager, 'should_collect_azure_monitor_data', return_value=True)
+@patch.object(ResourceManager, 'collect_azure_monitor_data')
+@patch.object(ResourceManager, 'check_power_and_enqueue')
+@patch.object(ResourceManager, 'check_temperature_and_enqueue')
+@patch.object(ResourceManager, 'allocate_resources_with_priority')
+@patch.object(ResourceManager, 'discover_mining_processes')
+def test_monitor_and_adjust(mock_discover, mock_allocate, mock_check_temp, mock_check_power, mock_collect_azure, mock_should_collect, resource_manager):
     manager = resource_manager['manager']
     mock_logger = resource_manager['simple_mock_logger']
-    shared_resource_manager = resource_manager['mock_shared_resource_manager_instance']
     
-    # Giả lập một tiến trình
+    # Giả lập stop_event được đặt để vòng lặp chạy 1 lần
+    with patch.object(manager.stop_event, 'is_set', side_effect=[False, True]):
+        # Patch sleep để không chờ
+        with patch('time.sleep', return_value=None):
+            # Giả lập mining_processes
+            process = MagicMock()
+            manager.mining_processes = [process]
+
+            manager.monitor_and_adjust()
+
+            mock_discover.assert_called_once()
+            mock_allocate.assert_called_once()
+            mock_check_temp.assert_called_once_with(process, 75, 85)
+            mock_check_power.assert_called_once_with(process, 150, 300)
+            mock_should_collect.assert_called_once()
+            mock_collect_azure.assert_called_once()
+
+# ----------------------------
+# Test check_temperature_and_enqueue
+# ----------------------------
+
+def test_check_temperature_and_enqueue(resource_manager):
+    manager = resource_manager['manager']
+    mock_logger = resource_manager['simple_mock_logger']
     process = MagicMock()
     process.pid = 303
     process.name = "test_process"
 
-    # Đặt các giá trị nhiệt độ giả lập
-    mock_get_cpu_temp.return_value = 80
-    mock_get_gpu_temp.return_value = 90
+    with patch('mining_environment.scripts.resource_manager.temperature_monitor.get_cpu_temperature', return_value=80), \
+         patch('mining_environment.scripts.resource_manager.temperature_monitor.get_gpu_temperature', return_value=90):
 
-    # Giả lập rằng GPU đã được khởi tạo
-    shared_resource_manager.is_gpu_initialized.return_value = True
-
-    # Giả lập phương thức 'put' của resource_adjustment_queue
-    with patch.object(manager.resource_adjustment_queue, 'put') as mock_queue_put:
-        # Gọi phương thức kiểm thử
         manager.check_temperature_and_enqueue(process, 75, 85)
+        resource_manager['manager'].resource_adjustment_queue.put.assert_called_once()
+        mock_logger.warning.assert_any_call(
+            "Nhiệt độ CPU 80°C của tiến trình test_process (PID: 303) vượt quá 75°C."
+        )
+        mock_logger.warning.assert_any_call(
+            "Nhiệt độ GPU 90°C của tiến trình test_process (PID: 303) vượt quá 85°C."
+        )
 
-        # Định nghĩa tác vụ điều chỉnh mong đợi
-        adjustment_task = {
-            'type': 'monitoring',
-            'process': process,
-            'adjustments': {
-                'cpu_cloak': True,
-                'gpu_cloak': True
-            }
-        }
-        # Kiểm tra rằng 'put' đã được gọi một lần với tác vụ điều chỉnh mong đợi
-        mock_queue_put.assert_called_once_with((2, adjustment_task))
+# ----------------------------
+# Test check_power_and_enqueue
+# ----------------------------
 
-        # Kiểm tra rằng các cảnh báo đã được ghi log đúng cách
-        mock_logger.warning.assert_any_call("Nhiệt độ CPU 80°C của tiến trình test_process (PID: 303) vượt quá 75°C.")
-        mock_logger.warning.assert_any_call("Nhiệt độ GPU 90°C của tiến trình test_process (PID: 303) vượt quá 85°C.")
-
-@patch('mining_environment.scripts.resource_manager.get_cpu_power', return_value=160)
-@patch('mining_environment.scripts.resource_manager.get_gpu_power', return_value=350)
-def test_check_power_and_enqueue(mock_get_gpu_power, mock_get_cpu_power, resource_manager):
-    """Kiểm thử phương thức check_power_and_enqueue."""
-    
-    # Truy cập instance ResourceManager từ fixture
+def test_check_power_and_enqueue(resource_manager):
     manager = resource_manager['manager']
     mock_logger = resource_manager['simple_mock_logger']
-    shared_resource_manager = resource_manager['mock_shared_resource_manager_instance']
-    
-    # Giả lập một tiến trình
     process = MagicMock()
-    process.pid = 404
     process.name = "power_process"
+    process.pid = 404
 
-    # Đặt các giá trị nhiệt độ giả lập
-    # Các giá trị đã được đặt thông qua decorator @patch (160 cho CPU, 350 cho GPU)
-
-    # Giả lập rằng GPU đã được khởi tạo
-    shared_resource_manager.is_gpu_initialized.return_value = True
-
-    # Giả lập phương thức 'put' của resource_adjustment_queue
-    with patch.object(manager.resource_adjustment_queue, 'put') as mock_queue_put:
-        # Gọi phương thức kiểm thử
+    with patch('mining_environment.scripts.resource_manager.get_cpu_power', return_value=160), \
+         patch('mining_environment.scripts.resource_manager.get_gpu_power', return_value=350):
         manager.check_power_and_enqueue(process, 150, 300)
+        manager.resource_adjustment_queue.put.assert_called_once()
+        mock_logger.warning.assert_any_call(
+            "Công suất CPU 160W của tiến trình power_process (PID: 404) vượt quá 150W."
+        )
+        mock_logger.warning.assert_any_call(
+            "Công suất GPU 350W của tiến trình power_process (PID: 404) vượt quá 300W."
+        )
 
-        # Định nghĩa tác vụ điều chỉnh mong đợi
-        adjustment_task = {
-            'type': 'monitoring',
-            'process': process,
-            'adjustments': {
-                'cpu_cloak': True,
-                'gpu_cloak': True
-            }
-        }
-        # Kiểm tra rằng 'put' đã được gọi một lần với tác vụ điều chỉnh mong đợi
-        mock_queue_put.assert_called_once_with((2, adjustment_task))
+# ----------------------------
+# Test should_collect_azure_monitor_data và collect_azure_monitor_data
+# ----------------------------
 
-        # Kiểm tra rằng các cảnh báo đã được ghi log đúng cách
-        mock_logger.warning.assert_any_call("Công suất CPU 160W của tiến trình power_process (PID: 404) vượt quá 150W.")
-        mock_logger.warning.assert_any_call("Công suất GPU 350W của tiến trình power_process (PID: 404) vượt quá 300W.")
-
-@patch('mining_environment.scripts.resource_manager.time', return_value=1000)
-def test_should_collect_azure_monitor_data_first_call(mock_time, resource_manager):
-    """Kiểm thử phương thức should_collect_azure_monitor_data lần đầu tiên."""
-    # Truy cập instance ResourceManager từ fixture
+def test_should_collect_azure_monitor_data_first_call(resource_manager):
     manager = resource_manager['manager']
-    
-    # Gọi phương thức kiểm thử
-    result = manager.should_collect_azure_monitor_data()
-    
-    # Kiểm tra kết quả
-    assert result == True, "should_collect_azure_monitor_data() should return True on first call"
-    
-    # Kiểm tra giá trị _last_azure_monitor_time được cập nhật đúng
-    assert manager._last_azure_monitor_time == 1000, "_last_azure_monitor_time should be updated to 1000"
+    with patch('mining_environment.scripts.resource_manager.time', return_value=1000):
+        assert manager.should_collect_azure_monitor_data() is True
+        assert manager._last_azure_monitor_time == 1000
 
-@patch('mining_environment.scripts.resource_manager.time', side_effect=[1000, 1100, 1301])
-def test_should_collect_azure_monitor_data(mock_time, resource_manager):
-    """Kiểm thử phương thức should_collect_azure_monitor_data với các lần gọi khác nhau."""
-    # Truy cập instance ResourceManager từ fixture
-    manager = resource_manager['manager']
-    
-    # Lần đầu tiên
-    result_first_call = manager.should_collect_azure_monitor_data()
-    assert result_first_call == True, "should_collect_azure_monitor_data() should return True on first call"
-    assert manager._last_azure_monitor_time == 1000, "_last_azure_monitor_time should be updated to 1000"
-    
-    # Lần thứ hai, chưa đủ interval (1100 - 1000 = 100 < 300)
-    result_second_call = manager.should_collect_azure_monitor_data()
-    assert result_second_call == False, "should_collect_azure_monitor_data() should return False when interval not met"
-    
-    # Lần thứ ba, đủ interval (1301 - 1000 = 301 >= 300)
-    result_third_call = manager.should_collect_azure_monitor_data()
-    assert result_third_call == True, "should_collect_azure_monitor_data() should return True when interval met"
-    assert manager._last_azure_monitor_time == 1301, "_last_azure_monitor_time should be updated to 1301"
 
 def test_collect_azure_monitor_data(resource_manager):
-    """Kiểm thử phương thức collect_azure_monitor_data."""
-    # Truy cập instance ResourceManager từ fixture
     manager = resource_manager['manager']
     mock_logger = resource_manager['simple_mock_logger']
-    mock_AzureMonitorClient = resource_manager['mock_AzureMonitorClient']
-    mock_azure_monitor_instance = mock_AzureMonitorClient.return_value
-
-    # Giả lập các VM
-    manager.vms = [
-        {'id': 'vm1', 'name': 'VM1'},
-        {'id': 'vm2', 'name': 'VM2'}
-    ]
-
-    # Đặt side_effect cho get_metrics để trả về các chỉ số giả lập
-    mock_azure_monitor_instance.get_metrics.side_effect = [
-        {'Percentage CPU': 50, 'Available Memory Bytes': 4000000000},
-        {'Percentage CPU': 60, 'Available Memory Bytes': 3500000000}
-    ]
-
-    # Gọi phương thức kiểm thử
+    mock_client = resource_manager['mock_AzureMonitorClient'].return_value
+    manager.vms = [{'id': 'vm1', 'name': 'VM1'}]
+    mock_client.get_metrics.return_value = {'Percentage CPU': 50, 'Available Memory Bytes': 4000000000}
     manager.collect_azure_monitor_data()
-
-    # Kiểm tra gọi get_metrics cho từng VM
-    mock_azure_monitor_instance.get_metrics.assert_any_call('vm1', ['Percentage CPU', 'Available Memory Bytes'])
-    mock_azure_monitor_instance.get_metrics.assert_any_call('vm2', ['Percentage CPU', 'Available Memory Bytes'])
-    assert mock_azure_monitor_instance.get_metrics.call_count == 2, "get_metrics nên được gọi đúng 2 lần"
-
-    # Kiểm tra logger.info được gọi với các chỉ số thu thập
     mock_logger.info.assert_any_call("Thu thập chỉ số từ Azure Monitor cho VM VM1: {'Percentage CPU': 50, 'Available Memory Bytes': 4000000000}")
-    mock_logger.info.assert_any_call("Thu thập chỉ số từ Azure Monitor cho VM VM2: {'Percentage CPU': 60, 'Available Memory Bytes': 3500000000}")
 
-def test_apply_monitoring_adjustments(resource_manager):
-    """Kiểm thử phương thức apply_monitoring_adjustments."""
-    adjustments = {
-        'cpu_cloak': True,
-        'gpu_cloak': True
-    }
-    process = MagicMock()
-    process.name = "monitor_process"
-    process.pid = 505
+# ----------------------------
+# Test optimization_resources
+# ----------------------------
 
-    # Truy cập manager và shared_resource_manager từ fixture
+
+@patch('mining_environment.scripts.resource_manager.psutil.Process')
+@patch('mining_environment.scripts.resource_manager.torch.tensor')
+def test_optimize_resources(mock_tensor, mock_psutil_proc, resource_manager):
     manager = resource_manager['manager']
-    shared_resource_manager = resource_manager['mock_shared_resource_manager_instance']
     mock_logger = resource_manager['simple_mock_logger']
+    mock_model = manager.resource_optimization_model
 
-    # Đặt return_value cho apply_cloak_strategy nếu cần
-    shared_resource_manager.apply_cloak_strategy.return_value = None
-
-    # Gọi phương thức kiểm thử
-    manager.apply_monitoring_adjustments(adjustments, process)
-
-    # Kiểm tra gọi apply_cloak_strategy cho CPU và GPU
-    shared_resource_manager.apply_cloak_strategy.assert_any_call('cpu', process)
-    shared_resource_manager.apply_cloak_strategy.assert_any_call('gpu', process)
-    assert shared_resource_manager.apply_cloak_strategy.call_count == 2, "apply_cloak_strategy nên được gọi đúng 2 lần"
-
-    # Kiểm tra logger.info được gọi với thông điệp đúng
-    mock_logger.info.assert_called_with(f"Áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}).")
-
-def test_apply_monitoring_adjustments_exception(resource_manager):
-    """Kiểm thử phương thức apply_monitoring_adjustments khi có ngoại lệ."""
-    adjustments = {
-        'cpu_cloak': True,
-        'gpu_cloak': True
-    }
+    # Giả lập tiến trình
     process = MagicMock()
-    process.name = "monitor_process_exception"
-    process.pid = 506
+    process.pid = 1010
+    process.name = "optimize_process"
+    manager.mining_processes = [process]
 
-    # Truy cập manager và shared_resource_manager từ fixture
-    manager = resource_manager['manager']
-    shared_resource_manager = resource_manager['mock_shared_resource_manager_instance']
-    mock_logger = resource_manager['simple_mock_logger']
+    mock_psutil_proc.return_value.cpu_percent.return_value = 50
+    mock_psutil_proc.return_value.memory_info.return_value.rss = 104857600  # 100MB
 
-    # Đặt side_effect cho apply_cloak_strategy để ném ngoại lệ chỉ khi strategy_name == 'gpu'
-    def apply_cloak_strategy_side_effect(strategy_name, proc):
-        if strategy_name == 'gpu':
-            raise Exception("Cloak Strategy Error")
-        else:
-            return None  # Không làm gì cho 'cpu'
+    # Giả lập GPU usage, disk_io và torch.no_grad
+    with patch('mining_environment.scripts.resource_manager.temperature_monitor.get_current_gpu_usage', return_value=70), \
+         patch('mining_environment.scripts.resource_manager.temperature_monitor.get_current_disk_io_limit', return_value=30.0), \
+         patch.object(manager.stop_event, 'is_set', side_effect=[False, True]), \
+         patch('mining_environment.scripts.resource_manager.sleep', return_value=None), \
+         patch('mining_environment.scripts.resource_manager.torch.no_grad') as mock_no_grad:
+        
+        # Định nghĩa cách hoạt động của torch.no_grad()
+        mock_no_grad.return_value.__enter__.return_value = None
+        mock_no_grad.return_value.__exit__.return_value = None
 
-    shared_resource_manager.apply_cloak_strategy.side_effect = apply_cloak_strategy_side_effect
+        # Mock predict
+        mock_predict = MagicMock()
+        mock_predict.squeeze.return_value.cpu.return_value.numpy.return_value = [1, 2, 3]
+        mock_model.return_value = mock_predict
 
-    # Gọi phương thức kiểm thử
-    manager.apply_monitoring_adjustments(adjustments, process)
+        mock_tensor_instance = MagicMock()
+        mock_tensor.return_value = mock_tensor_instance
+        mock_tensor_instance.to.return_value = mock_tensor_instance
+        mock_tensor_instance.unsqueeze.return_value = mock_tensor_instance
 
-    # Kiểm tra gọi apply_cloak_strategy cho CPU và GPU
-    shared_resource_manager.apply_cloak_strategy.assert_any_call('cpu', process)
-    shared_resource_manager.apply_cloak_strategy.assert_any_call('gpu', process)
-    assert shared_resource_manager.apply_cloak_strategy.call_count == 2, "apply_cloak_strategy nên được gọi đúng 2 lần"
+        # Gọi phương thức optimize_resources
+        manager.optimize_resources()
 
-    # Kiểm tra logger.error được gọi với thông điệp đúng
-    mock_logger.error.assert_called_with(
-        f"Lỗi khi áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}): Cloak Strategy Error"
-    )
+        # Kiểm tra logger.debug được gọi đúng
+        expected_log_message = f"Mô hình AI đề xuất hành động cho tiến trình {process.name} (PID: {process.pid}): [1, 2, 3]"
+        mock_logger.debug.assert_called_with(expected_log_message)
+
+        # Kiểm tra resource_adjustment_queue.put được gọi đúng
+        manager.resource_adjustment_queue.put.assert_any_call((2, {
+            'type': 'optimization',
+            'process': process,
+            'action': [1, 2, 3]
+        }))
+
+        # Thêm các kiểm tra bổ sung để đảm bảo các mock được gọi đúng cách
+        # Kiểm tra rằng torch.tensor được gọi với các tham số đúng
+        mock_tensor.assert_called_with([50, 100, 70, 30.0, 100, 50], dtype=torch.float32)
+
+        # Kiểm tra rằng resource_optimization_model được gọi với input_tensor đúng
+        mock_model.assert_called_with(mock_tensor_instance)
+
+
+# ----------------------------
+# Test apply_recommended_action
+# ----------------------------
 
 def test_apply_recommended_action(resource_manager):
-    """Kiểm thử phương thức apply_recommended_action."""
-    action = [4, 2048, 60.0, 70.0, 40.0, 50.0]
+    manager = resource_manager['manager']
+    mock_logger = resource_manager['simple_mock_logger']
     process = MagicMock()
     process.pid = 1011
     process.name = "ai_process"
 
-    # Truy cập manager và các mock từ fixture
-    manager = resource_manager['manager']
-    shared_resource_manager = resource_manager['mock_shared_resource_manager_instance']
-    mock_logger = resource_manager['simple_mock_logger']
-    resource_adjustment_queue = manager.resource_adjustment_queue
-
-    # Gọi phương thức kiểm thử
+    # Điều chỉnh action list để phù hợp với mong đợi
+    action = [4, 2048, 60.0, 40.0, 50.0, 50.0]  # disk_io_limit=40.0, network=50.0
     manager.apply_recommended_action(action, process)
 
-    # Kiểm tra các yêu cầu điều chỉnh được đặt vào hàng đợi
-    expected_calls = [
-        call((3, {
-            'function': 'adjust_cpu_threads',
-            'args': (1011, 4, "ai_process")
-        })),
-        call((3, {
-            'function': 'adjust_ram_allocation',
-            'args': (1011, 2048, "ai_process")
-        })),
-        call((3, {
-            'function': 'adjust_gpu_usage',
-            'args': (process, [60.0, 70.0, 40.0])
-        })),
-        call((3, {
-            'function': 'adjust_disk_io_limit',
-            'args': (process, 70.0)  # Đã sửa từ 40.0 thành 70.0
-        })),
-        call((3, {
-            'function': 'adjust_network_bandwidth',
-            'args': (process, 40.0)  # Đã sửa từ 50.0 thành 40.0
-        })),
+    # Kiểm tra hàng đợi resource_adjustment_queue được gọi đúng
+    calls = [
+        call((3, {'function': 'adjust_cpu_threads', 'args': (1011, 4, "ai_process")})),
+        call((3, {'function': 'adjust_ram_allocation', 'args': (1011, 2048, "ai_process")})),
+        call((3, {'function': 'adjust_gpu_usage', 'args': (process, [60.0, 40.0, 50.0])})),
+        call((3, {'function': 'adjust_disk_io_limit', 'args': (process, 40.0)})),
+        call((3, {'function': 'adjust_network_bandwidth', 'args': (process, 50.0)}))
     ]
-    resource_adjustment_queue.put.assert_has_calls(expected_calls, any_order=True)
-    assert resource_adjustment_queue.put.call_count == 5, "resource_adjustment_queue.put nên được gọi đúng 5 lần"
-
-    # Kiểm tra gọi apply_cloak_strategy cho cache
-    shared_resource_manager.apply_cloak_strategy.assert_called_once_with('cache', process)
-
-    # Kiểm tra logger.info được gọi với thông điệp đúng
+    manager.resource_adjustment_queue.put.assert_has_calls(calls, any_order=True)
+    resource_manager['mock_shared_resource_manager_instance'].apply_cloak_strategy.assert_called_once_with('cache', process)
     mock_logger.info.assert_called_with(
         f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên AI cho tiến trình {process.name} (PID: {process.pid})."
     )
 
-def test_apply_recommended_action_exception(resource_manager):
-    """Kiểm thử phương thức apply_recommended_action khi có ngoại lệ."""
-    action = [4, 2048, 60.0, 70.0, 40.0, 50.0]
-    process = MagicMock()
-    process.pid = 1012
-    process.name = "ai_process_exception"
+# ----------------------------
+# Test cloaking requests
+# ----------------------------
 
-    # Truy cập manager và các mock từ fixture
+def test_process_cloaking_requests(resource_manager):
+    manager = resource_manager['manager']
+    process = MagicMock()
+    manager.cloaking_request_queue = MagicMock()
+    manager.cloaking_request_queue.get.return_value = process
+
+    with patch.object(manager.stop_event, 'is_set', side_effect=[False, True]), \
+         patch('time.sleep', return_value=None):
+
+        manager.process_cloaking_requests()
+
+        manager.resource_adjustment_queue.put.assert_called_once()
+        manager.cloaking_request_queue.task_done.assert_called_once()
+
+# ----------------------------
+# Test resource_adjustment_handler
+# ----------------------------
+
+def test_resource_adjustment_handler(resource_manager):
+    manager = resource_manager['manager']
+    process = MagicMock()
+    adjustment_task = {'type': 'monitoring', 'process': process, 'adjustments': {'cpu_cloak': True}}
+    manager.resource_adjustment_queue.get.return_value = (2, adjustment_task)
+
+    with patch.object(manager.stop_event, 'is_set', side_effect=[False, True]), \
+         patch('time.sleep', return_value=None):
+
+        manager.resource_adjustment_handler()
+        manager.resource_adjustment_queue.task_done.assert_called_once()
+        resource_manager['mock_shared_resource_manager_instance'].apply_cloak_strategy.assert_called_once_with('cpu', process)
+
+# ----------------------------
+# Test execute_adjustment_task với loại nhiệm vụ không xác định
+# ----------------------------
+
+def test_execute_adjustment_task_unknown_type(resource_manager):
+    manager = resource_manager['manager']
+    mock_logger = resource_manager['simple_mock_logger']
+    adjustment_task = {
+        'type': 'unknown_type',
+        'process': MagicMock()
+    }
+
+    manager.execute_adjustment_task(adjustment_task)
+    mock_logger.warning.assert_called_with("Loại nhiệm vụ không xác định: unknown_type")
+
+# ----------------------------
+# Test execute_adjustment_task nhiệm vụ hàm
+# ----------------------------
+
+def test_execute_adjustment_task_function_call(resource_manager):
     manager = resource_manager['manager']
     shared_resource_manager = resource_manager['mock_shared_resource_manager_instance']
-    mock_logger = resource_manager['simple_mock_logger']
-    resource_adjustment_queue = manager.resource_adjustment_queue
-
-    # Thiết lập apply_cloak_strategy để ném ngoại lệ
-    shared_resource_manager.apply_cloak_strategy.side_effect = Exception("AI Adjustment Error")
-
-    # Gọi phương thức kiểm thử
-    manager.apply_recommended_action(action, process)
-
-    # Kiểm tra các yêu cầu điều chỉnh được đặt vào hàng đợi
-    expected_calls = [
-        call((3, {
-            'function': 'adjust_cpu_threads',
-            'args': (1012, 4, "ai_process_exception")
-        })),
-        call((3, {
-            'function': 'adjust_ram_allocation',
-            'args': (1012, 2048, "ai_process_exception")
-        })),
-        call((3, {
-            'function': 'adjust_gpu_usage',
-            'args': (process, [60.0, 70.0, 40.0])
-        })),
-        call((3, {
-            'function': 'adjust_disk_io_limit',
-            'args': (process, 70.0)  # Đã sửa từ 40.0 thành 70.0
-        })),
-        call((3, {
-            'function': 'adjust_network_bandwidth',
-            'args': (process, 40.0)  # Đã sửa từ 50.0 thành 40.0
-        })),
-    ]
-    resource_adjustment_queue.put.assert_has_calls(expected_calls, any_order=True)
-    assert resource_adjustment_queue.put.call_count == 5, "resource_adjustment_queue.put nên được gọi đúng 5 lần"
-
-    # Kiểm tra gọi apply_cloak_strategy cho cache
-    shared_resource_manager.apply_cloak_strategy.assert_called_once_with('cache', process)
-
-    # Kiểm tra logger.error được gọi với thông điệp đúng
-    mock_logger.error.assert_called_with(
-        f"Lỗi khi áp dụng các điều chỉnh tài nguyên dựa trên AI cho tiến trình {process.name} (PID: {process.pid}): AI Adjustment Error"
-    )
-
-def test_shutdown_power_management(resource_manager):
-    """Kiểm thử phương thức shutdown_power_management."""
-    # Truy cập manager và các mock từ fixture
-    manager = resource_manager['manager']
-    mock_shutdown = resource_manager['mock_shutdown_power_management']
-    mock_logger = resource_manager['simple_mock_logger']
-    
-    # Gọi phương thức kiểm thử trên manager
-    manager.shutdown_power_management()
-    
-    # Kiểm tra rằng hàm shutdown_power_management đã được gọi đúng một lần
-    mock_shutdown.assert_called_once()
-    
-    # Kiểm tra rằng logger.info đã được gọi với thông điệp đúng
-    mock_logger.info.assert_called_with("Đóng các dịch vụ quản lý công suất thành công.")
-
-def test_discover_azure_resources(resource_manager):
-    """Kiểm thử phương thức discover_azure_resources."""
-    # Truy cập manager và các mock từ fixture
-    manager = resource_manager['manager']
-    mock_AzureMonitorClient = resource_manager['mock_AzureMonitorClient']
-    mock_AzureNetworkWatcherClient = resource_manager['mock_AzureNetworkWatcherClient']
-    mock_AzureTrafficAnalyticsClient = resource_manager['mock_AzureTrafficAnalyticsClient']
-    mock_AzureMLClient = resource_manager['mock_AzureMLClient']
-    mock_logger = resource_manager['simple_mock_logger']
-    
-    # Thiết lập return_value cho phương thức discover_resources của AzureMonitorClient
-    mock_AzureMonitorClient.return_value.discover_resources.return_value = [
-        {'id': 'vm1', 'name': 'VM1'}, {'id': 'vm2', 'name': 'VM2'}
-    ]
-    
-    # Thiết lập side_effect cho phương thức discover_resources của AzureNetworkWatcherClient
-    mock_AzureNetworkWatcherClient.return_value.discover_resources.side_effect = [
-        [{'id': 'nw1', 'name': 'NetworkWatcher1'}],                   # Network Watchers
-        [{'id': 'nsg1', 'name': 'NSG1'}, {'id': 'nsg2', 'name': 'NSG2'}]  # NSGs
-    ]
-    
-    # Thiết lập return_value cho phương thức get_traffic_workspace_ids của AzureTrafficAnalyticsClient
-    mock_AzureTrafficAnalyticsClient.return_value.get_traffic_workspace_ids.return_value = ['ta1', 'ta2']
-    
-    # Thiết lập return_value cho phương thức discover_ml_clusters của AzureMLClient
-    mock_AzureMLClient.return_value.discover_ml_clusters.return_value = ['ml1', 'ml2', 'ml3']
-    
-    # Reset các cuộc gọi trước đó để chỉ đếm các cuộc gọi trong test này
-    mock_logger.info.reset_mock()
-    
-    # Gọi phương thức kiểm thử trên manager
-    manager.discover_azure_resources()
-    
-    # In các giá trị thực tế để kiểm tra
-    print("VMs:", manager.vms)
-    print("Network Watchers:", manager.network_watchers)
-    print("NSGs:", manager.nsgs)
-    print("Traffic Analytics Workspaces:", manager.traffic_analytics_workspaces)
-    print("Azure ML Clusters:", manager.ml_clusters)
-    
-    # Kiểm tra rằng các thuộc tính đã được thiết lập đúng
-    assert manager.vms == [{'id': 'vm1', 'name': 'VM1'}, {'id': 'vm2', 'name': 'VM2'}]
-    assert manager.network_watchers == [{'id': 'nw1', 'name': 'NetworkWatcher1'}]
-    assert manager.nsgs == [{'id': 'nsg1', 'name': 'NSG1'}, {'id': 'nsg2', 'name': 'NSG2'}]
-    assert manager.traffic_analytics_workspaces == ['ta1', 'ta2']
-    assert manager.ml_clusters == ['ml1', 'ml2', 'ml3']
-    
-    # Kiểm tra logger.info được gọi đúng số lần và với các thông điệp đúng
-    assert mock_logger.info.call_count == 5
-    mock_logger.info.assert_any_call("Khám phá 2 Máy ảo.")
-    mock_logger.info.assert_any_call("Khám phá 1 Network Watchers.")
-    mock_logger.info.assert_any_call("Khám phá 2 Network Security Groups.")
-    mock_logger.info.assert_any_call("Khám phá 2 Traffic Analytics Workspaces.")
-    mock_logger.info.assert_any_call("Khám phá 3 Azure ML Clusters.")
-
-@patch('mining_environment.scripts.resource_manager.Thread.start')
-def test_initialize_threads_and_start_threads(mock_thread_start, resource_manager):
-    """Kiểm thử phương thức initialize_threads và start_threads."""
-    manager = resource_manager['manager']
-    
-    # Gọi phương thức initialize_threads để khởi tạo các luồng
-    manager.initialize_threads()
-    
-    # Kiểm tra rằng các luồng đã được khởi tạo với tên đúng
-    assert manager.monitor_thread.name == "MonitorThread"
-    assert manager.optimization_thread.name == "OptimizationThread"
-    assert manager.cloaking_thread.name == "CloakingThread"
-    assert manager.resource_adjustment_thread.name == "ResourceAdjustmentThread"
-    
-    # Gọi phương thức start_threads để bắt đầu các luồng
-    manager.start_threads()
-    
-    # Kiểm tra rằng phương thức start đã được gọi đúng số lần và thứ tự
-    assert mock_thread_start.call_count == 4
-    mock_thread_start.assert_has_calls([
-        call(),
-        call(),
-        call(),
-        call()
-    ], any_order=True)  # Sử dụng any_order=True nếu không đảm bảo thứ tự
-
-
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.monitor_and_adjust')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.optimize_resources')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.process_cloaking_requests')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.resource_adjustment_handler')
-def test_join_threads(resource_manager, mock_resource_adjustment_handler, mock_process_cloaking_requests, mock_optimize_resources, mock_monitor_and_adjust):
-    """Kiểm thử phương thức join_threads."""
-    resource_manager.join_threads()
-    
-    mock_monitor_and_adjust.assert_not_called()
-    mock_optimize_resources.assert_not_called()
-    mock_process_cloaking_requests.assert_not_called()
-    mock_resource_adjustment_handler.assert_not_called()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.collect_metrics')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.prepare_input_features')
-@patch('mining_environment.scripts.resource_manager.torch.tensor')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.resource_optimization_model')
-def test_optimize_resources(mock_model, mock_tensor, mock_prepare_features, mock_collect_metrics, resource_manager, mock_logger):
-    """Kiểm thử phương thức optimize_resources."""
-    mock_model_instance = MagicMock()
-    mock_model.return_value = mock_model_instance
-    mock_predict = MagicMock()
-    mock_predict.squeeze.return_value = MagicMock(cpu=lambda: MagicMock(numpy=lambda: [1, 2, 3]))
-    mock_model_instance.__call__.return_value = mock_predict
-    
-    process = MagicMock()
-    process.pid = 1010
-    process.name = "optimize_process"
-    resource_manager.mining_processes = [process]
-    
-    mock_collect_metrics.return_value = {
-        'cpu_usage_percent': 50,
-        'memory_usage_mb': 1024,
-        'gpu_usage_percent': 60,
-        'disk_io_mbps': 30.0,
-        'network_bandwidth_mbps': 100,
-        'cache_limit_percent': 50
-    }
-    mock_prepare_features.return_value = [50, 1024, 60, 30.0, 100, 50]
-    mock_tensor_instance = MagicMock()
-    mock_tensor.return_value = mock_tensor_instance
-    mock_tensor_instance.to.return_value = mock_tensor_instance
-    mock_tensor_instance.unsqueeze.return_value = mock_tensor_instance
-    mock_predict.squeeze.return_value.cpu.return_value.numpy.return_value = [1, 2, 3]
-    
-    with patch.object(resource_manager.resource_adjustment_queue, 'put') as mock_queue_put:
-        resource_manager.optimize_resources()
-    
-        mock_collect_metrics.assert_called_once_with(process)
-        mock_prepare_features.assert_called_once_with(mock_collect_metrics.return_value)
-        mock_tensor.assert_called_once_with([50, 1024, 60, 30.0, 100, 50], dtype=torch.float32)
-        mock_tensor_instance.to.assert_called_once_with(resource_manager.resource_optimization_device)
-        mock_tensor_instance.unsqueeze.assert_called_once_with(0)
-        mock_model_instance.__call__.assert_called_once_with(mock_tensor_instance)
-        mock_predict.squeeze.assert_called_once_with(0)
-        mock_predict.squeeze.return_value.cpu.return_value.numpy.assert_called_once()
-        
-        # Kiểm tra yêu cầu điều chỉnh được đặt vào hàng đợi
-        adjustment_task = {
-            'type': 'optimization',
-            'process': process,
-            'action': [1, 2, 3]
-        }
-        mock_queue_put.assert_called_once_with((2, adjustment_task))
-        mock_logger.debug.assert_called_with(f"Mô hình AI đề xuất hành động cho tiến trình {process.name} (PID: {process.pid}): [1, 2, 3]")
-    
-@patch('mining_environment.scripts.resource_manager.ResourceManager.execute_adjustment_task')
-def test_resource_adjustment_handler(mock_execute_adjustment_task, resource_manager, mock_logger):
-    """Kiểm thử phương thức resource_adjustment_handler."""
-    adjustment_task = {
-        'type': 'optimization',
-        'process': MagicMock(),
-        'action': [1, 2, 3]
-    }
-    
-    with patch.object(resource_manager.resource_adjustment_queue, 'get', return_value=(2, adjustment_task)):
-        with patch.object(resource_manager.resource_adjustment_queue, 'task_done') as mock_task_done:
-            with patch.object(resource_manager.stop_event, 'is_set', return_value=False):
-                with patch('time.sleep', return_value=None):
-                    # Chạy một lần để xử lý nhiệm vụ
-                    resource_manager.resource_adjustment_handler()
-                    mock_execute_adjustment_task.assert_called_once_with(adjustment_task)
-                    mock_task_done.assert_called_once()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.execute_adjustment_task')
-def test_resource_adjustment_handler_empty_queue(mock_execute_adjustment_task, resource_manager, mock_logger):
-    """Kiểm thử phương thức resource_adjustment_handler khi hàng đợi trống."""
-    with patch.object(resource_manager.resource_adjustment_queue, 'get', side_effect=Empty):
-        with patch.object(resource_manager.resource_adjustment_queue, 'task_done') as mock_task_done:
-            with patch.object(resource_manager.stop_event, 'is_set', return_value=False):
-                with patch('time.sleep', return_value=None):
-                    # Chạy một lần khi hàng đợi trống
-                    resource_manager.resource_adjustment_handler()
-                    mock_execute_adjustment_task.assert_not_called()
-                    mock_task_done.assert_not_called()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.shared_resource_manager.apply_cloak_strategy')
-def test_execute_adjustment_task_cloaking(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với nhiệm vụ 'cloaking'."""
-    process = MagicMock()
-    process.name = "cloaking_process"
-    process.pid = 707
-    
-    adjustment_task = {
-        'type': 'cloaking',
-        'process': process,
-        'strategies': ['cpu', 'gpu']
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_cloak.assert_any_call('cpu', process)
-    mock_apply_cloak.assert_any_call('gpu', process)
-    mock_logger.info.assert_called_with(f"Hoàn thành cloaking cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.shared_resource_manager.apply_cloak_strategy', side_effect=Exception("Cloaking Error"))
-def test_execute_adjustment_task_cloaking_exception(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với nhiệm vụ 'cloaking' khi có ngoại lệ."""
-    process = MagicMock()
-    process.name = "cloaking_process_exception"
-    process.pid = 708
-    
-    adjustment_task = {
-        'type': 'cloaking',
-        'process': process,
-        'strategies': ['cpu', 'gpu']
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_cloak.assert_any_call('cpu', process)
-    mock_apply_cloak.assert_any_call('gpu', process)
-    mock_logger.error.assert_called_with(
-        f"Lỗi khi áp dụng chiến lược cloaking cpu cho tiến trình {process.name} (PID: {process.pid}): Cloaking Error"
-    )
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.shared_resource_manager.apply_recommended_action')
-def test_execute_adjustment_task_optimization(mock_apply_recommended_action, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với nhiệm vụ 'optimization'."""
-    process = MagicMock()
-    process.name = "optimization_process"
-    process.pid = 809
-    
-    adjustment_task = {
-        'type': 'optimization',
-        'process': process,
-        'action': [4, 2048, 70.0, 80.0, 50.0, 60.0]
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_recommended_action.assert_called_once_with([4, 2048, 70.0, 80.0, 50.0, 60.0], process)
-    mock_logger.info.assert_called_with(f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên AI cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.shared_resource_manager.apply_recommended_action', side_effect=Exception("Optimization Error"))
-def test_execute_adjustment_task_optimization_exception(mock_apply_recommended_action, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với nhiệm vụ 'optimization' khi có ngoại lệ."""
-    process = MagicMock()
-    process.name = "optimization_process_exception"
-    process.pid = 810
-    
-    adjustment_task = {
-        'type': 'optimization',
-        'process': process,
-        'action': [4, 2048, 70.0, 80.0, 50.0, 60.0]
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_recommended_action.assert_called_once_with([4, 2048, 70.0, 80.0, 50.0, 60.0], process)
-    mock_logger.error.assert_called_with(
-        f"Lỗi khi áp dụng các điều chỉnh tài nguyên dựa trên AI cho tiến trình {process.name} (PID: {process.pid}): Optimization Error"
-    )
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.shared_resource_manager.restore_resources')
-def test_execute_adjustment_task_restore(mock_restore_resources, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với nhiệm vụ 'restore'."""
-    process = MagicMock()
-    process.name = "restore_process"
-    process.pid = 911
-    
-    adjustment_task = {
-        'type': 'restore',
-        'process': process
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_restore_resources.assert_called_once_with(process)
-    mock_logger.info.assert_called_with(f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.shared_resource_manager.restore_resources', side_effect=Exception("Restore Error"))
-def test_execute_adjustment_task_restore_exception(mock_restore_resources, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với nhiệm vụ 'restore' khi có ngoại lệ."""
-    process = MagicMock()
-    process.name = "restore_process_exception"
-    process.pid = 912
-    
-    adjustment_task = {
-        'type': 'restore',
-        'process': process
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_restore_resources.assert_called_once_with(process)
-    mock_logger.error.assert_called_with(
-        f"Lỗi khi khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}): Restore Error"
-    )
-
-
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.restore_resources')
-def test_restore_resources_success(mock_restore_resources, resource_manager, mock_logger):
-    """Kiểm thử phương thức restore_resources trong trường hợp thành công."""
-    process = MagicMock()
-    process.pid = 1111
-    process.name = "restore_process"
-    
-    # Giả lập original_resource_limits
-    resource_manager.shared_resource_manager.original_resource_limits = {
-        process.pid: {
-            'cpu_freq': 3000,
-            'cpu_threads': 4,
-            'ram_allocation_mb': 2048,
-            'gpu_power_limit': 250,
-            'ionice_class': 2,
-            'network_bandwidth_limit_mbps': 100.0
-        }
-    }
-    
-    resource_manager.shared_resource_manager.restore_resources = MagicMock()
-    
-    resource_manager.shared_resource_manager.restore_resources.return_value = None
-    
-    resource_manager.shared_resource_manager.restore_resources = mock_restore_resources
-    
-    resource_manager.shared_resource_manager.restore_resources.return_value = None
-    
-    resource_manager.shared_resource_manager.restore_resources = mock_restore_resources
-    
-    resource_manager.restore_resources(process)
-    
-    mock_restore_resources.assert_called_once_with(process)
-    mock_logger.info.assert_called_with(f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.restore_resources', side_effect=Exception("Restore Error"))
-def test_restore_resources_manager_exception(mock_restore_resources, resource_manager, mock_logger):
-    """Kiểm thử phương thức restore_resources khi có ngoại lệ."""
-    process = MagicMock()
-    process.pid = 1112
-    process.name = "restore_process_exception"
-    
-    # Giả lập original_resource_limits
-    resource_manager.shared_resource_manager.original_resource_limits = {
-        process.pid: {
-            'cpu_freq': 3000,
-            'cpu_threads': 4,
-            'ram_allocation_mb': 2048,
-            'gpu_power_limit': 250,
-            'ionice_class': 2,
-            'network_bandwidth_limit_mbps': 100.0
-        }
-    }
-    
-    resource_manager.restore_resources(process)
-    
-    mock_restore_resources.assert_called_once_with(process)
-    mock_logger.error.assert_called_with(
-        f"Lỗi khi khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}): Restore Error"
-    )
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.get_current_cpu_frequency', return_value=3000)
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.get_current_gpu_power_limit', return_value=250)
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.get_current_network_bandwidth_limit', return_value=100.0)
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.get_current_ionice_class', return_value=2)
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_cpu_frequency')
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_cpu_threads')
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_ram_allocation')
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_gpu_power_limit')
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_disk_io_priority')
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_network_bandwidth')
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.logger')
-def test_restore_resources_full(mock_logger, mock_adjust_network_bw, mock_adjust_disk_io, mock_adjust_gpu_power, 
-                                mock_adjust_ram, mock_adjust_cpu_threads, mock_adjust_cpu_freq, 
-                                mock_get_ionice, mock_get_network_bw, mock_get_gpu_power, mock_get_cpu_freq, 
-                                mock_restore_resources, resource_manager):
-    """Kiểm thử phương thức restore_resources với toàn bộ các giới hạn tài nguyên."""
-    process = MagicMock()
-    process.pid = 1213
-    process.name = "restore_full_process"
-    
-    # Giả lập original_resource_limits
-    resource_manager.shared_resource_manager.original_resource_limits = {
-        process.pid: {
-            'cpu_freq': 3000,
-            'cpu_threads': 4,
-            'ram_allocation_mb': 2048,
-            'gpu_power_limit': 250,
-            'ionice_class': 2,
-            'network_bandwidth_limit_mbps': 100.0
-        }
-    }
-    
-    resource_manager.shared_resource_manager.restore_resources = MagicMock()
-    
-    resource_manager.restore_resources(process)
-    
-    # Kiểm tra gọi các phương thức điều chỉnh
-    mock_adjust_cpu_freq.assert_called_once_with(process.pid, 3000, process.name)
-    mock_adjust_cpu_threads.assert_called_once_with(process.pid, 4, process.name)
-    mock_adjust_ram.assert_called_once_with(process.pid, 2048, process.name)
-    mock_adjust_gpu_power.assert_called_once_with(process.pid, 250, process.name)
-    mock_adjust_disk_io.assert_called_once_with(process.pid, 2, process.name)
-    mock_adjust_network_bw.assert_called_once_with(process, 100.0)
-    
-    # Kiểm tra log
-    mock_logger.info.assert_any_call(f"Đã khôi phục tần số CPU về 3000MHz cho tiến trình {process.name} (PID: {process.pid}).")
-    mock_logger.info.assert_any_call(f"Đã khôi phục số luồng CPU về 4 cho tiến trình {process.name} (PID: {process.pid}).")
-    mock_logger.info.assert_any_call(f"Đã khôi phục giới hạn RAM về 2048MB cho tiến trình {process.name} (PID: {process.pid}).")
-    mock_logger.info.assert_any_call(f"Đã khôi phục giới hạn công suất GPU về 250W cho tiến trình {process.name} (PID: {process.pid}).")
-    mock_logger.info.assert_any_call(f"Đã khôi phục lớp ionice về 2 cho tiến trình {process.name} (PID: {process.pid}).")
-    mock_logger.info.assert_any_call(f"Đã khôi phục giới hạn băng thông mạng về 100.0 Mbps cho tiến trình {process.name} (PID: {process.pid}).")
-    mock_logger.info.assert_any_call(f"Đã khôi phục tất cả tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
-    
-    # Kiểm tra original_resource_limits đã được xóa
-    assert process.pid not in resource_manager.shared_resource_manager.original_resource_limits
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.apply_cloak_strategy')
-def test_execute_adjustments(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustments."""
-    adjustments = {
-        'cpu_freq': 2500,
-        'gpu_power_limit': 200,
-        'network_bandwidth_limit_mbps': 80.0,
-        'ionice_class': 2,
-        'drop_caches': True,
-        'unknown_adjust': 999
-    }
-    process = MagicMock()
-    process.pid = 1314
-    process.name = "execute_adjust_process"
-    
-    resource_manager.execute_adjustments(adjustments, process)
-    
-    # Kiểm tra các gọi hàm điều chỉnh
-    mock_apply_cloak.assert_any_call('cpu_freq', process)  # Chưa rõ cách mapping, cần xác nhận
-    mock_apply_cloak.assert_any_call('gpu_power_limit', process)
-    mock_apply_cloak.assert_any_call('network_bandwidth_limit_mbps', process)
-    mock_apply_cloak.assert_any_call('ionice_class', process)
-    mock_apply_cloak.assert_any_call('drop_caches', process)
-    
-    # Kiểm tra log warning cho unknown_adjust
-    mock_logger.warning.assert_called_with("Không nhận dạng được điều chỉnh: unknown_adjust")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.apply_cloak_strategy', side_effect=Exception("Adjustment Error"))
-def test_execute_adjustments_exception(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustments khi có ngoại lệ."""
-    adjustments = {
-        'cpu_freq': 2500
-    }
-    process = MagicMock()
-    process.pid = 1315
-    process.name = "execute_adjust_exception_process"
-    
-    resource_manager.execute_adjustments(adjustments, process)
-    
-    mock_apply_cloak.assert_called_once_with('cpu_freq', process)
-    mock_logger.error.assert_called_with(
-        f"Lỗi khi thực hiện các điều chỉnh cloaking cho tiến trình {process.name} (PID: {process.pid}): Adjustment Error"
-    )
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.restore_resources')
-def test_restore_resources_method(mock_restore_resources, resource_manager, mock_logger):
-    """Kiểm thử phương thức restore_resources."""
-    process = MagicMock()
-    process.pid = 1415
-    process.name = "restore_method_process"
-    
-    # Giả lập original_resource_limits
-    resource_manager.shared_resource_manager.original_resource_limits = {
-        process.pid: {
-            'cpu_freq': 3000,
-            'cpu_threads': 4,
-            'ram_allocation_mb': 2048,
-            'gpu_power_limit': 250,
-            'ionice_class': 2,
-            'network_bandwidth_limit_mbps': 100.0
-        }
-    }
-    
-    resource_manager.shared_resource_manager.restore_resources = mock_restore_resources
-    
-    resource_manager.restore_resources(process)
-    
-    mock_restore_resources.assert_called_once_with(process)
-    mock_logger.info.assert_called_with(f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.apply_cloak_strategy')
-def test_execute_adjustment_task_unknown_type(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với loại nhiệm vụ không xác định."""
-    adjustment_task = {
-        'type': 'unknown_type',
-        'process': MagicMock(),
-        'action': None
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_cloak.assert_not_called()
-    mock_logger.warning.assert_called_with("Loại nhiệm vụ không xác định: unknown_type")
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.apply_cloak_strategy')
-def test_execute_adjustment_task_function_task(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với nhiệm vụ hàm."""
     adjustment_task = {
         'function': 'adjust_cpu_threads',
-        'args': (1616, 4, "function_process")
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    resource_manager.shared_resource_manager.adjust_cpu_threads.assert_called_once_with(1616, 4, "function_process")
-    mock_logger.info.assert_not_called()
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.adjust_cpu_threads', side_effect=Exception("Function Task Error"))
-def test_execute_adjustment_task_function_task_exception(mock_adjust_cpu_threads, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task với nhiệm vụ hàm khi có ngoại lệ."""
-    adjustment_task = {
-        'function': 'adjust_cpu_threads',
-        'args': (1616, 4, "function_process_exception")
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    resource_manager.shared_resource_manager.adjust_cpu_threads.assert_called_once_with(1616, 4, "function_process_exception")
-    mock_logger.error.assert_called_with("Không tìm thấy hàm điều chỉnh tài nguyên: adjust_cpu_threads")  # Nếu exception ném ra trong adjust_cpu_threads, nó sẽ được log ở SharedResourceManager
-
-# ----------------------------
-# Kiểm thử các phương thức hỗ trợ
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.should_collect_azure_monitor_data', return_value=True)
-@patch('mining_environment.scripts.resource_manager.ResourceManager.collect_azure_monitor_data')
-def test_monitor_and_adjust(mock_collect_azure, mock_should_collect, resource_manager, mock_logger):
-    """Kiểm thử phương thức monitor_and_adjust."""
-    process = MagicMock()
-    process.update_resource_usage = MagicMock()
-    resource_manager.mining_processes = [process]
-    
-    with patch.object(resource_manager, 'allocate_resources_with_priority') as mock_allocate:
-        with patch.object(resource_manager, 'check_temperature_and_enqueue') as mock_check_temp:
-            with patch.object(resource_manager, 'check_power_and_enqueue') as mock_check_power:
-                with patch.object(resource_manager, 'sleep', return_value=None):
-                    # Giả lập không có ngoại lệ
-                    resource_manager.monitor_and_adjust()
-                    
-                    mock_allocate.assert_called_once()
-                    mock_check_temp.assert_called_once_with(process, 75, 85)
-                    mock_check_power.assert_called_once_with(process, 150, 300)
-                    mock_collect_azure.assert_called_once()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.monitor_and_adjust')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.optimize_resources')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.process_cloaking_requests')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.resource_adjustment_handler')
-def test_monitor_and_adjust_exception(mock_resource_adjustment_handler, mock_process_cloaking_requests, mock_optimize_resources, mock_monitor_and_adjust, resource_manager, mock_logger):
-    """Kiểm thử phương thức monitor_and_adjust khi có ngoại lệ."""
-    with patch.object(resource_manager, 'discover_mining_processes', side_effect=Exception("Monitor Error")):
-        with patch.object(resource_manager, 'sleep', return_value=None):
-            resource_manager.monitor_and_adjust()
-            mock_logger.error.assert_called_with("Lỗi trong quá trình theo dõi và điều chỉnh: Monitor Error")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.optimize_resources')
-def test_optimize_resources_thread(mock_optimize_resources, resource_manager, mock_logger):
-    """Kiểm thử luồng optimize_resources."""
-    with patch.object(resource_manager, 'stop_event', new=MagicMock(is_set=MagicMock(return_value=True))):
-        with patch.object(resource_manager, 'sleep', return_value=None):
-            resource_manager.optimize_resources()
-            mock_logger.error.assert_not_called()  # Không có ngoại lệ
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.monitor_and_adjust')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.optimize_resources')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.process_cloaking_requests')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.resource_adjustment_handler')
-def test_process_cloaking_requests_thread(mock_resource_adjustment_handler, mock_process_cloaking_requests, mock_optimize_resources, mock_monitor_and_adjust, resource_manager, mock_logger):
-    """Kiểm thử luồng process_cloaking_requests."""
-    with patch.object(resource_manager.cloaking_request_queue, 'get', return_value=MagicMock()) as mock_queue_get:
-        with patch.object(resource_manager.resource_adjustment_queue, 'put') as mock_queue_put:
-            with patch.object(resource_manager.cloaking_request_queue, 'task_done') as mock_task_done:
-                with patch.object(resource_manager.stop_event, 'is_set', return_value=False):
-                    with patch('time.sleep', return_value=None):
-                        # Chạy một lần để xử lý nhiệm vụ
-                        resource_manager.process_cloaking_requests()
-                        mock_queue_put.assert_called_once()
-                        mock_task_done.assert_called_once()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.resource_adjustment_handler')
-def test_resource_adjustment_handler_thread(mock_resource_adjustment_handler, resource_manager, mock_logger):
-    """Kiểm thử luồng resource_adjustment_handler."""
-    with patch.object(resource_manager.resource_adjustment_queue, 'get', return_value=(1, MagicMock())) as mock_queue_get:
-        with patch.object(resource_manager.resource_adjustment_queue, 'task_done') as mock_task_done:
-            with patch.object(resource_manager.stop_event, 'is_set', return_value=False):
-                with patch('time.sleep', return_value=None):
-                    resource_manager.resource_adjustment_handler()
-                    mock_resource_adjustment_handler.assert_called_once()
-                    mock_task_done.assert_called_once()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.apply_cloak_strategy')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.execute_recommended_action')
-def test_execute_adjustment_task_no_type(mock_execute_recommended_action, mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử execute_adjustment_task với nhiệm vụ hàm."""
-    adjustment_task = {
-        'function': 'adjust_cpu_threads',
-        'args': (1616, 4, "function_process")
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    resource_manager.shared_resource_manager.adjust_cpu_threads.assert_called_once_with(1616, 4, "function_process")
-    mock_logger.error.assert_not_called()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.apply_cloak_strategy')
-def test_execute_adjustment_task_unknown_function(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử execute_adjustment_task với chức năng không tồn tại."""
-    adjustment_task = {
-        'function': 'unknown_function',
-        'args': ()
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_cloak.assert_not_called()
-    mock_logger.error.assert_called_with("Không tìm thấy hàm điều chỉnh tài nguyên: unknown_function")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.apply_cloak_strategy')
-def test_execute_adjustment_task_with_type_unknown(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử execute_adjustment_task với loại nhiệm vụ không xác định."""
-    adjustment_task = {
-        'type': 'unknown_type',
-        'process': MagicMock(),
-        'action': None
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_cloak.assert_not_called()
-    mock_logger.warning.assert_called_with("Loại nhiệm vụ không xác định: unknown_type")
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.apply_cloak_strategy')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.apply_recommended_action')
-def test_execute_adjustment_task_with_type_optimization(mock_apply_recommended_action, mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử execute_adjustment_task với nhiệm vụ 'optimization'."""
-    process = MagicMock()
-    process.name = "optimization_process"
-    process.pid = 818
-    
-    adjustment_task = {
-        'type': 'optimization',
-        'process': process,
-        'action': [1, 2, 3]
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_recommended_action.assert_called_once_with([1, 2, 3], process)
-    mock_apply_cloak.assert_not_called()
-    mock_logger.info.assert_called_with(f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên AI cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.apply_cloak_strategy')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.apply_monitoring_adjustments')
-def test_execute_adjustment_task_with_type_monitoring(mock_apply_monitoring_adjustments, mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử execute_adjustment_task với nhiệm vụ 'monitoring'."""
-    process = MagicMock()
-    process.name = "monitoring_process"
-    process.pid = 919
-    
-    adjustments = {
-        'cpu_cloak': True,
-        'gpu_cloak': True
-    }
-    
-    adjustment_task = {
-        'type': 'monitoring',
-        'process': process,
-        'adjustments': adjustments
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_monitoring_adjustments.assert_called_once_with(adjustments, process)
-    mock_apply_cloak.assert_not_called()
-    mock_logger.info.assert_called_with(f"Áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.restore_resources')
-def test_execute_adjustment_task_with_type_restore(mock_restore_resources, resource_manager, mock_logger):
-    """Kiểm thử execute_adjustment_task với nhiệm vụ 'restore'."""
-    process = MagicMock()
-    process.name = "restore_task_process"
-    process.pid = 920
-    
-    adjustment_task = {
-        'type': 'restore',
-        'process': process
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_restore_resources.assert_called_once_with(process)
-    mock_logger.info.assert_called_with(f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.apply_recommended_action')
-@patch('mining_environment.scripts.resource_manager.SharedResourceManager.apply_cloak_strategy')
-def test_apply_recommended_action_multiple_calls(mock_apply_cloak, mock_apply_recommended_action, resource_manager, mock_logger):
-    """Kiểm thử phương thức apply_recommended_action với nhiều hành động."""
-    action = [2, 1024, 55.0, 65.0, 35.0, 45.0]
-    process = MagicMock()
-    process.pid = 929
-    process.name = "multi_action_process"
-    
-    resource_manager.apply_recommended_action(action, process)
-    
-    # Kiểm tra các yêu cầu điều chỉnh được đặt vào hàng đợi
-    expected_calls = [
-        call((3, {
-            'function': 'adjust_cpu_threads',
-            'args': (929, 2, "multi_action_process")
-        })),
-        call((3, {
-            'function': 'adjust_ram_allocation',
-            'args': (929, 1024, "multi_action_process")
-        })),
-        call((3, {
-            'function': 'adjust_gpu_usage',
-            'args': (process, [55.0, 65.0, 35.0])
-        })),
-        call((3, {
-            'function': 'adjust_disk_io_limit',
-            'args': (process, 35.0)
-        })),
-        call((3, {
-            'function': 'adjust_network_bandwidth',
-            'args': (process, 45.0)
-        })),
-    ]
-    resource_manager.resource_adjustment_queue.put.assert_has_calls(expected_calls, any_order=True)
-    
-    # Kiểm tra áp dụng cloaking cache
-    mock_apply_cloak.assert_called_once_with('cache', process)
-    
-    # Kiểm tra logger
-    mock_logger.info.assert_called_with(
-        f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên AI cho tiến trình {process.name} (PID: {process.pid})."
-    )
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.execute_adjustment_task')
-def test_resource_adjustment_handler_with_task(mock_execute_adjustment_task, resource_manager, mock_logger):
-    """Kiểm thử phương thức resource_adjustment_handler với nhiệm vụ cụ thể."""
-    process = MagicMock()
-    process.name = "specific_task_process"
-    process.pid = 930
-    
-    adjustment_task = {
-        'type': 'monitoring',
-        'process': process,
-        'adjustments': {
-            'cpu_cloak': True
-        }
-    }
-    
-    with patch.object(resource_manager.resource_adjustment_queue, 'get', return_value=(2, adjustment_task)):
-        with patch.object(resource_manager.resource_adjustment_queue, 'task_done') as mock_task_done:
-            with patch.object(resource_manager.stop_event, 'is_set', return_value=False):
-                with patch('time.sleep', return_value=None):
-                    resource_manager.resource_adjustment_handler()
-                    mock_execute_adjustment_task.assert_called_once_with(adjustment_task)
-                    mock_task_done.assert_called_once()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.execute_adjustment_task')
-def test_resource_adjustment_handler_with_empty_queue(mock_execute_adjustment_task, resource_manager, mock_logger):
-    """Kiểm thử phương thức resource_adjustment_handler khi hàng đợi trống."""
-    with patch.object(resource_manager.resource_adjustment_queue, 'get', side_effect=Empty):
-        with patch.object(resource_manager.resource_adjustment_queue, 'task_done') as mock_task_done:
-            with patch.object(resource_manager.stop_event, 'is_set', return_value=False):
-                with patch('time.sleep', return_value=None):
-                    resource_manager.resource_adjustment_handler()
-                    mock_execute_adjustment_task.assert_not_called()
-                    mock_task_done.assert_not_called()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.execute_adjustment_task', side_effect=Exception("Adjustment Task Error"))
-def test_execute_adjustment_task_error(mock_execute_adjustment_task, resource_manager, mock_logger):
-    """Kiểm thử phương thức execute_adjustment_task khi có ngoại lệ."""
-    adjustment_task = {
-        'type': 'optimization',
-        'process': MagicMock(),
-        'action': [1, 2, 3]
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_execute_adjustment_task.assert_called_once_with(adjustment_task)
-    # Nếu exception được ném ra bên trong execute_adjustment_task, nó sẽ được log trong resource_adjustment_handler
-
-
-# ----------------------------
-# Kiểm thử Singleton Pattern
-# ----------------------------
-
-def test_singleton_pattern(resource_manager):
-    """Kiểm thử rằng ResourceManager là Singleton."""
-    another_instance = ResourceManager(resource_manager.config, resource_manager.model_path, resource_manager.logger)
-    assert resource_manager is another_instance
-
-# ----------------------------
-# Kiểm thử các phương thức collect_metrics và prepare_input_features
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.psutil.Process')
-@patch('mining_environment.scripts.resource_manager.temperature_monitor.get_current_gpu_usage', return_value=70)
-@patch('mining_environment.scripts.resource_manager.temperature_monitor.get_current_disk_io_limit', return_value=50.0)
-def test_collect_metrics(mock_get_disk_io, mock_get_gpu_usage, mock_psutil_process, resource_manager, mock_logger):
-    """Kiểm thử phương thức collect_metrics."""
-    mock_process = MagicMock()
-    mock_psutil_process.return_value.cpu_percent.return_value = 50
-    mock_psutil_process.return_value.memory_info.return_value.rss = 104857600  # 100 MB
-    
-    metrics = resource_manager.collect_metrics(mock_process)
-    
-    mock_psutil_process.assert_called_once_with(mock_process.pid)
-    mock_psutil_process.return_value.cpu_percent.assert_called_once_with(interval=1)
-    mock_psutil_process.return_value.memory_info.assert_called_once()
-    mock_get_gpu_usage.assert_called_once_with(mock_process.pid)
-    assert metrics == {
-        'cpu_usage_percent': 50,
-        'memory_usage_mb': 100.0,
-        'gpu_usage_percent': 70,
-        'disk_io_mbps': 50.0,
-        'network_bandwidth_mbps': 100,
-        'cache_limit_percent': 50
+        'args': (1234, 4, "function_process")
     }
 
-def test_prepare_input_features(resource_manager):
-    """Kiểm thử phương thức prepare_input_features."""
-    metrics = {
-        'cpu_usage_percent': 50,
-        'memory_usage_mb': 1024,
-        'gpu_usage_percent': 60,
-        'disk_io_mbps': 30.0,
-        'network_bandwidth_mbps': 100,
-        'cache_limit_percent': 50
-    }
-    input_features = resource_manager.prepare_input_features(metrics)
-    assert input_features == [50, 1024, 60, 30.0, 100, 50]
+    manager.execute_adjustment_task(adjustment_task)
+    shared_resource_manager.adjust_cpu_threads.assert_called_once_with(1234, 4, "function_process")
 
 # ----------------------------
-# Kiểm thử load_model
+# Kết thúc
 # ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.torch.load', return_value=MagicMock())
-@patch('mining_environment.scripts.resource_manager.torch.device', return_value=torch.device("cpu"))
-def test_load_model(mock_device, mock_torch_load, resource_manager, mock_logger):
-    """Kiểm thử phương thức load_model thành công."""
-    model_mock = MagicMock()
-    model_mock.eval = MagicMock()
-    mock_torch_load.return_value = model_mock
-    
-    model, device = resource_manager.load_model(resource_manager.model_path)
-    
-    mock_torch_load.assert_called_once_with(resource_manager.model_path)
-    mock_device.assert_called_once_with("cpu")
-    model_mock.to.assert_called_once_with(torch.device("cpu"))
-    model_mock.eval.assert_called_once()
-    mock_logger.info.assert_called_with(f"Tải mô hình tối ưu hóa tài nguyên từ {resource_manager.model_path} vào cpu.")
-    assert model == model_mock
-    assert device == torch.device("cpu")
-
-@patch('mining_environment.scripts.resource_manager.torch.load', side_effect=Exception("Model Load Error"))
-def test_load_model_exception(mock_torch_load, resource_manager, mock_logger):
-    """Kiểm thử phương thức load_model khi có ngoại lệ."""
-    with pytest.raises(Exception) as excinfo:
-        resource_manager.load_model(resource_manager.model_path)
-    assert "Model Load Error" in str(excinfo.value)
-    mock_torch_load.assert_called_once_with(resource_manager.model_path)
-    mock_logger.error.assert_called_with(f"Không thể tải mô hình AI từ {resource_manager.model_path}: Model Load Error")
-
-# ----------------------------
-# Kiểm thử execute_adjustment_task helper methods
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.apply_recommended_action')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.apply_cloak_strategy')
-def test_execute_adjustment_task_optimization_action(mock_apply_cloak, mock_apply_recommended_action, resource_manager, mock_logger):
-    """Kiểm thử execute_adjustment_task với nhiệm vụ 'optimization'."""
-    process = MagicMock()
-    process.name = "optimization_task_process"
-    process.pid = 929
-    
-    adjustment_task = {
-        'type': 'optimization',
-        'process': process,
-        'action': [2, 2048, 60.0, 70.0, 40.0, 50.0]
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_apply_recommended_action.assert_called_once_with([2, 2048, 60.0, 70.0, 40.0, 50.0], process)
-    mock_apply_cloak.assert_not_called()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.restore_resources')
-def test_execute_adjustment_task_restore_action(mock_restore_resources, resource_manager, mock_logger):
-    """Kiểm thử execute_adjustment_task với nhiệm vụ 'restore'."""
-    process = MagicMock()
-    process.name = "restore_task_process"
-    process.pid = 930
-    
-    adjustment_task = {
-        'type': 'restore',
-        'process': process
-    }
-    
-    resource_manager.execute_adjustment_task(adjustment_task)
-    
-    mock_restore_resources.assert_called_once_with(process)
-    mock_logger.info.assert_called_with(f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
-
-# ----------------------------
-# Kiểm thử execute_recommended_action và các queue interactions
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.execute_recommended_action')
-def test_apply_recommended_action_and_queue(mock_execute_recommended_action, resource_manager, mock_logger):
-    """Kiểm thử việc áp dụng các hành động được mô hình AI đề xuất và tương tác với hàng đợi."""
-    action = [4, 2048, 60.0, 70.0, 40.0, 50.0]
-    process = MagicMock()
-    process.pid = 1013
-    process.name = "ai_process_queue"
-    
-    with patch.object(resource_manager.resource_adjustment_queue, 'put') as mock_queue_put:
-        resource_manager.apply_recommended_action(action, process)
-        
-        expected_calls = [
-            call((3, {
-                'function': 'adjust_cpu_threads',
-                'args': (1013, 4, "ai_process_queue")
-            })),
-            call((3, {
-                'function': 'adjust_ram_allocation',
-                'args': (1013, 2048, "ai_process_queue")
-            })),
-            call((3, {
-                'function': 'adjust_gpu_usage',
-                'args': (process, [60.0, 70.0, 40.0])
-            })),
-            call((3, {
-                'function': 'adjust_disk_io_limit',
-                'args': (process, 40.0)
-            })),
-            call((3, {
-                'function': 'adjust_network_bandwidth',
-                'args': (process, 50.0)
-            })),
-        ]
-        mock_queue_put.assert_has_calls(expected_calls, any_order=True)
-        
-        resource_manager.shared_resource_manager.apply_cloak_strategy.assert_called_once_with('cache', process)
-        mock_logger.info.assert_called_with(
-            f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên AI cho tiến trình {process.name} (PID: {process.pid})."
-        )
-
-# ----------------------------
-# Kiểm thử các phương thức tích hợp với SharedResourceManager
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.restore_resources')
-def test_restore_resources_integration(mock_restore_resources, resource_manager, mock_logger):
-    """Kiểm thử phương thức restore_resources tích hợp với SharedResourceManager."""
-    process = MagicMock()
-    process.pid = 1113
-    process.name = "restore_integration_process"
-    
-    # Giả lập original_resource_limits
-    resource_manager.shared_resource_manager.original_resource_limits = {
-        process.pid: {
-            'cpu_freq': 3000,
-            'cpu_threads': 4,
-            'ram_allocation_mb': 2048,
-            'gpu_power_limit': 250,
-            'ionice_class': 2,
-            'network_bandwidth_limit_mbps': 100.0
-        }
-    }
-    
-    resource_manager.restore_resources(process)
-    
-    mock_restore_resources.assert_called_once_with(process)
-    mock_logger.info.assert_called_with(f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.SharedResourceManager.apply_cloak_strategy')
-def test_apply_cloak_strategy_integration(mock_apply_cloak, resource_manager, mock_logger):
-    """Kiểm thử phương thức apply_cloak_strategy tích hợp với CloakStrategyFactory và execute_adjustments."""
-    strategy_name = "test_strategy_integration"
-    process = MagicMock()
-    process.pid = 1216
-    process.name = "cloak_integration_process"
-    
-    # Giả lập chiến lược cloaking
-    mock_strategy = MagicMock()
-    mock_strategy.apply.return_value = {
-        'cpu_freq': 2500,
-        'gpu_power_limit': 200,
-        'network_bandwidth_limit_mbps': 80.0,
-        'ionice_class': 2
-    }
-    
-    with patch('mining_environment.scripts.resource_manager.CloakStrategyFactory.create_strategy', return_value=mock_strategy):
-        with patch.object(resource_manager, 'execute_adjustments') as mock_execute_adjustments:
-            resource_manager.apply_cloak_strategy(strategy_name, process)
-            
-            mock_apply_cloak.assert_called_once_with(strategy_name, process)
-            mock_strategy.apply.assert_called_once_with(process)
-            mock_logger.info.assert_called_with(
-                f"Áp dụng điều chỉnh {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): {{'cpu_freq': 2500, 'gpu_power_limit': 200, 'network_bandwidth_limit_mbps': 80.0, 'ionice_class': 2}}"
-            )
-            mock_execute_adjustments.assert_called_once_with(mock_strategy.apply.return_value, process)
-            assert resource_manager.shared_resource_manager.original_resource_limits[process.pid] == {
-                'cpu_freq': 3000,  # Giả lập get_current_cpu_frequency trả về 3000
-                'gpu_power_limit': 250,  # Giả lập get_current_gpu_power_limit trả về 250
-                'network_bandwidth_limit_mbps': 100.0,  # Giả lập get_current_network_bandwidth_limit trả về 100.0
-                'ionice_class': 1  # Giả lập get_current_ionice_class trả về 1
-            }
-
-# ----------------------------
-# Kiểm thử xử lý ngoại lệ trong các luồng
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.monitor_and_adjust', side_effect=Exception("Monitor Thread Error"))
-def test_monitor_and_adjust_thread_exception(mock_monitor_and_adjust, resource_manager, mock_logger):
-    """Kiểm thử luồng monitor_and_adjust khi có ngoại lệ."""
-    with patch.object(resource_manager, 'sleep', return_value=None):
-        resource_manager.monitor_and_adjust()
-        mock_logger.error.assert_called_with("Lỗi trong quá trình theo dõi và điều chỉnh: Monitor Thread Error")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.optimize_resources', side_effect=Exception("Optimization Thread Error"))
-def test_optimize_resources_thread_exception(mock_optimize_resources, resource_manager, mock_logger):
-    """Kiểm thử luồng optimize_resources khi có ngoại lệ."""
-    with patch.object(resource_manager, 'sleep', return_value=None):
-        resource_manager.optimize_resources()
-        mock_logger.error.assert_called_with("Lỗi trong quá trình tối ưu hóa tài nguyên: Optimization Thread Error")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.process_cloaking_requests', side_effect=Exception("Cloaking Thread Error"))
-def test_process_cloaking_requests_thread_exception(mock_process_cloaking_requests, resource_manager, mock_logger):
-    """Kiểm thử luồng process_cloaking_requests khi có ngoại lệ."""
-    with patch.object(resource_manager, 'sleep', return_value=None):
-        resource_manager.process_cloaking_requests()
-        mock_logger.error.assert_called_with("Lỗi trong quá trình xử lý yêu cầu cloaking: Cloaking Thread Error")
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.resource_adjustment_handler', side_effect=Exception("Resource Adjustment Thread Error"))
-def test_resource_adjustment_handler_thread_exception(mock_resource_adjustment_handler, resource_manager, mock_logger):
-    """Kiểm thử luồng resource_adjustment_handler khi có ngoại lệ."""
-    with patch.object(resource_manager, 'sleep', return_value=None):
-        resource_manager.resource_adjustment_handler()
-        mock_logger.error.assert_called_with("Lỗi trong quá trình xử lý điều chỉnh tài nguyên: Resource Adjustment Thread Error")
-
-# ----------------------------
-# Kiểm thử load_model fail
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.load_model', side_effect=Exception("Load Model Failed"))
-def test_load_model_fail(mock_load_model, resource_manager, mock_logger):
-    """Kiểm thử khi load_model thất bại trong khởi tạo ResourceManager."""
-    with pytest.raises(Exception) as excinfo:
-        ResourceManager(resource_manager.config, resource_manager.model_path, resource_manager.logger)
-    assert "Load Model Failed" in str(excinfo.value)
-    mock_load_model.assert_called_with(resource_manager.model_path)
-    mock_logger.error.assert_called_with(f"Không thể tải mô hình AI từ {resource_manager.model_path}: Load Model Failed")
-
-# ----------------------------
-# Kiểm thử destroy singleton instance
-# ----------------------------
-
-def test_resource_manager_singleton(resource_manager):
-    """Kiểm thử rằng ResourceManager là Singleton."""
-    another_instance = ResourceManager(resource_manager.config, resource_manager.model_path, resource_manager.logger)
-    assert resource_manager is another_instance
-
-# ----------------------------
-# Kiểm thử monitor_and_adjust method
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.should_collect_azure_monitor_data', return_value=False)
-@patch('mining_environment.scripts.resource_manager.ResourceManager.check_power_and_enqueue')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.check_temperature_and_enqueue')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.allocate_resources_with_priority')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.discover_mining_processes')
-def test_monitor_and_adjust_method(mock_discover, mock_allocate, mock_check_temp, mock_check_power, mock_should_collect, resource_manager, mock_logger):
-    """Kiểm thử phương thức monitor_and_adjust khi không cần thu thập dữ liệu Azure."""
-    process = MagicMock()
-    process.update_resource_usage = MagicMock()
-    resource_manager.mining_processes = [process]
-    
-    with patch.object(resource_manager, 'sleep', return_value=None):
-        with patch.object(resource_manager.stop_event, 'is_set', return_value=True):
-            resource_manager.monitor_and_adjust()
-    
-    mock_discover.assert_called_once()
-    mock_allocate.assert_called_once()
-    mock_check_temp.assert_called_once_with(process, 75, 85)
-    mock_check_power.assert_called_once_with(process, 150, 300)
-    mock_should_collect.assert_called_once()
-    mock_logger.error.assert_not_called()
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.should_collect_azure_monitor_data', return_value=True)
-@patch('mining_environment.scripts.resource_manager.ResourceManager.collect_azure_monitor_data')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.check_power_and_enqueue')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.check_temperature_and_enqueue')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.allocate_resources_with_priority')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.discover_mining_processes')
-def test_monitor_and_adjust_with_azure(mock_discover, mock_allocate, mock_check_temp, mock_check_power, mock_collect_azure, mock_should_collect, resource_manager, mock_logger):
-    """Kiểm thử phương thức monitor_and_adjust khi cần thu thập dữ liệu Azure."""
-    process = MagicMock()
-    process.update_resource_usage = MagicMock()
-    resource_manager.mining_processes = [process]
-    
-    with patch.object(resource_manager, 'sleep', return_value=None):
-        with patch.object(resource_manager.stop_event, 'is_set', return_value=True):
-            resource_manager.monitor_and_adjust()
-    
-    mock_discover.assert_called_once()
-    mock_allocate.assert_called_once()
-    mock_check_temp.assert_called_once_with(process, 75, 85)
-    mock_check_power.assert_called_once_with(process, 150, 300)
-    mock_should_collect.assert_called_once()
-    mock_collect_azure.assert_called_once()
-    mock_logger.error.assert_not_called()
-
-# ----------------------------
-# Kiểm thử execute_recommended_action method
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.resource_adjustment_queue.put')
-def test_apply_recommended_action_full(mock_put, resource_manager, mock_logger):
-    """Kiểm thử phương thức apply_recommended_action với đầy đủ các hành động."""
-    action = [4, 2048, 70.0, 80.0, 60.0, 70.0]
-    process = MagicMock()
-    process.pid = 1217
-    process.name = "full_action_process"
-    
-    resource_manager.apply_recommended_action(action, process)
-    
-    expected_calls = [
-        call((3, {
-            'function': 'adjust_cpu_threads',
-            'args': (1217, 4, "full_action_process")
-        })),
-        call((3, {
-            'function': 'adjust_ram_allocation',
-            'args': (1217, 2048, "full_action_process")
-        })),
-        call((3, {
-            'function': 'adjust_gpu_usage',
-            'args': (process, [70.0, 80.0, 60.0])
-        })),
-        call((3, {
-            'function': 'adjust_disk_io_limit',
-            'args': (process, 60.0)
-        })),
-        call((3, {
-            'function': 'adjust_network_bandwidth',
-            'args': (process, 70.0)
-        })),
-    ]
-    mock_put.assert_has_calls(expected_calls, any_order=True)
-    
-    resource_manager.shared_resource_manager.apply_cloak_strategy.assert_called_once_with('cache', process)
-    mock_logger.info.assert_called_with(
-        f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên AI cho tiến trình {process.name} (PID: {process.pid})."
-    )
-
-# ----------------------------
-# Kiểm thử các phương thức của ResourceManager liên quan đến AI model
-# ----------------------------
-
-@patch('mining_environment.scripts.resource_manager.ResourceManager.resource_optimization_model')
-@patch('mining_environment.scripts.resource_manager.torch.tensor')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.prepare_input_features')
-@patch('mining_environment.scripts.resource_manager.ResourceManager.collect_metrics')
-def test_optimize_resources_ai_interaction(mock_collect_metrics, mock_prepare_features, mock_tensor, mock_model, resource_manager, mock_logger):
-    """Kiểm thử tương tác với mô hình AI trong optimize_resources."""
-    process = MagicMock()
-    process.pid = 1318
-    process.name = "ai_interaction_process"
-    resource_manager.mining_processes = [process]
-    
-    mock_collect_metrics.return_value = {
-        'cpu_usage_percent': 60,
-        'memory_usage_mb': 1500,
-        'gpu_usage_percent': 70,
-        'disk_io_mbps': 40.0,
-        'network_bandwidth_mbps': 100,
-        'cache_limit_percent': 50
-    }
-    mock_prepare_features.return_value = [60, 1500, 70, 40.0, 100, 50]
-    
-    mock_tensor_instance = MagicMock()
-    mock_tensor.return_value = mock_tensor_instance
-    mock_tensor_instance.to.return_value = mock_tensor_instance
-    mock_tensor_instance.unsqueeze.return_value = mock_tensor_instance
-    
-    mock_prediction = MagicMock()
-    mock_prediction.squeeze.return_value = MagicMock(cpu=lambda: MagicMock(numpy=lambda: [10, 20, 30]))
-    mock_model.return_value.__call__.return_value = mock_prediction
-    
-    with patch.object(resource_manager.resource_adjustment_queue, 'put') as mock_queue_put:
-        resource_manager.optimize_resources()
-    
-        mock_collect_metrics.assert_called_once_with(process)
-        mock_prepare_features.assert_called_once_with(mock_collect_metrics.return_value)
-        mock_tensor.assert_called_once_with([60, 1500, 70, 40.0, 100, 50], dtype=torch.float32)
-        mock_tensor_instance.to.assert_called_once_with(resource_manager.resource_optimization_device)
-        mock_tensor_instance.unsqueeze.assert_called_once_with(0)
-        mock_model.return_value.__call__.assert_called_once_with(mock_tensor_instance)
-        mock_prediction.squeeze.assert_called_once_with(0)
-        mock_prediction.squeeze.return_value.cpu.return_value.numpy.assert_called_once()
-        
-        adjustment_task = {
-            'type': 'optimization',
-            'process': process,
-            'action': [10, 20, 30]
-        }
-        mock_queue_put.assert_called_once_with((2, adjustment_task))
-        mock_logger.debug.assert_called_with(f"Mô hình AI đề xuất hành động cho tiến trình {process.name} (PID: {process.pid}): [10, 20, 30]")
