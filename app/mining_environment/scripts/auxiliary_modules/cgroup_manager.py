@@ -215,6 +215,7 @@ def assign_cpu_cgroup(proc: psutil.Process, cpu_threads: int, logger: logging.Lo
         logger.info(f"Đã gán tiến trình PID {proc.pid} vào CPU cores: {available_cores}")
     except Exception as e:
         logger.error(f"Lỗi khi gán CPU cores cho tiến trình PID {proc.pid}: {e}")
+        sys.exit(1)  # Thêm dòng này để kết thúc chương trình với mã lỗi 1
 
 
 def assign_ram_cgroup(proc: psutil.Process, memory_limit_mb: int, logger: logging.Logger):
@@ -266,7 +267,7 @@ def assign_disk_io_cgroup(proc: psutil.Process, disk_io_limit_mbps: float, logge
         logger.info(f"Đã thiết lập Disk I/O write limit {disk_io_limit_mbps} Mbps cho tiến trình PID: {proc.pid}")
     except Exception as e:
         logger.error(f"Lỗi khi thiết lập Disk I/O cho tiến trình PID {proc.pid}: {e}")
-
+        sys.exit(1)  # Thêm dòng này để kết thúc chương trình với mã lỗi 1
 
 def assign_cpu_freq(proc: psutil.Process, cpu_freq_mhz: int, logger: logging.Logger):
     """
