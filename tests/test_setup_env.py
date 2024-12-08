@@ -5,7 +5,6 @@ import pytest
 import locale
 import subprocess  # Thêm dòng này
 from unittest.mock import patch, MagicMock, mock_open
-
 from pathlib import Path
 
 # Giả sử rằng setup_env.py nằm trong sys.path hoặc ta đã thêm trước

@@ -58,6 +58,7 @@ class PowerManager:
         self.cpu_base_power_watts = 10.0  # Công suất cơ bản khi CPU idle (W)
         self.cpu_max_power_watts = 150.0  # Công suất tối đa khi CPU full load (W)
 
+
     def get_cpu_power(self, pid: Optional[int] = None) -> float:
         """
         Ước tính công suất tiêu thụ hiện tại của CPU dựa trên tải và tần số.

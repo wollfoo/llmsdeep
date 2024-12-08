@@ -36,17 +36,7 @@ class ObfuscatedEncryptedFileHandler(logging.Handler):
         super().close()
 
 def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO') -> Logger:
-    """
-    Thiết lập logging cho một module cụ thể với mã hóa và làm rối.
 
-    Args:
-        module_name (str): Tên của module để lấy logger.
-        log_file (str): Đường dẫn tới tệp log của module.
-        log_level (str): Mức độ logging (default: 'INFO').
-
-    Returns:
-        Logger: Đối tượng logger đã được cấu hình.
-    """
     logger = logging.getLogger(module_name)
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
     
@@ -77,12 +67,12 @@ def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO') -> L
             encryption_key = Fernet.generate_key().decode()
             os.environ['LOG_ENCRYPTION_KEY'] = encryption_key
             print(f"Đã tạo khóa mã hóa mới: {encryption_key} (Lưu lại để sử dụng tiếp)")
-
+        
         try:
             fernet = Fernet(encryption_key.encode())
         except Exception as e:
             print(f"Lỗi khi tạo đối tượng Fernet với khóa mã hóa: {e}", file=sys.stderr)
-            sys.exit(1)
+            return None
 
         # Tạo ObfuscatedEncryptedFileHandler
         encrypted_handler = ObfuscatedEncryptedFileHandler(log_file, fernet)
