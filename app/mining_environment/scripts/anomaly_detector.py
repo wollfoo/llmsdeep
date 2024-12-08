@@ -9,15 +9,15 @@ from pathlib import Path
 from threading import Lock, Event, Thread
 from typing import List, Any, Dict, Optional
 
-from base_manager import BaseManager
-from utils import MiningProcess
+from .base_manager import BaseManager
+from .utils import MiningProcess
 
-from auxiliary_modules.power_management import (
+from .auxiliary_modules.power_management import (
     get_cpu_power,
     get_gpu_power
 )
 
-from auxiliary_modules.temperature_monitor import (
+from .auxiliary_modules.temperature_monitor import (
     get_cpu_temperature,
     get_gpu_temperature 
 )
