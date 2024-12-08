@@ -9,10 +9,10 @@ import psutil  # Thêm psutil để giám sát tài nguyên
 from pathlib import Path
 
 # Import cấu hình logging chung
-from logging_config import setup_logging
+from .logging_config import setup_logging
 
 # Import các hàm từ cgroup_manager.py
-from auxiliary_modules.cgroup_manager import setup_cgroups, assign_process_to_cgroups
+from .auxiliary_modules.cgroup_manager import setup_cgroups, assign_process_to_cgroups
 
 def load_json_config(config_path, logger):
     """
@@ -82,14 +82,20 @@ def setup_environment_variables(environmental_limits, logger):
         logger (Logger): Đối tượng logger để ghi log.
     """
     try:
+        # Xử lý memory_limits
         memory_limits = environmental_limits.get('memory_limits', {})
         ram_percent_threshold = memory_limits.get('ram_percent_threshold')
         if ram_percent_threshold is not None:
             os.environ['RAM_PERCENT_THRESHOLD'] = str(ram_percent_threshold)
             logger.info(f"Đã đặt biến môi trường RAM_PERCENT_THRESHOLD: {ram_percent_threshold}%")
         else:
+            # Xóa biến môi trường nếu không có giá trị trong config
+            if 'RAM_PERCENT_THRESHOLD' in os.environ:
+                del os.environ['RAM_PERCENT_THRESHOLD']
+                logger.info("Đã xóa biến môi trường RAM_PERCENT_THRESHOLD vì không có trong cấu hình.")
             logger.warning("Không tìm thấy `ram_percent_threshold` trong `memory_limits`.")
 
+        # Xử lý gpu_optimization
         gpu_optimization = environmental_limits.get('gpu_optimization', {})
         gpu_util_min = gpu_optimization.get('gpu_utilization_percent_optimal', {}).get('min')
         gpu_util_max = gpu_optimization.get('gpu_utilization_percent_optimal', {}).get('max')
@@ -98,6 +104,13 @@ def setup_environment_variables(environmental_limits, logger):
             os.environ['GPU_UTIL_MAX'] = str(gpu_util_max)
             logger.info(f"Đã đặt biến môi trường GPU_UTIL_MIN: {gpu_util_min}%, GPU_UTIL_MAX: {gpu_util_max}%")
         else:
+            # Tùy chọn: Xóa các biến môi trường GPU nếu không cần thiết
+            if 'GPU_UTIL_MIN' in os.environ:
+                del os.environ['GPU_UTIL_MIN']
+                logger.info("Đã xóa biến môi trường GPU_UTIL_MIN vì không có trong cấu hình.")
+            if 'GPU_UTIL_MAX' in os.environ:
+                del os.environ['GPU_UTIL_MAX']
+                logger.info("Đã xóa biến môi trường GPU_UTIL_MAX vì không có trong cấu hình.")
             logger.warning("Không tìm thấy `gpu_utilization_percent_optimal.min` hoặc `max` trong `gpu_optimization`.")
     except Exception as e:
         logger.error(f"Lỗi khi đặt biến môi trường: {e}")
