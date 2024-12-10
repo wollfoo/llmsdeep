@@ -1,5 +1,5 @@
 # anomaly_detector.py
-
+import os
 import torch
 import psutil
 import pynvml
@@ -9,8 +9,12 @@ from pathlib import Path
 from threading import Lock, Event, Thread
 from typing import List, Any, Dict, Optional
 
+
+
+
 from .base_manager import BaseManager
 from .utils import MiningProcess
+
 
 from .auxiliary_modules.power_management import (
     get_cpu_power,
@@ -442,7 +446,7 @@ class AnomalyDetector(BaseManager):
                 gpu['gpu_percent'],
                 gpu['memory_percent'],
                 gpu['temperature_celsius'],
-                current_state['gpu_power_watts']  # Thêm công suất GPU
+                gpu['gpu_power_watts']  # Thêm công suất GPU từ GPU cụ thể
             ])
 
         input_features.extend([
@@ -470,6 +474,8 @@ class AnomalyDetector(BaseManager):
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy tần số CPU: {e}")
             return None
+
+
 
     def get_cache_percent(self) -> Optional[float]:
         """
