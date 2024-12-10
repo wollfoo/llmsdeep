@@ -148,6 +148,7 @@ class BaseManager:
         if missing_baseline_keys:
             raise KeyError(f"Thiếu các khóa trong baseline_thresholds. Yêu cầu: {', '.join(missing_baseline_keys)}.")
 
+
     def _validate_resource_allocation(self, resource_allocation: Dict[str, Any]):
         """
         Kiểm tra cấu hình tài nguyên.
@@ -161,30 +162,32 @@ class BaseManager:
         """
         if not isinstance(resource_allocation, dict):
             raise ValueError("resource_allocation phải là một dictionary.")
-        required_resource_keys = ["ram", "gpu", "disk_io", "network", "cache"]
-        missing_resource_keys = [key for key in required_resource_keys if key not in resource_allocation]
-        if missing_resource_keys:
-            raise KeyError(f"resource_allocation phải định nghĩa cấu hình cho {', '.join(missing_resource_keys)}.")
 
-        # Kiểm tra cấu hình cho 'ram'
-        if "max_allocation_mb" not in resource_allocation["ram"]:
-            raise KeyError("resource_allocation['ram'] phải định nghĩa 'max_allocation_mb'.")
+        # Định nghĩa các khóa con cần thiết cho từng tài nguyên
+        required_resource_keys = {
+            "ram": ["max_allocation_mb"],
+            "gpu": ["max_usage_percent"],
+            "disk_io": ["min_limit_mbps", "max_limit_mbps"],
+            "network": ["bandwidth_limit_mbps"],
+            "cache": ["limit_percent"]
+        }
 
-        # Kiểm tra cấu hình cho 'gpu'
-        if "max_usage_percent" not in resource_allocation["gpu"]:
-            raise KeyError("resource_allocation['gpu'] phải định nghĩa 'max_usage_percent'.")
+        # Kiểm tra sự tồn tại của các tài nguyên chính
+        missing_resources = [res for res in required_resource_keys if res not in resource_allocation]
+        if missing_resources:
+            raise KeyError(f"resource_allocation phải định nghĩa cấu hình cho các tài nguyên: {', '.join(missing_resources)}.")
 
-        # Kiểm tra cấu hình cho 'disk_io'
-        if "min_limit_mbps" not in resource_allocation["disk_io"] or "max_limit_mbps" not in resource_allocation["disk_io"]:
-            raise KeyError("resource_allocation['disk_io'] phải định nghĩa 'min_limit_mbps' và 'max_limit_mbps'.")
+        # Kiểm tra sự tồn tại của các khóa con trong từng tài nguyên
+        for resource, subkeys in required_resource_keys.items():
+            missing_subkeys = [key for key in subkeys if key not in resource_allocation[resource]]
+            if missing_subkeys:
+                if len(missing_subkeys) == 1:
+                    msg = f"resource_allocation['{resource}'] phải định nghĩa '{missing_subkeys[0]}'."
+                else:
+                    keys = "', '".join(missing_subkeys)
+                    msg = f"resource_allocation['{resource}'] phải định nghĩa các khóa '{keys}'."
+                raise KeyError(msg)
 
-        # Kiểm tra cấu hình cho 'network'
-        if "bandwidth_limit_mbps" not in resource_allocation["network"]:
-            raise KeyError("resource_allocation['network'] phải định nghĩa 'bandwidth_limit_mbps'.")
-
-        # Kiểm tra cấu hình cho 'cache'
-        if "limit_percent" not in resource_allocation["cache"]:
-            raise KeyError("resource_allocation['cache'] phải định nghĩa 'limit_percent'.")
 
     def _validate_temperature_limits(self, temperature_limits: Dict[str, Any]):
         """
