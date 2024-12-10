@@ -8,7 +8,7 @@ from time import sleep
 from typing import Dict, Any
 
 from .resource_manager import ResourceManager
-from .anomaly_detector import AnomalyDetector  # Import lớp AnomalyDetector từ anomaly_detector.py
+from .anomaly_detector import AnomalyDetector  
 from .logging_config import setup_logging
 
 # Định nghĩa các thư mục cấu hình, mô hình, và logs
@@ -110,15 +110,9 @@ def start():
     """
     global _system_manager_instance
 
-    # Tải cấu hình từ các tệp JSON
+    # Tải cấu hình từ tệp JSON duy nhất
     resource_config_path = CONFIG_DIR / "resource_config.json"
-    process_config_path = CONFIG_DIR / "process_config.json"
-
-    resource_config = load_config(resource_config_path)
-    process_config = load_config(process_config_path)
-
-    # Hợp nhất cấu hình từ nhiều tệp
-    config = {**resource_config, **process_config}
+    config = load_config(resource_config_path)
 
     # Kiểm tra sự tồn tại của các mô hình AI
     if not RESOURCE_OPTIMIZATION_MODEL_PATH.exists():
@@ -128,7 +122,7 @@ def start():
         system_logger.error(f"Mô hình AI không tìm thấy tại: {ANOMALY_CLOAKING_MODEL_PATH}")
         sys.exit(1)
 
-    # Khởi tạo SystemManager với cấu hình và logger
+    # Khởi tạo SystemManager với cấu hình
     _system_manager_instance = SystemManager(config)
 
     # Bắt đầu chạy SystemManager
