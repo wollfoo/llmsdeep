@@ -1,7 +1,5 @@
 {
-  "system_params": {
-    "timezone": "UTC",
-    "locale": "en_US.UTF-8"
-  }
+  "_comment": "Thiết lập hệ thống cho setup_env.py",
+  "timezone": "UTC",
+  "locale": "en_US.UTF-8"
 }
-

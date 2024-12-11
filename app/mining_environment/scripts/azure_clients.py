@@ -6,16 +6,20 @@ from typing import List, Dict, Any, Optional
 import datetime
 import time
 
-
 from azure.monitor.query import MetricsQueryClient, MetricAggregationType
-from azure.mgmt.security import SecurityCenter
+from azure.mgmt.security import SecurityCenterClient
 from azure.loganalytics import LogAnalyticsDataClient, models as logmodels
+from azure.loganalytics.models import QueryBody
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
 from azure.identity import ClientSecretCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.machinelearningservices import MachineLearningServicesMgmtClient
 
+
+from azure.ai.anomalydetector import AnomalyDetectorClient
+from azure.ai.anomalydetector.models import DetectRequest, DetectResponse
+import openai
 
 class AzureBaseClient:
     """
@@ -67,14 +71,13 @@ class AzureBaseClient:
             self.logger.error(f"Lỗi khi khám phá tài nguyên loại {resource_type}: {e}")
             return []
 
-
 class AzureMonitorClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Monitor.
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        self.client = MonitorClient(self.credential, self.subscription_id)
+        self.client = MetricsQueryClient(self.credential)
 
     def get_metrics(
         self, 
@@ -91,19 +94,21 @@ class AzureMonitorClient(AzureBaseClient):
             aggregations = [MetricAggregationType.AVERAGE]
         
         try:
-            metrics_data = self.client.metrics.list(
+            metrics_data = self.client.list(
                 resource_id=resource_id,
+                metric_names=metric_names,
                 timespan=timespan,
                 interval=interval,
-                metricnames=','.join(metric_names),
-                aggregation=aggregations
+                aggregations=aggregations
             )
             metrics = {}
-            for metric in metrics_data.value:
+            for metric in metrics_data.metrics:
                 metrics[metric.name] = []
                 for ts in metric.timeseries:
                     for dp in ts.data:
-                        metrics[metric.name].append(dp.average or dp.total or dp.minimum or dp.maximum or dp.count)
+                        # Sử dụng giá trị tương ứng trong các aggregation
+                        value = dp.average or dp.total or dp.minimum or dp.maximum or dp.count or 0
+                        metrics[metric.name].append(value)
             self.logger.info(f"Đã lấy metrics cho tài nguyên {resource_id}: {metric_names}")
             return metrics
         except Exception as e:
@@ -116,7 +121,7 @@ class AzureSentinelClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        self.security_client = SecurityCenter(self.credential, self.subscription_id)
+        self.security_client = SecurityCenterClient(self.credential, self.subscription_id)
 
     def get_recent_alerts(self, days: int = 1) -> List[Any]:
         """
@@ -231,13 +236,13 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi truy vấn logs với khoảng thời gian cụ thể từ Azure Log Analytics: {e}")
             return []
 
-
 class AzureSecurityCenterClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Security Center.
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
+        from azure.mgmt.security import SecurityCenterClient
         self.security_client = SecurityCenterClient(self.credential, self.subscription_id)
 
     def get_security_recommendations(self) -> List[Any]:
@@ -256,13 +261,13 @@ class AzureSecurityCenterClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy security recommendations từ Azure Security Center: {e}")
             return []
 
-
 class AzureNetworkWatcherClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Network Watcher.
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
+        from azure.mgmt.network import NetworkManagementClient
         self.network_client = NetworkManagementClient(self.credential, self.subscription_id)
 
     def get_flow_logs(self, resource_group: str, network_watcher_name: str, nsg_name: str) -> List[Any]:
@@ -340,7 +345,6 @@ class AzureNetworkWatcherClient(AzureBaseClient):
         except Exception as e:
             self.logger.error(f"Lỗi khi xóa flow log {flow_log_name} từ NSG {nsg_name} trong Resource Group {resource_group}: {e}")
             return False
-
 
 class AzureTrafficAnalyticsClient(AzureBaseClient):
     """
@@ -443,7 +447,7 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             }
             self.network_client.flow_logs.begin_create_or_update(
                 resource_group_name=resource_group,
-                network_watcher_name=network_watcher_name,
+                network_security_group_name=nsg_name,
                 flow_log_name=f"{nsg_name}-flowlog",
                 parameters=parameters
             ).result()
@@ -468,7 +472,7 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
         try:
             self.network_client.flow_logs.begin_delete(
                 resource_group_name=resource_group,
-                network_watcher_name=network_watcher_name,
+                network_security_group_name=nsg_name,
                 flow_log_name=f"{nsg_name}-flowlog"
             ).result()
             self.logger.info(f"Đã tắt Traffic Analytics cho NSG {nsg_name} trong Resource Group {resource_group}.")
@@ -512,7 +516,6 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy khu vực của Workspace {workspace_resource_id}: {e}")
             return "eastus"  # Mặc định là eastus nếu không lấy được khu vực
 
-
 class AzureMLClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Machine Learning Clusters.
@@ -530,9 +533,9 @@ class AzureMLClient(AzureBaseClient):
             List[Dict[str, Any]]: Danh sách các ML Clusters.
         """
         try:
-            clusters = self.discover_resources(self.compute_resource_type)
-            self.logger.info(f"Đã khám phá {len(clusters)} Azure ML Clusters.")
-            return clusters
+            resources = self.discover_resources(self.compute_resource_type)
+            self.logger.info(f"Đã khám phá {len(resources)} Azure ML Clusters.")
+            return resources
         except Exception as e:
             self.logger.error(f"Lỗi khi khám phá Azure ML Clusters: {e}")
             return []
@@ -544,21 +547,159 @@ class AzureMLClient(AzureBaseClient):
         
         try:
             monitor_client = MetricsQueryClient(self.credential)
-            metrics_data = monitor_client.metrics.list(
+            metrics_data = monitor_client.list(
                 resource_id=compute_id,
+                metric_names=metric_names,
                 timespan=timespan,
                 interval=interval,
-                metricnames=','.join(metric_names),
-                aggregation=[MetricAggregationType.AVERAGE]
+                aggregations=[MetricAggregationType.AVERAGE]
             )
             metrics = {}
-            for metric in metrics_data.value:
+            for metric in metrics_data.metrics:
                 metrics[metric.name] = []
                 for ts in metric.timeseries:
                     for dp in ts.data:
-                        metrics[metric.name].append(dp.average or dp.total or dp.minimum or dp.maximum or dp.count)
+                        # Sử dụng giá trị tương ứng trong các aggregation
+                        value = dp.average or dp.total or dp.minimum or dp.maximum or dp.count or 0
+                        metrics[metric.name].append(value)
             self.logger.info(f"Đã lấy metrics cho ML Cluster {compute_id}: {metric_names}")
             return metrics
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy metrics từ ML Cluster {compute_id}: {e}")
             return {}
+    
+class AzureAnomalyDetectorClient(AzureBaseClient):
+    """
+    Lớp để tương tác với Azure Anomaly Detector.
+    """
+    def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
+        super().__init__(logger)
+        self.endpoint = config.get("azure_anomaly_detector", {}).get("api_base")
+        self.api_key = config.get("azure_anomaly_detector", {}).get("api_key")
+        self.client = self.authenticate()
+    
+    def authenticate(self) -> AnomalyDetectorClient:
+        """
+        Khởi tạo AnomalyDetectorClient với endpoint và API key.
+        """
+        if not self.endpoint or not self.api_key:
+            self.logger.error("Thông tin endpoint hoặc api_key cho Azure Anomaly Detector không được thiết lập.")
+            raise ValueError("Thiếu thông tin cấu hình cho Azure Anomaly Detector.")
+        
+        try:
+            client = AnomalyDetectorClient(endpoint=self.endpoint, credential=self.api_key)
+            self.logger.info("Đã kết nối thành công với Azure Anomaly Detector.")
+            return client
+        except Exception as e:
+            self.logger.error(f"Lỗi khi kết nối với Azure Anomaly Detector: {e}")
+            raise e
+    
+    def detect_anomalies(self, metric_data: Dict[str, Any]) -> bool:
+        """
+        Phát hiện bất thường dựa trên dữ liệu metrics gửi đến.
+
+        Args:
+            metric_data (Dict[str, Any]): Dữ liệu metrics của các tiến trình.
+
+        Returns:
+            bool: True nếu phát hiện bất thường, False ngược lại.
+        """
+        try:
+            # Giả định metric_data là dict với keys là PID và values là dict chứa các metrics
+            for pid, metrics in metric_data.items():
+                # Tạo DetectRequest cho từng tiến trình
+                series = []
+                # Giả định rằng 'cpu_usage' là một metric quan trọng để phát hiện bất thường
+                cpu_usage = metrics.get('cpu_usage_percent', [])
+                if not cpu_usage:
+                    continue
+                for i, usage in enumerate(cpu_usage):
+                    series.append({"timestamp": datetime.datetime.utcnow() - datetime.timedelta(minutes=len(cpu_usage)-i), "value": usage})
+                
+                request = DetectRequest(series=series, granularity="minutely")
+                response: DetectResponse = self.client.detect_entire_series(request)
+                
+                if response.is_anomaly:
+                    self.logger.warning(f"Phát hiện bất thường trong tiến trình PID {pid}.")
+                    return True
+            return False
+        except Exception as e:
+            self.logger.error(f"Lỗi khi phát hiện bất thường với Azure Anomaly Detector: {e}")
+            return False
+
+class AzureOpenAIClient(AzureBaseClient):
+    """
+    Lớp để tương tác với Azure OpenAI Service.
+    """
+    def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
+        super().__init__(logger)
+        self.endpoint = config.get("azure_openai", {}).get("api_base")
+        self.api_key = config.get("azure_openai", {}).get("api_key")
+        self.deployment_name = config.get("azure_openai", {}).get("deployment_name")
+        self.api_version = config.get("azure_openai", {}).get("api_version", "2023-03-15-preview")
+        self.initialize_openai()
+    
+    def initialize_openai(self):
+        """
+        Cấu hình OpenAI với endpoint và API key.
+        """
+        if not self.endpoint or not self.api_key or not self.deployment_name:
+            self.logger.error("Thông tin endpoint, api_key hoặc deployment_name cho Azure OpenAI không được thiết lập.")
+            raise ValueError("Thiếu thông tin cấu hình cho Azure OpenAI Service.")
+        
+        try:
+            openai.api_type = "azure"
+            openai.api_base = self.endpoint
+            openai.api_version = self.api_version
+            openai.api_key = self.api_key
+            self.logger.info("Đã cấu hình thành công Azure OpenAI Service.")
+        except Exception as e:
+            self.logger.error(f"Lỗi khi cấu hình Azure OpenAI Service: {e}")
+            raise e
+    
+    def get_optimization_suggestions(self, state_data: Dict[str, Any]) -> List[float]:
+        """
+        Gửi dữ liệu trạng thái hệ thống đến Azure OpenAI và nhận gợi ý tối ưu hóa.
+
+        Args:
+            state_data (Dict[str, Any]): Dữ liệu trạng thái của hệ thống.
+
+        Returns:
+            List[float]: Danh sách các hành động tối ưu hóa đề xuất.
+        """
+        try:
+            prompt = self.construct_prompt(state_data)
+            response = openai.Completion.create(
+                engine=self.deployment_name,
+                prompt=prompt,
+                max_tokens=150,
+                temperature=0.5,
+                n=1,
+                stop=None,
+            )
+            suggestion_text = response.choices[0].text.strip()
+            # Giả định rằng gợi ý được trả về dưới dạng danh sách số, ngăn cách bằng dấu phẩy
+            suggestions = [float(x.strip()) for x in suggestion_text.split(',') if x.strip()]
+            self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI: {suggestions}")
+            return suggestions
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy gợi ý từ Azure OpenAI Service: {e}")
+            return []
+    
+    def construct_prompt(self, state_data: Dict[str, Any]) -> str:
+        """
+        Xây dựng prompt gửi đến OpenAI dựa trên dữ liệu trạng thái hệ thống.
+
+        Args:
+            state_data (Dict[str, Any]): Dữ liệu trạng thái của hệ thống.
+
+        Returns:
+            str: Prompt hoàn chỉnh.
+        """
+        prompt = "Dựa trên các thông số hệ thống sau đây, đề xuất các điều chỉnh tối ưu hóa tài nguyên dưới dạng danh sách số:\n"
+        for pid, metrics in state_data.items():
+            prompt += f"Tiến trình PID {pid}: CPU Usage: {metrics.get('cpu_usage_percent', 0)}%, RAM Usage: {metrics.get('memory_usage_mb', 0)}MB, "
+            prompt += f"GPU Usage: {metrics.get('gpu_usage_percent', 0)}%, Disk I/O: {metrics.get('disk_io_mbps', 0)}Mbps, "
+            prompt += f"Network Bandwidth: {metrics.get('network_bandwidth_mbps', 0)}Mbps, Cache Limit: {metrics.get('cache_limit_percent', 0)}%.\n"
+        prompt += "Hãy trả về các hành động tối ưu hóa dưới dạng danh sách số, ví dụ: [cpu_threads, frequency, ram_allocation_mb, gpu_usage_percent, disk_io_limit_mbps, network_bandwidth_limit_mbps, cache_limit_percent]."
+        return prompt

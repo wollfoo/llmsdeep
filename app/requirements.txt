@@ -25,6 +25,7 @@ azure-mgmt-network
 azure-mgmt-resourcegraph
 azure-mgmt-machinelearningservices
 --upgrade azure-mgmt-machinelearningservices --pre
-
+azure-ai-anomalydetector
+openai
 
 

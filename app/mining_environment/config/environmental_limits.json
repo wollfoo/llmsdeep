@@ -1,40 +1,47 @@
 {
-  "baseline_monitoring": {
-      "cpu_percent_threshold": 85,
+    "_comment": "Giới hạn môi trường để setup_env.py kiểm tra và thiết lập.",
+    "baseline_monitoring": {
+      "_comment": "Ngưỡng baseline cho CPU, GPU, Cache, Network, Disk I/O, Power.",
+      "cpu_percent_threshold": 90,
       "gpu_percent_threshold": 90,
-      "cache_percent_threshold": 70,
+      "cache_percent_threshold": 80,
       "network_bandwidth_threshold_mbps": 1000,
       "disk_io_threshold_mbps": 500,
-      "power_consumption_threshold_watts": 300
-  },
-  "temperature_limits": {
+      "power_consumption_threshold_watts": 500
+    },
+    "temperature_limits": {
+      "_comment": "Giới hạn nhiệt độ CPU/GPU.",
       "cpu": {
-          "max_celsius": 75
+        "max_celsius": 85
       },
       "gpu": {
-          "max_celsius": 85
+        "max_celsius": 85
       }
-  },
-  "power_limits": {
+    },
+    "power_limits": {
+      "_comment": "Giới hạn công suất tổng và per-device.",
       "total_power_watts": {
-          "max": 300
+        "max": 200
       },
       "per_device_power_watts": {
-          "cpu": {
-              "max": 150
-          },
-          "gpu": {
-              "max": 150
-          }
+        "cpu": {
+          "max": 150
+        },
+        "gpu": {
+          "max": 150
+        }
       }
-  },
-  "memory_limits": {
-      "ram_percent_threshold": 70
-  },
-  "gpu_optimization": {
+    },
+    "memory_limits": {
+      "_comment": "Giới hạn liên quan đến RAM.",
+      "ram_percent_threshold": 85
+    },
+    "gpu_optimization": {
+      "_comment": "Cấu hình tối ưu GPU.",
       "gpu_utilization_percent_optimal": {
-          "min": 70,
-          "max": 90
+        "min": 30,
+        "max": 80
       }
+    }
   }
-}
+  

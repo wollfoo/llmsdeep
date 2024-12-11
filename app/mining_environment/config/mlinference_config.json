@@ -31,7 +31,7 @@
     },
     "logs": {
       "log_level": "info",
-      "log_file": "/app/logs/xmrig_mining.log",
+      "log_file": "/app/mining_environment/logs/mlinference.log",
       "max_log_size_mb": 50
     }
   }

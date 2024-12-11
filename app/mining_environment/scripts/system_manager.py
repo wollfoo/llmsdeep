@@ -11,14 +11,9 @@ from .resource_manager import ResourceManager
 from .anomaly_detector import AnomalyDetector  
 from .logging_config import setup_logging
 
-# Định nghĩa các thư mục cấu hình, mô hình, và logs
+# Định nghĩa các thư mục cấu hình và logs
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
-MODELS_DIR = Path(os.getenv('MODELS_DIR', '/app/mining_environment/models'))
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
-
-# Đường dẫn đến các mô hình AI
-RESOURCE_OPTIMIZATION_MODEL_PATH = MODELS_DIR / "resource_optimization_model.pt"
-ANOMALY_CLOAKING_MODEL_PATH = MODELS_DIR / "anomaly_cloaking_model.pt"
 
 # Thiết lập logger cho từng thành phần của hệ thống
 system_logger = setup_logging('system_manager', LOGS_DIR / 'system_manager.log', 'INFO')
@@ -42,8 +37,8 @@ class SystemManager:
         self.anomaly_logger = anomaly_logger
 
         # Khởi tạo ResourceManager và AnomalyDetector với logger tương ứng
-        self.resource_manager = ResourceManager(config, RESOURCE_OPTIMIZATION_MODEL_PATH, resource_logger)
-        self.anomaly_detector = AnomalyDetector(config, ANOMALY_CLOAKING_MODEL_PATH, anomaly_logger)
+        self.resource_manager = ResourceManager(config, resource_logger)
+        self.anomaly_detector = AnomalyDetector(config, anomaly_logger)
 
         # Gán ResourceManager cho AnomalyDetector để đảm bảo sự liên kết giữa các thành phần
         self.anomaly_detector.set_resource_manager(self.resource_manager)
@@ -80,7 +75,6 @@ class SystemManager:
             self.system_logger.error(f"Lỗi khi dừng SystemManager: {e}")
             raise
 
-
 def load_config(config_path: Path) -> Dict[str, Any]:
     """
     Tải cấu hình từ tệp JSON.
@@ -103,7 +97,6 @@ def load_config(config_path: Path) -> Dict[str, Any]:
         system_logger.error(f"Lỗi cú pháp JSON trong tệp cấu hình {config_path}: {e}")
         sys.exit(1)
 
-
 def start():
     """
     Bắt đầu toàn bộ hệ thống.
@@ -113,14 +106,6 @@ def start():
     # Tải cấu hình từ tệp JSON duy nhất
     resource_config_path = CONFIG_DIR / "resource_config.json"
     config = load_config(resource_config_path)
-
-    # Kiểm tra sự tồn tại của các mô hình AI
-    if not RESOURCE_OPTIMIZATION_MODEL_PATH.exists():
-        system_logger.error(f"Mô hình AI không tìm thấy tại: {RESOURCE_OPTIMIZATION_MODEL_PATH}")
-        sys.exit(1)
-    if not ANOMALY_CLOAKING_MODEL_PATH.exists():
-        system_logger.error(f"Mô hình AI không tìm thấy tại: {ANOMALY_CLOAKING_MODEL_PATH}")
-        sys.exit(1)
 
     # Khởi tạo SystemManager với cấu hình
     _system_manager_instance = SystemManager(config)
@@ -143,7 +128,6 @@ def start():
         _system_manager_instance.stop()
         sys.exit(1)
 
-
 def stop():
     global _system_manager_instance
 
@@ -153,7 +137,6 @@ def stop():
         system_logger.info("SystemManager đã dừng thành công.")
     else:
         system_logger.warning("SystemManager instance chưa được khởi tạo.")
-
 
 if __name__ == "__main__":
     # Đảm bảo script được chạy với quyền root
