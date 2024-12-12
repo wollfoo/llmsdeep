@@ -7,7 +7,7 @@ import datetime
 import time
 
 from azure.monitor.query import MetricsQueryClient, MetricAggregationType
-from azure.mgmt.security import SecurityCenterClient
+from azure.mgmt.security import SecurityCenter
 from azure.loganalytics import LogAnalyticsDataClient, models as logmodels
 from azure.loganalytics.models import QueryBody
 from azure.mgmt.network import NetworkManagementClient
@@ -15,7 +15,6 @@ from azure.mgmt.resource import ResourceManagementClient
 from azure.identity import ClientSecretCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.machinelearningservices import MachineLearningServicesMgmtClient
-
 
 from azure.ai.anomalydetector import AnomalyDetectorClient
 from azure.ai.anomalydetector.models import DetectRequest, DetectResponse
@@ -121,11 +120,11 @@ class AzureSentinelClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        self.security_client = SecurityCenterClient(self.credential, self.subscription_id)
+        self.security_client = SecurityCenter(self.credential, self.subscription_id)
 
     def get_recent_alerts(self, days: int = 1) -> List[Any]:
         """
-        Lấy các cảnh báo (alerts) gần đây từ Azure Sentinel.
+        Lấy các cảnh báo (alerts) gần đây từ Azure Security Center.
 
         Args:
             days (int): Số ngày để lấy các cảnh báo gần đây.
@@ -138,8 +137,8 @@ class AzureSentinelClient(AzureBaseClient):
             recent_alerts = []
             cutoff_time = datetime.datetime.utcnow() - datetime.timedelta(days=days)
             for alert in alerts:
-                if hasattr(alert, 'properties') and \
-                   hasattr(alert.properties, 'created_time') and \
+                # Kiểm tra sự tồn tại của thuộc tính 'properties' và 'created_time'
+                if hasattr(alert, 'properties') and hasattr(alert.properties, 'created_time') and \
                    alert.properties.created_time >= cutoff_time:
                     recent_alerts.append(alert)
             self.logger.info(f"Đã lấy {len(recent_alerts)} alerts từ Azure Sentinel trong {days} ngày gần đây.")
@@ -242,8 +241,8 @@ class AzureSecurityCenterClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        from azure.mgmt.security import SecurityCenterClient
-        self.security_client = SecurityCenterClient(self.credential, self.subscription_id)
+        self.security_client = SecurityCenter(self.credential, self.subscription_id)
+
 
     def get_security_recommendations(self) -> List[Any]:
         """
@@ -253,6 +252,7 @@ class AzureSecurityCenterClient(AzureBaseClient):
             List[Any]: Danh sách các khuyến nghị bảo mật.
         """
         try:
+            # Sử dụng API security_recommendations.list()
             recommendations = self.security_client.security_recommendations.list()
             recommendations_list = list(recommendations)
             self.logger.info(f"Đã lấy {len(recommendations_list)} security recommendations từ Azure Security Center.")
@@ -267,7 +267,6 @@ class AzureNetworkWatcherClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        from azure.mgmt.network import NetworkManagementClient
         self.network_client = NetworkManagementClient(self.credential, self.subscription_id)
 
     def get_flow_logs(self, resource_group: str, network_watcher_name: str, nsg_name: str) -> List[Any]:
