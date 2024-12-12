@@ -15,16 +15,13 @@ torchvision
 torchaudio
 pynvml
 readerwriterlock
-
 azure-identity
 azure-monitor-query==1.0.0
 azure-mgmt-resource
 azure-loganalytics
-
 azure-mgmt-network
 azure-mgmt-resourcegraph
-azure-mgmt-machinelearningservices
---upgrade azure-mgmt-machinelearningservices --pre
+azure-mgmt-machinelearningservices --pre
 azure-ai-anomalydetector
 openai
 

@@ -19,7 +19,7 @@ RUN apt-get update && \
         libssl-dev libeigen3-dev libnuma-dev stunnel4 \
         cpufrequtils iproute2 util-linux libnvidia-ml-dev \
         pciutils openssl lm-sensors powerstat stress-ng bash \
-        htop locales iptables powertop ionice \
+        htop locales iptables powertop \
     && rm -rf /var/lib/apt/lists/*
 
 # Thiết lập locale
@@ -41,16 +41,15 @@ WORKDIR /app
 
 # Bước 4: Sao chép và cài đặt các phụ thuộc Python
 COPY requirements.txt /app/
-RUN python3 -m pip install --upgrade pip && \
-    pip3 install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --upgrade pip 
+RUN pip install --no-cache-dir -r requirements.txt --root-user-action=ignore
 
 # Bước 5: Sao chép toàn bộ thư mục mining_environment và thiết lập permissions
 # Lớp 1: Môi Trường Khai Thác và tối ưu tài nguyên
 COPY mining_environment/ /app/mining_environment/
 RUN chmod 600 /app/mining_environment/config/*.json && \
     chmod +x /app/mining_environment/scripts/*.py && \
-    chmod 600 /app/mining_environment/logs/*.log && \
-    chmod 700 /app/mining_environment/resources/security/keys/* /app/mining_environment/resources/legal_templates/*
+    chmod 600 /app/mining_environment/logs/*.log 
 
 # Bước 6: Thiết lập các biến môi trường cố định cho Lớp 1
 ENV LOG_ENCRYPTION_KEY=""
