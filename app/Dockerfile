@@ -12,7 +12,6 @@ ENV AZURE_SUBSCRIPTION_ID="" \
     AZURE_CLIENT_SECRET="" \
     AZURE_TENANT_ID=""
 
-
 # Bước 2: Cài đặt các thư viện hệ thống và công cụ cần thiết
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
