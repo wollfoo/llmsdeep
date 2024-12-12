@@ -161,7 +161,7 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if ram_max_mb is None:
             logger.error("Thiếu `max_allocation_mb` trong `resource_allocation.ram`.")
             sys.exit(1)
-        if not (1024 <= ram_max_mb <= 131072):
+        if not (1024 <= ram_max_mb <= 200000):
             logger.error("Giá trị `ram_max_allocation_mb` không hợp lệ. Phải từ 1024 MB đến 131072 MB.")
             sys.exit(1)
         else:
