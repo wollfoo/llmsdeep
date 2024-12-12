@@ -1,3 +1,4 @@
+retrying
 GPUtil
 scikit-learn
 flask
@@ -17,6 +18,7 @@ pynvml
 readerwriterlock
 azure-identity
 azure-monitor-query==1.0.0
+azure-mgmt-security
 azure-mgmt-resource
 azure-loganalytics
 azure-mgmt-network

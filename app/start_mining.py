@@ -13,17 +13,13 @@ import signal
 import time
 from pathlib import Path
 
-# Thêm đường dẫn tới các module trong mining_environment/scripts
 
-SCRIPT_DIR = Path(__file__).resolve().parent / "mining_environment" / "scripts"
-sys.path.append(str(SCRIPT_DIR))
-
-
-from logging_config import setup_logging 
+from mining_environment.scripts.logging_config import setup_logging
 
 # Import các module Lớp 1: Môi Trường Khai Thác và tối ưu tài nguyên
-import setup_env 
-import system_manager  
+
+from mining_environment.scripts import setup_env, system_manager
+
 
 # Import các module Lớp 2 đến lớp 9
 # Giả sử bạn có các module như layer2, layer3, ..., layer9
