@@ -6,11 +6,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Thêm biến môi trường Azure
+# Thêm biến môi trường Azure và các khóa API
 ENV AZURE_SUBSCRIPTION_ID="" \
     AZURE_CLIENT_ID="" \
     AZURE_CLIENT_SECRET="" \
-    AZURE_TENANT_ID=""
+    AZURE_TENANT_ID="" \
+    ANOMALY_DETECTOR_API_KEY="" \
+    OPENAI_API_KEY=""
 
 # Bước 2: Cài đặt các thư viện hệ thống và công cụ cần thiết
 RUN apt-get update && \
@@ -57,7 +59,6 @@ ENV SCRIPT_DIR=/app/mining_environment/scripts \
     CONFIG_DIR=/app/mining_environment/config \
     MODELS_DIR=/app/mining_environment/models \
     LOGS_DIR=/app/mining_environment/logs \
-    RESOURCES_DIR=/app/mining_environment/resources \
     MINING_COMMAND=/usr/local/bin/mlinference \
     MINING_CONFIG=mlinference_config.json 
 
