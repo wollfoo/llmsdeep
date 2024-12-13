@@ -55,6 +55,7 @@ RUN chmod 600 /app/mining_environment/config/*.json && \
 
 # Bước 6: Thiết lập các biến môi trường cố định cho Lớp 1
 ENV LOG_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+
 ENV SCRIPT_DIR=/app/mining_environment/scripts \
     CONFIG_DIR=/app/mining_environment/config \
     MODELS_DIR=/app/mining_environment/models \
