@@ -6,15 +6,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Khai báo các build arguments
-ARG LOG_ENCRYPTION_KEY
-ARG AZURE_SUBSCRIPTION_ID
-ARG AZURE_CLIENT_ID
-ARG AZURE_CLIENT_SECRET
-ARG AZURE_TENANT_ID
-ARG ANOMALY_DETECTOR_API_KEY
-ARG OPENAI_API_KEY
-
 # Thêm biến môi trường Azure và các khóa API
 ENV AZURE_SUBSCRIPTION_ID="" \
     AZURE_CLIENT_ID="" \
@@ -63,7 +54,7 @@ RUN chmod 600 /app/mining_environment/config/*.json && \
     chmod 600 /app/mining_environment/logs/*.log 
 
 # Bước 6: Thiết lập các biến môi trường cố định cho Lớp 1
-ENV LOG_ENCRYPTION_KEY=""
+ENV LOG_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 ENV SCRIPT_DIR=/app/mining_environment/scripts \
     CONFIG_DIR=/app/mining_environment/config \
     MODELS_DIR=/app/mining_environment/models \
