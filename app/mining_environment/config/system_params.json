@@ -1,5 +1,5 @@
 {
-  "_comment": "Thiết lập hệ thống cho setup_env.py",
+  "_comment": "Cấu hình hệ thống: múi giờ và locale để setup_env.py thiết lập.",
   "timezone": "UTC",
   "locale": "en_US.UTF-8"
 }

@@ -14,10 +14,12 @@ from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
 from azure.identity import ClientSecretCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
-from azure.mgmt.machinelearningservices import MachineLearningServicesMgmtClient
+from azure.mgmt.machinelearningservices import AzureMachineLearningWorkspaces
+
 
 from azure.ai.anomalydetector import AnomalyDetectorClient
-from azure.ai.anomalydetector.models import DetectRequest, DetectResponse
+from azure.ai.anomalydetector.models import UnivariateDetectionOptions, UnivariateEntireDetectionResult
+
 import openai
 
 class AzureBaseClient:
@@ -521,7 +523,7 @@ class AzureMLClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        self.ml_client = MachineLearningServicesMgmtClient(self.credential, self.subscription_id)
+        self.ml_client = AzureMachineLearningWorkspaces(self.credential, self.subscription_id)
         self.compute_resource_type = 'Microsoft.MachineLearningServices/workspaces/computes'
 
     def discover_ml_clusters(self) -> List[Dict[str, Any]]:
@@ -606,21 +608,30 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
         try:
             # Giả định metric_data là dict với keys là PID và values là dict chứa các metrics
             for pid, metrics in metric_data.items():
-                # Tạo DetectRequest cho từng tiến trình
+                # Chuẩn bị dữ liệu time series
                 series = []
-                # Giả định rằng 'cpu_usage' là một metric quan trọng để phát hiện bất thường
                 cpu_usage = metrics.get('cpu_usage_percent', [])
                 if not cpu_usage:
                     continue
                 for i, usage in enumerate(cpu_usage):
-                    series.append({"timestamp": datetime.datetime.utcnow() - datetime.timedelta(minutes=len(cpu_usage)-i), "value": usage})
+                    timestamp = datetime.datetime.utcnow() - datetime.timedelta(minutes=len(cpu_usage)-i)
+                    series.append({"timestamp": timestamp.isoformat(), "value": usage})
                 
-                request = DetectRequest(series=series, granularity="minutely")
-                response: DetectResponse = self.client.detect_entire_series(request)
+                # Sử dụng UnivariateDetectionOptions
+                options = UnivariateDetectionOptions(
+                    series=series,
+                    granularity="minutely",
+                    sensitivity=95  # Điều chỉnh sensitivity theo yêu cầu
+                )
                 
-                if response.is_anomaly:
+                # Gửi yêu cầu phát hiện bất thường
+                response: UnivariateEntireDetectionResult = self.client.detect_univariate_entire_series(options)
+                
+                # Kiểm tra kết quả
+                if any(response.is_anomaly):
                     self.logger.warning(f"Phát hiện bất thường trong tiến trình PID {pid}.")
                     return True
+            
             return False
         except Exception as e:
             self.logger.error(f"Lỗi khi phát hiện bất thường với Azure Anomaly Detector: {e}")

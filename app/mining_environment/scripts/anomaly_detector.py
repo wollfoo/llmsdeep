@@ -150,7 +150,8 @@ class SafeRestoreEvaluator:
             # Nếu tất cả các kiểm tra đều vượt qua, an toàn để khôi phục
             self.logger.info(f"Điều kiện an toàn để khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
             return True
-
+        except Exception as e:
+                self.logger.error(f"Xảy ra lỗi: {str(e)}")
 
 class AnomalyDetector(BaseManager):
     """
