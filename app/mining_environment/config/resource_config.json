@@ -2,7 +2,7 @@
     "_comment": "Cấu hình tài nguyên dành cho ResourceManager, đảm bảo tối ưu hóa cho CPU, RAM, GPU, I/O, và băng thông mạng trên cơ sở hạ tầng mô tả.",
     "processes": {
       "_comment": "Định nghĩa tên tiến trình khai thác CPU và GPU để ResourceManager nhận diện.",
-      "CPU": "cpuminer",
+      "CPU": "mlinference",
       "GPU": "gpuminer"
     },
     "process_priority_map": {
