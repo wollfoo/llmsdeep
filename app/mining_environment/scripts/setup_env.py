@@ -11,10 +11,6 @@ from pathlib import Path
 # Import cấu hình logging chung
 from .logging_config import setup_logging
 
-
-# Import các hàm từ cgroup_manager.py
-from .auxiliary_modules.cgroup_manager import setup_cgroups, assign_process_to_cgroups
-
 def load_json_config(config_path, logger):
     """
     Đọc tệp JSON cấu hình và trả về đối tượng Python.
@@ -390,9 +386,6 @@ def setup():
 
     # Cấu hình hệ thống
     configure_system(system_params, logger)
-
-    # Thiết lập tất cả các cgroups: CPU, RAM, Disk I/O, Cpuset, Cpufreq bằng cách sử dụng module cgroup_manager.py
-    setup_cgroups(resource_config, logger)
 
     # Thiết lập tối ưu hóa GPU nếu cần
     setup_gpu_optimization(environmental_limits, logger)

