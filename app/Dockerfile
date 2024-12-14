@@ -36,11 +36,11 @@ ENV AZURE_SUBSCRIPTION_ID="" \
 # Bước 2: Cài đặt các thư viện hệ thống, công cụ cần thiết, cấu hình tzdata và locale
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        apt-utils python3 python3-pip curl git build-essential cmake \
+        sudo apt-utils python3 python3-pip curl git build-essential cmake \
         libssl-dev libeigen3-dev libnuma-dev stunnel4 \
         cpufrequtils iproute2 util-linux libnvidia-ml-dev \
         pciutils openssl lm-sensors powerstat stress-ng bash \
-        htop locales iptables powertop tzdata && \
+        htop locales iptables powertop tzdata libhwloc15 libhwloc-dev && \
         ln -fs /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime && \
         dpkg-reconfigure -f noninteractive tzdata && \
         locale-gen en_US.UTF-8 && \

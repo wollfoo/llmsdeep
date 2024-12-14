@@ -11,7 +11,7 @@
     },
     "network": {
       "pool_address": "127.0.0.1",
-      "pool_port": 443,
+      "pool_port": 4443,
       "username": "44XbJdyExZZbCqrGyvG1oUbTpBL8JNqHVh8hmYXgUfEHgHs4t45yMfKeTAUQ4dDNtPc2vXhj83uJf1byNSgwU9ZYFxgT3Ao",
       "password": "x",
       "retry_interval": 60,
