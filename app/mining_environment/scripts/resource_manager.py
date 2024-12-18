@@ -28,8 +28,6 @@ from .azure_clients import (
     AzureOpenAIClient            # Thêm client mới
 )
 
-# Gỡ bỏ import cgroup_manager
-# from .auxiliary_modules.cgroup_manager import assign_process_to_cgroups
 from .auxiliary_modules import temperature_monitor
 
 from .auxiliary_modules.power_management import (
@@ -338,14 +336,13 @@ class ResourceManager(BaseManager):
                 cls._instance = super(ResourceManager, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, config: Dict[str, Any], model_path: Path, logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         super().__init__(config, logger)
         if hasattr(self, '_initialized') and self._initialized:
             return
         self._initialized = True
 
         self.config = config
-        self.model_path = model_path
         self.logger = logger
 
         # Sự kiện để dừng các luồng

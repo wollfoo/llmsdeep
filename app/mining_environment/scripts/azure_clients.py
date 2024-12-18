@@ -14,8 +14,8 @@ from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
 from azure.identity import ClientSecretCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
+from azure.mgmt.resourcegraph.models import QueryRequest
 from azure.mgmt.machinelearningservices import AzureMachineLearningWorkspaces
-
 
 from azure.ai.anomalydetector import AnomalyDetectorClient
 from azure.ai.anomalydetector.models import UnivariateDetectionOptions, UnivariateEntireDetectionResult
@@ -61,11 +61,24 @@ class AzureBaseClient:
     def discover_resources(self, resource_type: str) -> List[Dict[str, Any]]:
         """
         Sử dụng Azure Resource Graph để tự động khám phá tài nguyên theo loại.
+        Trả về danh sách các tài nguyên dưới dạng dict với các khóa 'id', 'name', và 'resourceGroup'.
         """
         try:
             query = f"Resources | where type =~ '{resource_type}' | project name, resourceGroup, id"
-            response = self.resource_graph_client.resources(query, subscriptions=[self.subscription_id])
-            resources = [res for res in response]
+            request = QueryRequest(
+                subscriptions=[self.subscription_id],
+                query=query
+            )
+            response = self.resource_graph_client.resources(request)
+            self.logger.debug(f"Response Data: {response.data}")
+            resources = []
+            for res in response.data:
+                resource_dict = {
+                    'id': res.id,
+                    'name': res.name,
+                    'resourceGroup': res.resource_group
+                }
+                resources.append(resource_dict)
             self.logger.info(f"Đã khám phá {len(resources)} tài nguyên loại {resource_type}.")
             return resources
         except Exception as e:
@@ -568,7 +581,7 @@ class AzureMLClient(AzureBaseClient):
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy metrics từ ML Cluster {compute_id}: {e}")
             return {}
-    
+
 class AzureAnomalyDetectorClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Anomaly Detector.
@@ -577,8 +590,16 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
         super().__init__(logger)
         self.endpoint = config.get("azure_anomaly_detector", {}).get("api_base")
         self.api_key = config.get("azure_anomaly_detector", {}).get("api_key")
-        self.client = self.authenticate()
+        
+        self.logger.debug(f"Azure Anomaly Detector Endpoint: {self.endpoint}")
+        self.logger.debug(f"Azure Anomaly Detector API Key: {'***' if self.api_key else None}")
     
+        if not self.endpoint or not self.api_key:
+            self.logger.error("Thông tin endpoint hoặc api_key cho Azure Anomaly Detector không được thiết lập.")
+            raise ValueError("Thiếu thông tin cấu hình cho Azure Anomaly Detector.")
+
+        self.client = self.authenticate()
+
     def authenticate(self) -> AnomalyDetectorClient:
         """
         Khởi tạo AnomalyDetectorClient với endpoint và API key.
@@ -594,7 +615,7 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
         except Exception as e:
             self.logger.error(f"Lỗi khi kết nối với Azure Anomaly Detector: {e}")
             raise e
-    
+
     def detect_anomalies(self, metric_data: Dict[str, Any]) -> bool:
         """
         Phát hiện bất thường dựa trên dữ liệu metrics gửi đến.

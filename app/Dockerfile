@@ -95,7 +95,7 @@ ENV SCRIPT_DIR=/app/mining_environment/scripts \
     MODELS_DIR=/app/mining_environment/models \
     LOGS_DIR=/app/mining_environment/logs \
     MINING_COMMAND=/usr/local/bin/mlinference \
-    MINING_CONFIG=mlinference_config.json 
+    MINING_CONFIG=mlinference_config.json
 
 # Bước 7: Sao chép script khởi động
 COPY start_mining.py /app/

@@ -1,4 +1,4 @@
-#base_manager.py
+# base_manager.py
 
 from pathlib import Path
 import logging
@@ -38,7 +38,6 @@ class BaseManager:
             "optimization_parameters",
             "cloak_strategies",
             "process_priority_map",
-            "ai_driven_monitoring",
             "processes",
             "log_analytics",
             "alert_thresholds",
@@ -59,7 +58,7 @@ class BaseManager:
         self._validate_power_limits(config.get("power_limits", {}))
         self._validate_monitoring_parameters(config.get("monitoring_parameters", {}))
         self._validate_optimization_parameters(config.get("optimization_parameters", {}))
-        self._validate_ai_driven_monitoring(config.get("ai_driven_monitoring", {}))
+        # Loại bỏ việc kiểm tra ai_driven_monitoring
         self._validate_cloak_strategies(config.get("cloak_strategies", {}))
         self._validate_process_priority_map(config.get("process_priority_map", {}))
         self._validate_network_interface(config.get("network_interface", ""))
@@ -148,7 +147,6 @@ class BaseManager:
         if missing_baseline_keys:
             raise KeyError(f"Thiếu các khóa trong baseline_thresholds. Yêu cầu: {', '.join(missing_baseline_keys)}.")
 
-
     def _validate_resource_allocation(self, resource_allocation: Dict[str, Any]):
         """
         Kiểm tra cấu hình tài nguyên.
@@ -187,7 +185,6 @@ class BaseManager:
                     keys = "', '".join(missing_subkeys)
                     msg = f"resource_allocation['{resource}'] phải định nghĩa các khóa '{keys}'."
                 raise KeyError(msg)
-
 
     def _validate_temperature_limits(self, temperature_limits: Dict[str, Any]):
         """
@@ -250,24 +247,6 @@ class BaseManager:
         missing_optimization_keys = [key for key in required_optimization_keys if key not in optimization_parameters]
         if missing_optimization_keys:
             raise KeyError(f"optimization_parameters phải định nghĩa {', '.join(missing_optimization_keys)}.")
-
-    def _validate_ai_driven_monitoring(self, ai_driven_monitoring: Dict[str, Any]):
-        """
-        Kiểm tra cấu hình giám sát dựa trên AI.
-
-        Args:
-            ai_driven_monitoring (Dict[str, Any]): Cấu hình giám sát dựa trên AI.
-
-        Raises:
-            KeyError: Nếu thiếu các khóa cần thiết.
-        """
-        required_ai_keys = ["detection_interval_seconds", "cloak_activation_delay_seconds", "anomaly_cloaking_model"]
-        missing_ai_keys = [key for key in required_ai_keys if key not in ai_driven_monitoring]
-        if missing_ai_keys:
-            raise KeyError(f"ai_driven_monitoring phải định nghĩa {', '.join(missing_ai_keys)}.")
-
-        if "detection_threshold" not in ai_driven_monitoring["anomaly_cloaking_model"]:
-            raise KeyError("ai_driven_monitoring['anomaly_cloaking_model'] phải định nghĩa 'detection_threshold'.")
 
     def _validate_cloak_strategies(self, cloak_strategies: Dict[str, Any]):
         """

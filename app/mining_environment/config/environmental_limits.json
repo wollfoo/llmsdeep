@@ -18,18 +18,18 @@
   "temperature_limits": {
     "_comment": "Giới hạn nhiệt độ CPU/GPU.",
     "cpu": {
-      "max_celsius": 85,
+      "max_celsius": 90,
       "_comment_cpu_temp": "Ngưỡng nhiệt độ CPU tối đa."
     },
     "gpu": {
-      "max_celsius": 85,
+      "max_celsius": 90,
       "_comment_gpu_temp": "Ngưỡng nhiệt độ GPU tối đa."
     }
   },
   "power_limits": {
     "_comment": "Giới hạn công suất tổng và per-device.",
     "total_power_watts": {
-      "max": 200,
+      "max": 350,
       "_comment_total_power": "Ngưỡng công suất tổng tối đa (W)."
     },
     "per_device_power_watts": {
@@ -38,7 +38,7 @@
         "_comment_cpu_power": "Ngưỡng công suất CPU tối đa (W)."
       },
       "gpu": {
-        "max": 150,
+        "max": 200,
         "_comment_gpu_power": "Ngưỡng công suất GPU tối đa (W)."
       }
     }
