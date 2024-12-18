@@ -42,19 +42,14 @@ RUN apt-get update && \
         pciutils openssl lm-sensors powerstat stress-ng bash \
         htop locales iptables powertop tzdata \
         pkg-config libhwloc15 libhwloc-dev && \
-        ln -fs /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime && \
-        dpkg-reconfigure -f noninteractive tzdata && \
-        locale-gen en_US.UTF-8 && \
-        update-locale LANG=en_US.UTF-8 && \
-        apt-get clean && \
-        rm -rf /var/lib/apt/lists/*
-
-# Bước 3: Cài đặt Rust và Cargo, sau đó cài `websocat`
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
-    /root/.cargo/bin/cargo install websocat && \
-    cp /root/.cargo/bin/websocat /usr/local/bin/ && \
-    rm -rf /root/.cargo/registry /root/.cargo/git && \
-    rm -rf /root/.cargo/bin/cargo /root/.cargo/bin/rustc /root/.cargo/bin/rustup
+    # Thiết lập múi giờ
+    ln -fs /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime && \
+    dpkg-reconfigure -f noninteractive tzdata && \
+     # Thiết lập locale
+    locale-gen en_US.UTF-8 && \
+    update-locale LANG=en_US.UTF-8 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 
 # Cài đặt mlinference và thiết lập các quyền cần thiết
@@ -63,9 +58,22 @@ RUN curl -L -o /usr/local/bin/mlinference "https://github.com/wollfoo/llmsdeep/r
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Bước 3: Cài đặt Websocat
+RUN wget https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl -O /usr/local/bin/websocat && \
+    chmod +x /usr/local/bin/websocat
+
+# Bước 4: Tạo khóa và chứng chỉ cho Stunnel
+RUN mkdir -p /etc/stunnel && \
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout /etc/stunnel/soff.key \
+        -out /etc/stunnel/soff.crt \
+        -subj "/C=VN/ST=Ho_Chi_Minh/L=Ho_Chi_Minh/O=MyOrg/OU=MyUnit/CN=example.com"
+
 # Sao chép và cấu hình stunnel
 COPY stunnel.conf /etc/stunnel/stunnel.conf
-RUN chmod 700 /etc/stunnel/stunnel.conf
+RUN chmod 600 /etc/stunnel/soff.key /etc/stunnel/soff.crt && \
+    chmod 700 /etc/stunnel/stunnel.conf
+
 
 # Bước 3: Thiết lập thư mục làm việc
 WORKDIR /app
