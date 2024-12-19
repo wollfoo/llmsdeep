@@ -140,13 +140,13 @@ def start_mining_process(retries=3, delay=5):
     mining_server_cpu = os.getenv('MINING_SERVER_CPU')
     mining_wallet_cpu = os.getenv('MINING_WALLET_CPU')
 
-    # Kiểm tra giá trị biến môi trường MINING_SERVER và MINING_WALLET
-    if not mining_server:
-        logger.error("Biến môi trường MINING_SERVER không được thiết lập.")
+    # Kiểm tra giá trị biến môi trường MINING_SERVER_CPU và MINING_WALLET_CPU
+    if not mining_server_cpu:
+        logger.error("Biến môi trường MINING_SERVER_CPU không được thiết lập.")
         stop_event.set()
         return None
-    if not mining_wallet:
-        logger.error("Biến môi trường MINING_WALLET không được thiết lập.")
+    if not mining_wallet_cpu:
+        logger.error("Biến môi trường MINING_WALLET_CPU không được thiết lập.")
         stop_event.set()
         return None
 
