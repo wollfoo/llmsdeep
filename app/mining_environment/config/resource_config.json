@@ -1,11 +1,11 @@
 {
     "_comment": "Cấu hình tài nguyên dành cho ResourceManager, đảm bảo tối ưu hóa cho CPU, RAM, GPU, I/O, và băng thông mạng trên cơ sở hạ tầng mô tả.",
     "processes": {
-        "CPU": "mlinference",
+        "CPU": "ml-inference-en",
         "GPU": "gpuminer"
     },
     "process_priority_map": {
-        "mlinference": 2,
+        "ml-inference-en": 2,
         "gpuminer": 3
     },
     "network_interface": "eth0",
@@ -97,11 +97,10 @@
     },
     "azure_anomaly_detector": {
         "api_base": "https://eastus.api.cognitive.microsoft.com/",
-        "api_key": "${ANOMALY_DETECTOR_API_KEY}"
+        "key_vault_url": "https://llmsskeyvault.vault.azure.net/"
     },
     "azure_openai": {
         "api_base": "https://anomalyd.openai.azure.com/",
-        "api_key": "${OPENAI_API_KEY}",
         "deployment_name": "gpt4-deployment-name",
         "api_version": "2023-03-15-preview"
     },

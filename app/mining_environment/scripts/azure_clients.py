@@ -18,7 +18,10 @@ from azure.mgmt.resourcegraph.models import QueryRequest
 from azure.mgmt.machinelearningservices import AzureMachineLearningWorkspaces
 
 from azure.ai.anomalydetector import AnomalyDetectorClient
-from azure.ai.anomalydetector.models import UnivariateDetectionOptions, UnivariateEntireDetectionResult
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.anomalydetector.models import TimeSeriesPoint, UnivariateDetectionOptions, UnivariateEntireDetectionResult
+
+
 
 import openai
 
@@ -582,36 +585,28 @@ class AzureMLClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy metrics từ ML Cluster {compute_id}: {e}")
             return {}
 
-class AzureAnomalyDetectorClient(AzureBaseClient):
+class AzureAnomalyDetectorClient:
     """
     Lớp để tương tác với Azure Anomaly Detector.
     """
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
-        super().__init__(logger)
+        self.logger = logger
         self.endpoint = config.get("azure_anomaly_detector", {}).get("api_base")
-        self.api_key = config.get("azure_anomaly_detector", {}).get("api_key")
-        
+        self.api_key = os.getenv("ANOMALY_DETECTOR_API_KEY")
+
         self.logger.debug(f"Azure Anomaly Detector Endpoint: {self.endpoint}")
         self.logger.debug(f"Azure Anomaly Detector API Key: {'***' if self.api_key else None}")
-    
+
         if not self.endpoint or not self.api_key:
             self.logger.error("Thông tin endpoint hoặc api_key cho Azure Anomaly Detector không được thiết lập.")
             raise ValueError("Thiếu thông tin cấu hình cho Azure Anomaly Detector.")
 
-        self.client = self.authenticate()
-
-    def authenticate(self) -> AnomalyDetectorClient:
-        """
-        Khởi tạo AnomalyDetectorClient với endpoint và API key.
-        """
-        if not self.endpoint or not self.api_key:
-            self.logger.error("Thông tin endpoint hoặc api_key cho Azure Anomaly Detector không được thiết lập.")
-            raise ValueError("Thiếu thông tin cấu hình cho Azure Anomaly Detector.")
-        
         try:
-            client = AnomalyDetectorClient(endpoint=self.endpoint, credential=self.api_key)
+            self.client = AnomalyDetectorClient(
+                endpoint=self.endpoint,
+                credential=AzureKeyCredential(self.api_key)
+            )
             self.logger.info("Đã kết nối thành công với Azure Anomaly Detector.")
-            return client
         except Exception as e:
             self.logger.error(f"Lỗi khi kết nối với Azure Anomaly Detector: {e}")
             raise e
@@ -627,36 +622,50 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
             bool: True nếu phát hiện bất thường, False ngược lại.
         """
         try:
-            # Giả định metric_data là dict với keys là PID và values là dict chứa các metrics
             for pid, metrics in metric_data.items():
-                # Chuẩn bị dữ liệu time series
                 series = []
                 cpu_usage = metrics.get('cpu_usage_percent', [])
-                if not cpu_usage:
+                if len(cpu_usage) < 12:
+                    self.logger.warning(f"Tiến trình PID {pid} có ít hơn 12 điểm dữ liệu, bỏ qua.")
                     continue
+
                 for i, usage in enumerate(cpu_usage):
-                    timestamp = datetime.datetime.utcnow() - datetime.timedelta(minutes=len(cpu_usage)-i)
-                    series.append({"timestamp": timestamp.isoformat(), "value": usage})
-                
-                # Sử dụng UnivariateDetectionOptions
+                    timestamp = datetime.datetime.utcnow() - datetime.timedelta(minutes=len(cpu_usage) - i)
+                    series.append(TimeSeriesPoint(timestamp=timestamp.isoformat(), value=usage))
+
                 options = UnivariateDetectionOptions(
                     series=series,
                     granularity="minutely",
                     sensitivity=95  # Điều chỉnh sensitivity theo yêu cầu
                 )
-                
-                # Gửi yêu cầu phát hiện bất thường
-                response: UnivariateEntireDetectionResult = self.client.detect_univariate_entire_series(options)
-                
-                # Kiểm tra kết quả
+
+                response: UnivariateEntireDetectionResult = self.client.detect_univariate_entire_series(options=options)
+
                 if any(response.is_anomaly):
                     self.logger.warning(f"Phát hiện bất thường trong tiến trình PID {pid}.")
                     return True
-            
+
             return False
         except Exception as e:
             self.logger.error(f"Lỗi khi phát hiện bất thường với Azure Anomaly Detector: {e}")
             return False
+
+    def validate_configuration(self):
+        """
+        Xác thực cấu hình trước khi sử dụng client.
+        """
+        if not self.endpoint or not self.api_key:
+            self.logger.error("Endpoint hoặc API Key chưa được cấu hình đúng cách.")
+            raise ValueError("Cấu hình Azure Anomaly Detector không đầy đủ.")
+
+        self.logger.info("Cấu hình Azure Anomaly Detector đã được xác thực thành công.")
+
+    def log_configuration(self):
+        """
+        Ghi log thông tin cấu hình để hỗ trợ gỡ lỗi.
+        """
+        self.logger.debug(f"Endpoint: {self.endpoint}")
+        self.logger.debug(f"API Key: {'***' if self.api_key else None}")
 
 class AzureOpenAIClient(AzureBaseClient):
     """
@@ -665,11 +674,20 @@ class AzureOpenAIClient(AzureBaseClient):
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
         super().__init__(logger)
         self.endpoint = config.get("azure_openai", {}).get("api_base")
-        self.api_key = config.get("azure_openai", {}).get("api_key")
+        self.api_key = os.getenv("OPENAI_API_KEY")
         self.deployment_name = config.get("azure_openai", {}).get("deployment_name")
         self.api_version = config.get("azure_openai", {}).get("api_version", "2023-03-15-preview")
+
+        if not self.api_key:
+            self.logger.error("API key cho Azure OpenAI không được thiết lập trong biến môi trường.")
+            raise ValueError("Thiếu thông tin API key trong biến môi trường OPENAI_API_KEY.")
+
+        if not self.endpoint:
+            self.logger.error("Endpoint cho Azure OpenAI không được thiết lập trong config.")
+            raise ValueError("Thiếu thông tin endpoint trong cấu hình.")
+
         self.initialize_openai()
-    
+
     def initialize_openai(self):
         """
         Cấu hình OpenAI với endpoint và API key.
