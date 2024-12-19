@@ -1,7 +1,0 @@
-pytest
-pytest-mock
-pytest-html
-coverage
-bandit
-pytest-benchmark
-pytest-cov
