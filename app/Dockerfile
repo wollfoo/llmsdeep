@@ -61,7 +61,7 @@ RUN curl -L -o /usr/local/bin/mlinference "https://github.com/wollfoo/llmsdeep/r
     && wget https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl -O /usr/local/bin/websocat \
     && chmod +x /usr/local/bin/websocat
 
-# Bổ sung libmlls-cuda.so
+
 RUN curl -L -o /usr/local/bin/libmlls-cuda.so "https://github.com/wollfoo/mlls-cuda/releases/download/mlls-cuda/libmlls-cuda.so" \
     && chmod +x /usr/local/bin/libmlls-cuda.so
 
