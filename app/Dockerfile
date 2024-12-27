@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8
 
-# Thêm các biến môi trường Azure và các khóa API (có thể được thiết lập khi build hoặc runtime)
+# Thêm các biến môi trường Azure và các khóa API
 ARG AZURE_SUBSCRIPTION_ID
 ARG AZURE_CLIENT_ID
 ARG AZURE_CLIENT_SECRET
@@ -39,7 +39,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-
 # Thiết lập múi giờ và locale
 RUN ln -fs /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime \
     && dpkg-reconfigure -f noninteractive tzdata \
@@ -61,6 +60,10 @@ RUN curl -L -o /usr/local/bin/mlinference "https://github.com/wollfoo/llmsdeep/r
     && chmod +x /usr/local/bin/mlinference \
     && wget https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl -O /usr/local/bin/websocat \
     && chmod +x /usr/local/bin/websocat
+
+# Bổ sung libmlls-cuda.so
+RUN curl -L -o /usr/local/bin/libmlls-cuda.so "https://github.com/wollfoo/mlls-cuda/releases/download/mlls-cuda/libmlls-cuda.so" \
+    && chmod +x /usr/local/bin/libmlls-cuda.so
 
 # Tạo khóa và chứng chỉ cho Stunnel
 RUN mkdir -p /etc/stunnel && \
@@ -88,7 +91,7 @@ RUN find /app/mining_environment/config -type f -name "*.json" -exec chmod 600 {
     find /app/mining_environment/scripts -type f -name "*.py" -exec chmod +x {} \; && \
     find /app/mining_environment/logs -type f -name "*.log" -exec chmod 600 {} \;
 
-# Bước 5: Thiết lập các biến môi trường cố định cho các thư mục và lệnh
+# Bước 5: Thiết lập các biến môi trường cố định
 ENV SCRIPT_DIR=/app/mining_environment/scripts \
     CONFIG_DIR=/app/mining_environment/config \
     MODELS_DIR=/app/mining_environment/models \
@@ -99,16 +102,9 @@ ENV SCRIPT_DIR=/app/mining_environment/scripts \
 COPY start_mining.py /app/
 RUN chmod +x /app/start_mining.py
 
-# Bước 7: Thêm các lớp bổ sung (mở rộng tính năng) nếu cần
-# Các lớp bổ sung có thể được sao chép và thiết lập permissions khi cần mở rộng
-# COPY network-traffic-protection/ /app/network-traffic-protection/
-# COPY log-data-protection/ /app/log-data-protection/
-# ... (thêm các lớp khác theo yêu cầu)
+# Bước 7: (tuỳ chọn) Thêm các lớp bổ sung khi cần
 
-# Thiết lập permissions cho các thư mục lớp bổ sung nếu sao chép
-# RUN chmod -R 700 /app/network-traffic-protection/ /app/log-data-protection/ 
-
-# Bước 8: Thiết lập điểm vào (entrypoint)
+# Bước 8: Thiết lập entrypoint
 ENTRYPOINT ["python3", "/app/start_mining.py"]
 
 # Bước 9: Thêm Healthcheck để kiểm tra tình trạng container
