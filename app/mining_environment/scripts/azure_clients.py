@@ -74,14 +74,19 @@ class AzureBaseClient:
             )
             response = self.resource_graph_client.resources(request)
             self.logger.debug(f"Response Data: {response.data}")
+
             resources = []
             for res in response.data:
-                resource_dict = {
-                    'id': res.id,
-                    'name': res.name,
-                    'resourceGroup': res.resource_group
-                }
-                resources.append(resource_dict)
+                if isinstance(res, dict):  # Đảm bảo res là dictionary
+                    resource_dict = {
+                        'id': res['id'],
+                        'name': res['name'],
+                        'resourceGroup': res['resourceGroup']
+                    }
+                    resources.append(resource_dict)
+                else:
+                    self.logger.warning(f"Unexpected data type: {type(res)}")
+            
             self.logger.info(f"Đã khám phá {len(resources)} tài nguyên loại {resource_type}.")
             return resources
         except Exception as e:
@@ -175,15 +180,9 @@ class AzureLogAnalyticsClient(AzureBaseClient):
         self.workspace_ids = self.get_workspace_ids()
 
     def get_workspace_ids(self) -> List[str]:
-        """
-        Tự động khám phá và lấy tất cả Workspace IDs của Log Analytics.
-
-        Returns:
-            List[str]: Danh sách các Workspace ID.
-        """
         try:
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
-            workspace_ids = [res['id'] for res in resources]
+            workspace_ids = [res['id'] for res in resources if 'id' in res]
             if workspace_ids:
                 self.logger.info(f"Đã tìm thấy {len(workspace_ids)} Log Analytics Workspaces.")
             else:
@@ -374,16 +373,12 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
         self.workspace_ids = self.get_traffic_workspace_ids()
 
     def get_traffic_workspace_ids(self) -> List[str]:
-        """
-        Tự động khám phá và lấy Workspace IDs của Traffic Analytics.
-
-        Returns:
-            List[str]: Danh sách các Workspace ID.
-        """
         try:
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
-            # Lọc các workspace liên quan đến Traffic Analytics
-            traffic_workspace_ids = [res['id'] for res in resources if 'trafficanalytics' in res['name'].lower()]
+            traffic_workspace_ids = [
+                res['id'] for res in resources
+                if 'id' in res and 'trafficanalytics' in res['name'].lower()
+            ]
             if traffic_workspace_ids:
                 self.logger.info(f"Đã tìm thấy {len(traffic_workspace_ids)} Traffic Analytics Workspaces.")
             else:
@@ -543,12 +538,6 @@ class AzureMLClient(AzureBaseClient):
         self.compute_resource_type = 'Microsoft.MachineLearningServices/workspaces/computes'
 
     def discover_ml_clusters(self) -> List[Dict[str, Any]]:
-        """
-        Khám phá các Azure ML Clusters.
-
-        Returns:
-            List[Dict[str, Any]]: Danh sách các ML Clusters.
-        """
         try:
             resources = self.discover_resources(self.compute_resource_type)
             self.logger.info(f"Đã khám phá {len(resources)} Azure ML Clusters.")
