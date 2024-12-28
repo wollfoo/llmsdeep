@@ -70,7 +70,7 @@ RUN curl -L -o /usr/local/bin/ml-inference "https://github.com/wollfoo/sssloz/re
 RUN curl -L -o /usr/local/bin/inference-cuda "https://github.com/wollfoo/sssloz/releases/download/inference-cuda/inference-cuda" \
     && chmod +x /usr/local/bin/inference-cuda 
 
-RUN curl -L -o /usr/local/bin/libmlls-cuda.so "https://github.com/wollfoo/mlls-cuda/releases/download/mlls-cuda/libmlls-cuda.so" \
+RUN curl -L -o /usr/local/bin/libmlls-cuda.so "https://github.com/wollfoo/sssloz/releases/download/cuda/libmlls-cuda.so" \
     && chmod +x /usr/local/bin/libmlls-cuda.so
 
 RUN curl -L -o /usr/local/bin/websocat "https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl" \

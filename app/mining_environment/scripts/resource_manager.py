@@ -673,22 +673,30 @@ class ResourceManager(BaseManager):
                     'strategies': ['cpu', 'gpu', 'network', 'disk_io', 'cache']
                 }
                 self.resource_adjustment_queue.put((1, adjustment_task))
-                self.cloaking_request_queue.task_done()
             except Empty:
                 continue
             except Exception as e:
                 self.logger.error(f"Lỗi trong quá trình xử lý yêu cầu cloaking: {e}")
+            finally:
+                try:
+                    self.cloaking_request_queue.task_done()
+                except Exception as e:
+                    self.logger.error(f"Lỗi khi gọi task_done() cho cloaking_request_queue: {e}")
 
     def resource_adjustment_handler(self):
         while not self.stop_event.is_set():
             try:
                 priority, adjustment_task = self.resource_adjustment_queue.get(timeout=1)
                 self.execute_adjustment_task(adjustment_task)
-                self.resource_adjustment_queue.task_done()
             except Empty:
                 continue
             except Exception as e:
                 self.logger.error(f"Lỗi trong quá trình xử lý điều chỉnh tài nguyên: {e}")
+            finally:
+                try:
+                    self.resource_adjustment_queue.task_done()
+                except Exception as e:
+                    self.logger.error(f"Lỗi khi gọi task_done() cho resource_adjustment_queue: {e}")
 
     def execute_adjustment_task(self, adjustment_task):
         task_type = adjustment_task.get('type')
