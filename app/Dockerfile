@@ -47,7 +47,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 
-
 # Thiết lập múi giờ và locale
 RUN ln -fs /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime \
     && dpkg-reconfigure -f noninteractive tzdata \
