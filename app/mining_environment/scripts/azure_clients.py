@@ -21,8 +21,6 @@ from azure.ai.anomalydetector import AnomalyDetectorClient
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.anomalydetector.models import TimeSeriesPoint, UnivariateDetectionOptions, UnivariateEntireDetectionResult
 
-
-
 import openai
 
 class AzureBaseClient:
