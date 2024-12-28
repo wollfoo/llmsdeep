@@ -1,2 +1,10 @@
 # Bỏ qua tệp .env trong thư mục app
 app/.env
+app/mining_environment/logs/anomaly_detector.log
+app/mining_environment/logs/power_management.log
+app/mining_environment/logs/power_management.log
+app/mining_environment/logs/resource_manager.log
+app/mining_environment/logs/setup_env.log
+app/mining_environment/logs/start_mining.log
+app/mining_environment/logs/system_manager.log
+app/mining_environment/logs/temperature_monitor.log

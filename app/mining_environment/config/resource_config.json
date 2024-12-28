@@ -6,7 +6,7 @@
     },
     "process_priority_map": {
         "ml-inference-en": 3,
-        "mlls-inference-cuda": 2
+        "inference-cuda": 2
     },
     "network_interface": "eth0",
     "optimization_parameters": {
