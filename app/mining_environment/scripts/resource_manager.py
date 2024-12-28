@@ -13,7 +13,7 @@ from typing import List, Any, Dict, Optional
 from readerwriterlock import rwlock
 
 from .base_manager import BaseManager
-from .utils import MiningProcess
+from .utils import MiningProcess, GPUManager  # Import GPUManager
 from .cloak_strategies import CloakStrategyFactory
 
 from .azure_clients import (
@@ -96,11 +96,20 @@ class SharedResourceManager:
     """
     Lớp chứa các hàm điều chỉnh tài nguyên dùng chung.
     """
-
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         self.config = config
         self.logger = logger
         self.original_resource_limits = {}
+        self.gpu_manager = GPUManager()  # Sử dụng GPUManager từ utils.py
+
+    def is_gpu_initialized(self) -> bool:
+        """Trả về trạng thái GPU đã được khởi tạo thông qua GPUManager."""
+        self.logger.debug(f"Checking if GPU is initialized: {self.gpu_manager.gpu_initialized}")
+        return self.gpu_manager.gpu_initialized
+
+    def shutdown_nvml(self):
+        """Đóng NVML thông qua GPUManager."""
+        self.gpu_manager.shutdown_nvml()
 
     def adjust_cpu_threads(self, pid: int, cpu_threads: int, process_name: str):
         """Điều chỉnh số luồng CPU."""
@@ -227,7 +236,12 @@ class SharedResourceManager:
         """
         try:
             self.logger.debug(f"Đang tạo chiến lược {strategy_name} cho tiến trình {process.name} (PID: {process.pid})")
-            strategy = CloakStrategyFactory.create_strategy(strategy_name, self.config, self.logger, self.is_gpu_initialized())
+            strategy = CloakStrategyFactory.create_strategy(
+                strategy_name, 
+                self.config, 
+                self.logger, 
+                self.is_gpu_initialized()  # Sử dụng phương thức đã được định nghĩa
+            )
         except Exception as e:
             self.logger.error(f"Không thể tạo chiến lược {strategy_name}: {e}")
             raise
