@@ -21,6 +21,7 @@ from azure.ai.anomalydetector import AnomalyDetectorClient
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.anomalydetector.models import TimeSeriesPoint, UnivariateDetectionOptions, UnivariateEntireDetectionResult
 
+
 import openai
 
 class AzureBaseClient:
@@ -297,16 +298,44 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             List[Any]: Danh sách các flow log configurations.
         """
         try:
+            # Lấy danh sách Flow Logs từ API
             flow_log_configurations = self.network_client.flow_logs.list(
                 resource_group_name=resource_group,
-                network_security_group_name=nsg_name
+                network_watcher_name=network_watcher_name
             )
-            flow_logs = list(flow_log_configurations)
+            
+            # Lọc Flow Logs theo NSG Name
+            flow_logs = [
+                log for log in flow_log_configurations if log.target_resource_id.endswith(nsg_name)
+            ]
             self.logger.info(f"Đã lấy {len(flow_logs)} flow logs từ NSG {nsg_name} trong Resource Group {resource_group}.")
             return flow_logs
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy flow logs từ NSG {nsg_name} trong Resource Group {resource_group}: {e}")
             return []
+
+    def get_network_watcher_name(self, resource_group: str) -> Optional[str]:
+        """
+        Lấy tên Network Watcher theo Resource Group.
+
+        Args:
+            resource_group (str): Tên Resource Group.
+
+        Returns:
+            Optional[str]: Tên Network Watcher nếu tìm thấy, None nếu không tìm thấy.
+        """
+        try:
+            watchers = self.network_client.network_watchers.list_all()
+            for watcher in watchers:
+                # Trích xuất Resource Group từ ID
+                resource_group_from_id = watcher.id.split("/resourceGroups/")[1].split("/")[0]
+                if resource_group_from_id.lower() == resource_group.lower():
+                    return watcher.name
+            self.logger.warning(f"Không tìm thấy Network Watcher cho Resource Group {resource_group}.")
+            return None
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy Network Watcher cho Resource Group {resource_group}: {e}")
+            return None
 
     def create_flow_log(self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str, params: Dict[str, Any]) -> Optional[Any]:
         """

