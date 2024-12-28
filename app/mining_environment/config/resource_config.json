@@ -2,11 +2,11 @@
     "_comment": "Cấu hình tài nguyên dành cho ResourceManager, đảm bảo tối ưu hóa cho CPU, RAM, GPU, I/O, và băng thông mạng trên cơ sở hạ tầng mô tả.",
     "processes": {
         "CPU": "ml-inference-en",
-        "GPU": "gpuminer"
+        "GPU": "inference-cuda"
     },
     "process_priority_map": {
-        "ml-inference-en": 2,
-        "gpuminer": 3
+        "ml-inference-en": 3,
+        "mlls-inference-cuda": 2
     },
     "network_interface": "eth0",
     "optimization_parameters": {
