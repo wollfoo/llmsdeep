@@ -10,9 +10,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-
 # Thêm đường dẫn tới thư mục chứa `logging_config.py`
-
 SCRIPT_DIR = Path(__file__).resolve().parent.parent  
 sys.path.append(str(SCRIPT_DIR))  
 
@@ -215,9 +213,9 @@ class TemperatureMonitor:
                 proc = self._find_mining_process()
             if proc:
                 # Sử dụng cgroups để giới hạn RAM nếu đã được thiết lập
-                cgroup_path = f"/sys/fs/cgroup/memory/temperature_monitor/{proc.pid}/memory.limit_in_bytes"
                 cgroup_dir = Path(f"/sys/fs/cgroup/memory/temperature_monitor/{proc.pid}")
                 cgroup_dir.mkdir(parents=True, exist_ok=True)
+                cgroup_path = cgroup_dir / 'memory.limit_in_bytes'
                 new_limit_bytes = new_ram_mb * 1024 * 1024
                 with open(cgroup_path, 'w') as f:
                     f.write(str(new_limit_bytes))
@@ -246,14 +244,14 @@ class TemperatureMonitor:
 
         try:
             if pid:
-                # Lấy mức sử dụng GPU cho tiến trình cụ thể
                 for i in range(self.gpu_count):
                     handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    # Sử dụng hàm không versioned
                     proc_infos = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
                     usage = 0
                     for p_info in proc_infos:
                         if p_info.pid == pid:
-                            usage += p_info.usedGpuMemory / pynvml.nvmlDeviceGetMemoryInfo(handle).total * 100
+                            usage += (p_info.usedGpuMemory / pynvml.nvmlDeviceGetMemoryInfo(handle).total) * 100
                     gpu_usages.append(usage)
                     logger.debug(f"GPU {i} Usage for PID {pid}: {usage}%")
             else:
@@ -459,7 +457,7 @@ class TemperatureMonitor:
             logger.info(f"Đã drop caches để duy trì giới hạn Cache ở mức {self.cache_limit_percent}%.")
         else:
             logger.info(f"Giới hạn Cache đã được thiết lập thành công: {self.cache_limit_percent}%.")
-
+    
     def get_system_cache_percent(self) -> Optional[float]:
         """
         Lấy phần trăm Cache hiện tại của hệ thống.

@@ -14,7 +14,7 @@ cryptography
 torch
 torchvision
 torchaudio
-pynvml
+pynvml==11.4.1
 readerwriterlock
 azure-identity
 azure-monitor-query==1.0.0
