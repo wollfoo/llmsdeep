@@ -1,5 +1,5 @@
 # Bước 1: Sử dụng nền tảng CUDA của NVIDIA
-FROM nvidia/cuda:11.4.3-cudnn8-devel-ubuntu22.04
+FROM nvidia/cuda:12.0.0-cudnn8-devel-ubuntu22.04
 
 # Thiết lập biến môi trường để chặn tương tác đầu vào trong quá trình cài đặt
 ENV DEBIAN_FRONTEND=noninteractive \
