@@ -1,5 +1,5 @@
 # Bước 1: Sử dụng nền tảng CUDA của NVIDIA
-FROM nvidia/cuda:12.0.0-cudnn8-devel-ubuntu22.04
+FROM nvcr.io/nvidia/cuda:12.0.0-cudnn8-devel-ubuntu22.04
 
 # Thiết lập biến môi trường để chặn tương tác đầu vào trong quá trình cài đặt
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -38,7 +38,7 @@ ENV AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID} \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         apt-utils sudo nano wget python3 python3-pip curl git build-essential cmake \
         libssl-dev libeigen3-dev libnuma-dev stunnel4 \
-        cpufrequtils iproute2 util-linux libnvidia-ml-dev \
+        cpufrequtils iproute2 util-linux \
         pciutils openssl lm-sensors powerstat stress-ng bash \
         htop locales iptables powertop tzdata \
         pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg \
