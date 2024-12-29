@@ -24,10 +24,8 @@
             "max_allocation_mb": 200000
         },
         "gpu": {
-            "max_usage_percent": [90, 90],
-            "usage_percent_range": {
-                "max": 90
-            }
+            "max_usage_percent": 90
+
         },
         "disk_io": {
             "min_limit_mbps": 50,

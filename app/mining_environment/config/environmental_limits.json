@@ -51,7 +51,6 @@
   "gpu_optimization": {
     "_comment": "Cấu hình tối ưu GPU.",
     "gpu_utilization_percent_optimal": {
-      "_comment": "Ngưỡng tối ưu GPU: min < max và trong [0,100].",
       "min": 30,
       "max": 80
     }
