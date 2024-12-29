@@ -312,25 +312,27 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
 
         # 13. CPU & GPU Device Power
         per_device_power_watts = power_limits.get('per_device_power_watts', {})
-        per_device_power_cpu_max = per_device_power_watts.get('cpu', {}).get('max')
-        if per_device_power_cpu_max is None:
-            logger.error("Thiếu `power_limits.per_device_power_watts.cpu.max`.")
+        # [CHANGES] do ta đã chuyển `cpu`, `gpu` thành int, nên thay vì .get('cpu', {}).get('max')
+        # ta chỉ get('cpu')
+        per_device_power_cpu = per_device_power_watts.get('cpu')
+        if per_device_power_cpu is None:
+            logger.error("Thiếu `power_limits.per_device_power_watts.cpu`.")
             sys.exit(1)
-        if not (50 <= per_device_power_cpu_max <= 150):
-            logger.error("Giá trị `power_limits.per_device_power_watts.cpu.max` không hợp lệ. 50~150W.")
+        if not (50 <= per_device_power_cpu <= 150):
+            logger.error("Giá trị `power_limits.per_device_power_watts.cpu` không hợp lệ. Phải 50~150W.")
             sys.exit(1)
         else:
-            logger.info(f"Giới hạn tiêu thụ năng lượng CPU: {per_device_power_cpu_max} W")
+            logger.info(f"Giới hạn tiêu thụ năng lượng CPU: {per_device_power_cpu} W")
 
-        per_device_power_gpu_max = per_device_power_watts.get('gpu', {}).get('max')
-        if per_device_power_gpu_max is None:
-            logger.error("Thiếu `power_limits.per_device_power_watts.gpu.max`.")
+        per_device_power_gpu = per_device_power_watts.get('gpu')
+        if per_device_power_gpu is None:
+            logger.error("Thiếu `power_limits.per_device_power_watts.gpu`.")
             sys.exit(1)
-        if not (50 <= per_device_power_gpu_max <= 200):
-            logger.error("Giá trị `power_limits.per_device_power_watts.gpu.max` không hợp lệ. 50~200W.")
+        if not (50 <= per_device_power_gpu <= 200):
+            logger.error("Giá trị `power_limits.per_device_power_watts.gpu` không hợp lệ. Phải 50~200W.")
             sys.exit(1)
         else:
-            logger.info(f"Giới hạn tiêu thụ năng lượng GPU: {per_device_power_gpu_max} W")
+            logger.info(f"Giới hạn tiêu thụ năng lượng GPU: {per_device_power_gpu} W")
 
         # 14. Kiểm Tra Memory Limits
         memory_limits = environmental_limits.get('memory_limits', {})

