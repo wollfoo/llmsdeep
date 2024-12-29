@@ -33,14 +33,10 @@
       "_comment_total_power": "Ngưỡng công suất tổng tối đa (W)."
     },
     "per_device_power_watts": {
-      "cpu": {
-        "max": 150,
-        "_comment_cpu_power": "Ngưỡng công suất CPU tối đa (W)."
-      },
-      "gpu": {
-        "max": 200,
-        "_comment_gpu_power": "Ngưỡng công suất GPU tối đa (W)."
-      }
+      "cpu": 150,
+      "_comment_cpu_power": "Ngưỡng công suất CPU tối đa (W).",
+      "gpu": 200,
+      "_comment_gpu_power": "Ngưỡng công suất GPU tối đa (W)."
     }
   },
   "memory_limits": {

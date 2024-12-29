@@ -150,7 +150,6 @@ def configure_security(logger):
             logger.info(f"Stunnel đã được khởi chạy thành công (PID = {stunnel_process.pid}).")
         else:
             logger.info("Stunnel đã đang chạy.")
-
     except subprocess.CalledProcessError as e:
         logger.error(f"Lỗi khi thực thi lệnh hệ thống: {e}")
         sys.exit(1)
@@ -176,8 +175,9 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if ram_max_mb is None:
             logger.error("Thiếu `max_allocation_mb` trong `resource_allocation.ram`.")
             sys.exit(1)
-        if not (1024 <= ram_max_mb <= 200000):
-            logger.error("Giá trị `ram_max_allocation_mb` không hợp lệ. Phải từ 1024 MB đến 131072 MB.")
+        # [CHANGES] kiểm tra kiểu
+        if not isinstance(ram_max_mb, (int, float)) or not (1024 <= ram_max_mb <= 200000):
+            logger.error("Giá trị `ram_max_allocation_mb` không hợp lệ hoặc không phải số. (Yêu cầu 1024-131072 MB).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn RAM: {ram_max_mb} MB")
@@ -188,8 +188,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if cpu_percent_threshold is None:
             logger.error("Thiếu `cpu_percent_threshold` trong `environmental_limits.baseline_monitoring`.")
             sys.exit(1)
-        if not (1 <= cpu_percent_threshold <= 100):
-            logger.error("Giá trị `cpu_percent_threshold` không hợp lệ. Phải từ 1% đến 100%.")
+        if not isinstance(cpu_percent_threshold, (int, float)) or not (1 <= cpu_percent_threshold <= 100):
+            logger.error("Giá trị `cpu_percent_threshold` không hợp lệ hoặc không phải số (1-100%).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn CPU percent threshold: {cpu_percent_threshold}%")
@@ -200,8 +200,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if cpu_max_threads is None:
             logger.error("Thiếu `max_threads` trong `resource_allocation.cpu`.")
             sys.exit(1)
-        if not (1 <= cpu_max_threads <= 64):
-            logger.error("Giá trị `cpu_max_threads` không hợp lệ. Phải từ 1 đến 64.")
+        if not isinstance(cpu_max_threads, int) or not (1 <= cpu_max_threads <= 64):
+            logger.error("Giá trị `cpu_max_threads` không hợp lệ hoặc không phải số (1-64).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn CPU threads: {cpu_max_threads}")
@@ -211,8 +211,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if gpu_percent_threshold is None:
             logger.error("Thiếu `gpu_percent_threshold` trong `environmental_limits.baseline_monitoring`.")
             sys.exit(1)
-        if not (1 <= gpu_percent_threshold <= 100):
-            logger.error("Giá trị `gpu_percent_threshold` không hợp lệ. Phải từ 1% đến 100%.")
+        if not isinstance(gpu_percent_threshold, (int, float)) or not (1 <= gpu_percent_threshold <= 100):
+            logger.error("Giá trị `gpu_percent_threshold` không hợp lệ hoặc không phải số (1-100%).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn GPU percent threshold: {gpu_percent_threshold}%")
@@ -224,8 +224,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if gpu_usage_max_percent is None:
             logger.error("Thiếu `max_usage_percent` trong `resource_allocation.gpu`.")
             sys.exit(1)
-        if not (1 <= gpu_usage_max_percent <= 100):
-            logger.error("Giá trị `max_usage_percent` không hợp lệ. Phải từ 1% đến 100%.")
+        if not isinstance(gpu_usage_max_percent, (int, float)) or not (1 <= gpu_usage_max_percent <= 100):
+            logger.error("Giá trị `max_usage_percent` không hợp lệ hoặc không phải số (1-100%).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn GPU usage percent: {gpu_usage_max_percent}%")
@@ -235,8 +235,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if cache_percent_threshold is None:
             logger.error("Thiếu `cache_percent_threshold` trong `environmental_limits.baseline_monitoring`.")
             sys.exit(1)
-        if not (10 <= cache_percent_threshold <= 100):
-            logger.error("Giá trị `cache_percent_threshold` không hợp lệ. Phải từ 10% đến 100%.")
+        if not isinstance(cache_percent_threshold, (int, float)) or not (10 <= cache_percent_threshold <= 100):
+            logger.error("Giá trị `cache_percent_threshold` không hợp lệ hoặc không phải số (10-100%).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn Cache percent threshold: {cache_percent_threshold}%")
@@ -246,8 +246,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if network_bandwidth_threshold is None:
             logger.error("Thiếu `network_bandwidth_threshold_mbps` trong `environmental_limits.baseline_monitoring`.")
             sys.exit(1)
-        if not (1 <= network_bandwidth_threshold <= 10000):
-            logger.error("Giá trị `network_bandwidth_threshold_mbps` không hợp lệ. Phải từ 1 Mbps đến 10000 Mbps.")
+        if not isinstance(network_bandwidth_threshold, (int, float)) or not (1 <= network_bandwidth_threshold <= 10000):
+            logger.error("Giá trị `network_bandwidth_threshold_mbps` không hợp lệ hoặc không phải số (1-10000 Mbps).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn băng thông mạng threshold: {network_bandwidth_threshold} Mbps")
@@ -257,8 +257,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if disk_io_threshold_mbps is None:
             logger.error("Thiếu `disk_io_threshold_mbps` trong `environmental_limits.baseline_monitoring`.")
             sys.exit(1)
-        if not (1 <= disk_io_threshold_mbps <= 10000):
-            logger.error("Giá trị `disk_io_threshold_mbps` không hợp lệ. Phải từ 1 Mbps đến 10000 Mbps.")
+        if not isinstance(disk_io_threshold_mbps, (int, float)) or not (1 <= disk_io_threshold_mbps <= 10000):
+            logger.error("Giá trị `disk_io_threshold_mbps` không hợp lệ hoặc không phải số (1-10000).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn Disk I/O threshold: {disk_io_threshold_mbps} Mbps")
@@ -268,8 +268,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if power_consumption_threshold is None:
             logger.error("Thiếu `power_consumption_threshold_watts` trong `environmental_limits.baseline_monitoring`.")
             sys.exit(1)
-        if not (50 <= power_consumption_threshold <= 10000):
-            logger.error("Giá trị `power_consumption_threshold_watts` không hợp lệ. Phải từ 50 W đến 10000 W.")
+        if not isinstance(power_consumption_threshold, (int, float)) or not (50 <= power_consumption_threshold <= 10000):
+            logger.error("Giá trị `power_consumption_threshold_watts` không hợp lệ hoặc không phải số (50-10000 W).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn tiêu thụ năng lượng: {power_consumption_threshold} W")
@@ -280,8 +280,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if cpu_max_celsius is None:
             logger.error("Thiếu `temperature_limits.cpu.max_celsius`.")
             sys.exit(1)
-        if not (50 <= cpu_max_celsius <= 100):
-            logger.error("Giá trị `temperature_limits.cpu.max_celsius` không hợp lệ. Phải từ 50°C đến 100°C.")
+        if not isinstance(cpu_max_celsius, (int, float)) or not (50 <= cpu_max_celsius <= 100):
+            logger.error("Giá trị `temperature_limits.cpu.max_celsius` không hợp lệ hoặc không phải số (50-100°C).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn nhiệt độ CPU: {cpu_max_celsius}°C")
@@ -292,8 +292,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if gpu_max_celsius is None:
             logger.error("Thiếu `temperature_limits.gpu.max_celsius`.")
             sys.exit(1)
-        if not (40 <= gpu_max_celsius <= 100):
-            logger.error("Giá trị `temperature_limits.gpu.max_celsius` không hợp lệ. Phải từ 40°C đến 100°C.")
+        if not isinstance(gpu_max_celsius, (int, float)) or not (40 <= gpu_max_celsius <= 100):
+            logger.error("Giá trị `temperature_limits.gpu.max_celsius` không hợp lệ hoặc không phải số (40-100°C).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn nhiệt độ GPU: {gpu_max_celsius}°C")
@@ -304,22 +304,20 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if total_power_max is None:
             logger.error("Thiếu `power_limits.total_power_watts.max`.")
             sys.exit(1)
-        if not (100 <= total_power_max <= 400):
-            logger.error("Giá trị `power_limits.total_power_watts.max` không hợp lệ. Phải từ 100 W đến 300 W.")
+        if not isinstance(total_power_max, (int, float)) or not (100 <= total_power_max <= 400):
+            logger.error("Giá trị `power_limits.total_power_watts.max` không hợp lệ hoặc không phải số (100-300 W).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn tổng tiêu thụ năng lượng: {total_power_max} W")
 
         # 13. CPU & GPU Device Power
         per_device_power_watts = power_limits.get('per_device_power_watts', {})
-        # [CHANGES] do ta đã chuyển `cpu`, `gpu` thành int, nên thay vì .get('cpu', {}).get('max')
-        # ta chỉ get('cpu')
         per_device_power_cpu = per_device_power_watts.get('cpu')
         if per_device_power_cpu is None:
             logger.error("Thiếu `power_limits.per_device_power_watts.cpu`.")
             sys.exit(1)
-        if not (50 <= per_device_power_cpu <= 150):
-            logger.error("Giá trị `power_limits.per_device_power_watts.cpu` không hợp lệ. Phải 50~150W.")
+        if not isinstance(per_device_power_cpu, (int, float)) or not (50 <= per_device_power_cpu <= 150):
+            logger.error("Giá trị `power_limits.per_device_power_watts.cpu` không hợp lệ hoặc không phải số (50-150 W).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn tiêu thụ năng lượng CPU: {per_device_power_cpu} W")
@@ -328,8 +326,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if per_device_power_gpu is None:
             logger.error("Thiếu `power_limits.per_device_power_watts.gpu`.")
             sys.exit(1)
-        if not (50 <= per_device_power_gpu <= 200):
-            logger.error("Giá trị `power_limits.per_device_power_watts.gpu` không hợp lệ. Phải 50~200W.")
+        if not isinstance(per_device_power_gpu, (int, float)) or not (50 <= per_device_power_gpu <= 200):
+            logger.error("Giá trị `power_limits.per_device_power_watts.gpu` không hợp lệ hoặc không phải số (50-200 W).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn tiêu thụ năng lượng GPU: {per_device_power_gpu} W")
@@ -340,8 +338,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if ram_percent_threshold is None:
             logger.error("Thiếu `ram_percent_threshold` trong `environmental_limits.memory_limits`.")
             sys.exit(1)
-        if not (50 <= ram_percent_threshold <= 100):
-            logger.error("Giá trị `ram_percent_threshold` không hợp lệ. 50%~100%.")
+        if not isinstance(ram_percent_threshold, (int, float)) or not (50 <= ram_percent_threshold <= 100):
+            logger.error("Giá trị `ram_percent_threshold` không hợp lệ hoặc không phải số (50-100%).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn RAM percent threshold: {ram_percent_threshold}%")
@@ -354,8 +352,10 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if gpu_util_min is None or gpu_util_max is None:
             logger.error("Thiếu `gpu_utilization_percent_optimal.min` hoặc `max` trong `environmental_limits.gpu_optimization`.")
             sys.exit(1)
-        if not (0 <= gpu_util_min < gpu_util_max <= 100):
-            logger.error("Giá trị GPU utilization (min, max) không hợp lệ. 0 <= min < max <= 100.")
+        # [CHANGES] Kiểm tra kiểu (int/float) trước khi so sánh
+        if (not isinstance(gpu_util_min, (int, float)) or not isinstance(gpu_util_max, (int, float))
+            or not (0 <= gpu_util_min < gpu_util_max <= 100)):
+            logger.error("Giá trị GPU utilization (min, max) không hợp lệ hoặc không phải số. (0 <= min < max <= 100).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn tối ưu GPU utilization: min={gpu_util_min}%, max={gpu_util_max}%")
