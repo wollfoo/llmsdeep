@@ -16,6 +16,11 @@ class BaseManager:
         """
         self.config = config
         self.logger = logger
+
+        # [CHANGES] Đảm bảo config là dict, tránh lỗi so sánh/truy cập sai
+        if not isinstance(self.config, dict):
+            raise ValueError("Cấu hình (config) phải là kiểu dict.")
+
         self.validate_config(self.config)
 
     def validate_config(self, config: Dict[str, Any]):
@@ -58,7 +63,6 @@ class BaseManager:
         self._validate_power_limits(config.get("power_limits", {}))
         self._validate_monitoring_parameters(config.get("monitoring_parameters", {}))
         self._validate_optimization_parameters(config.get("optimization_parameters", {}))
-        # Loại bỏ việc kiểm tra ai_driven_monitoring
         self._validate_cloak_strategies(config.get("cloak_strategies", {}))
         self._validate_process_priority_map(config.get("process_priority_map", {}))
         self._validate_network_interface(config.get("network_interface", ""))
@@ -89,6 +93,7 @@ class BaseManager:
 
         Raises:
             KeyError: Nếu thiếu loại tiến trình hoặc tên tiến trình.
+            ValueError: Nếu tên tiến trình bị bỏ trống.
         """
         required_process_types = ["CPU", "GPU"]
         missing_process_types = [ptype for ptype in required_process_types if ptype not in processes]
@@ -142,10 +147,18 @@ class BaseManager:
         Raises:
             KeyError: Nếu thiếu các khóa cần thiết.
         """
-        required_baseline_keys = ["cpu_usage_percent", "ram_usage_percent", "gpu_usage_percent", "disk_io_usage_mbps", "network_usage_mbps"]
+        required_baseline_keys = [
+            "cpu_usage_percent",
+            "ram_usage_percent",
+            "gpu_usage_percent",
+            "disk_io_usage_mbps",
+            "network_usage_mbps"
+        ]
         missing_baseline_keys = [key for key in required_baseline_keys if key not in baseline_thresholds]
         if missing_baseline_keys:
-            raise KeyError(f"Thiếu các khóa trong baseline_thresholds. Yêu cầu: {', '.join(missing_baseline_keys)}.")
+            raise KeyError(
+                f"Thiếu các khóa trong baseline_thresholds. Yêu cầu: {', '.join(missing_baseline_keys)}."
+            )
 
     def _validate_resource_allocation(self, resource_allocation: Dict[str, Any]):
         """
@@ -173,7 +186,9 @@ class BaseManager:
         # Kiểm tra sự tồn tại của các tài nguyên chính
         missing_resources = [res for res in required_resource_keys if res not in resource_allocation]
         if missing_resources:
-            raise KeyError(f"resource_allocation phải định nghĩa cấu hình cho các tài nguyên: {', '.join(missing_resources)}.")
+            raise KeyError(
+                f"resource_allocation phải định nghĩa cấu hình cho các tài nguyên: {', '.join(missing_resources)}."
+            )
 
         # Kiểm tra sự tồn tại của các khóa con trong từng tài nguyên
         for resource, subkeys in required_resource_keys.items():
@@ -197,9 +212,13 @@ class BaseManager:
             KeyError: Nếu thiếu các khóa cần thiết.
         """
         required_temperature_keys = ["cpu_max_celsius", "gpu_max_celsius"]
-        missing_temperature_keys = [key for key in required_temperature_keys if key not in temperature_limits]
+        missing_temperature_keys = [
+            key for key in required_temperature_keys if key not in temperature_limits
+        ]
         if missing_temperature_keys:
-            raise KeyError(f"temperature_limits phải định nghĩa {', '.join(missing_temperature_keys)}.")
+            raise KeyError(
+                f"temperature_limits phải định nghĩa {', '.join(missing_temperature_keys)}."
+            )
 
     def _validate_power_limits(self, power_limits: Dict[str, Any]):
         """
@@ -212,11 +231,18 @@ class BaseManager:
             KeyError: Nếu thiếu các khóa cần thiết.
         """
         if "per_device_power_watts" not in power_limits:
-            raise KeyError("power_limits phải định nghĩa 'per_device_power_watts' cho CPU và GPU.")
+            raise KeyError(
+                "power_limits phải định nghĩa 'per_device_power_watts' cho CPU và GPU."
+            )
         required_power_keys = ["cpu", "gpu"]
-        missing_power_keys = [key for key in required_power_keys if key not in power_limits["per_device_power_watts"]]
+        missing_power_keys = [
+            key for key in required_power_keys
+            if key not in power_limits["per_device_power_watts"]
+        ]
         if missing_power_keys:
-            raise KeyError(f"power_limits['per_device_power_watts'] phải định nghĩa {', '.join(missing_power_keys)}.")
+            raise KeyError(
+                f"power_limits['per_device_power_watts'] phải định nghĩa {', '.join(missing_power_keys)}."
+            )
 
     def _validate_monitoring_parameters(self, monitoring_parameters: Dict[str, Any]):
         """
@@ -228,10 +254,20 @@ class BaseManager:
         Raises:
             KeyError: Nếu thiếu các khóa cần thiết.
         """
-        required_monitoring_keys = ["temperature_monitoring_interval_seconds", "power_monitoring_interval_seconds", "azure_monitor_interval_seconds", "optimization_interval_seconds"]
-        missing_monitoring_keys = [key for key in required_monitoring_keys if key not in monitoring_parameters]
+        required_monitoring_keys = [
+            "temperature_monitoring_interval_seconds",
+            "power_monitoring_interval_seconds",
+            "azure_monitor_interval_seconds",
+            "optimization_interval_seconds"
+        ]
+        missing_monitoring_keys = [
+            key for key in required_monitoring_keys
+            if key not in monitoring_parameters
+        ]
         if missing_monitoring_keys:
-            raise KeyError(f"monitoring_parameters phải định nghĩa {', '.join(missing_monitoring_keys)}.")
+            raise KeyError(
+                f"monitoring_parameters phải định nghĩa {', '.join(missing_monitoring_keys)}."
+            )
 
     def _validate_optimization_parameters(self, optimization_parameters: Dict[str, Any]):
         """
@@ -244,9 +280,14 @@ class BaseManager:
             KeyError: Nếu thiếu các khóa cần thiết.
         """
         required_optimization_keys = ["gpu_power_adjustment_step", "disk_io_limit_step_mbps"]
-        missing_optimization_keys = [key for key in required_optimization_keys if key not in optimization_parameters]
+        missing_optimization_keys = [
+            key for key in required_optimization_keys
+            if key not in optimization_parameters
+        ]
         if missing_optimization_keys:
-            raise KeyError(f"optimization_parameters phải định nghĩa {', '.join(missing_optimization_keys)}.")
+            raise KeyError(
+                f"optimization_parameters phải định nghĩa {', '.join(missing_optimization_keys)}."
+            )
 
     def _validate_cloak_strategies(self, cloak_strategies: Dict[str, Any]):
         """
@@ -273,6 +314,15 @@ class BaseManager:
         """
         if not isinstance(process_priority_map, dict) or not process_priority_map:
             raise ValueError("process_priority_map phải là một dictionary không trống.")
+
+        # [CHANGES] Đảm bảo mọi giá trị priority trong map là int, tránh lỗi so sánh dict/int
+        for p_name, priority_value in process_priority_map.items():
+            if not isinstance(priority_value, int):
+                self.logger.warning(
+                    f"Priority cho tiến trình '{p_name}' không phải int (hiện là {type(priority_value)}: {priority_value}). "
+                    "Thiết lập giá trị mặc định = 1."
+                )
+                process_priority_map[p_name] = 1
 
     def _validate_network_interface(self, network_interface: str):
         """

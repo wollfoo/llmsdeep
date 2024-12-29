@@ -8,7 +8,7 @@ from time import sleep
 from typing import Dict, Any
 
 from .resource_manager import ResourceManager
-from .anomaly_detector import AnomalyDetector  
+from .anomaly_detector import AnomalyDetector
 from .logging_config import setup_logging
 
 # Định nghĩa các thư mục cấu hình và logs
@@ -20,15 +20,21 @@ system_logger = setup_logging('system_manager', LOGS_DIR / 'system_manager.log',
 resource_logger = setup_logging('resource_manager', LOGS_DIR / 'resource_manager.log', 'INFO')
 anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.log', 'INFO')
 
-# Global instance of SystemManager
+# Global instance of SystemManager (the main orchestrator)
 _system_manager_instance = None
+
 
 class SystemManager:
     """
     Lớp quản lý toàn bộ hệ thống, kết hợp ResourceManager và AnomalyDetector.
-    Đảm bảo các thành phần hoạt động đồng bộ và không xung đột khi truy cập tài nguyên chung.
+    Đảm bảo các thành phần hoạt động đồng bộ và không xung đột khi truy cập tài nguyên.
     """
+
     def __init__(self, config: Dict[str, Any]):
+        # [CHANGES] Kiểm tra config có phải dict thật, tránh lỗi so sánh dict
+        if not isinstance(config, dict):
+            raise ValueError("Cấu hình (config) phải là kiểu dict.")
+
         self.config = config  # Lưu cấu hình hệ thống
 
         # Gán logger cho từng thành phần
@@ -58,7 +64,7 @@ class SystemManager:
             self.system_logger.info("SystemManager đã khởi động thành công.")
         except Exception as e:
             self.system_logger.error(f"Lỗi khi khởi động SystemManager: {e}")
-            self.stop()  # Đảm bảo dừng toàn bộ hệ thống nếu xảy ra lỗi
+            self.stop()  # Dừng toàn bộ hệ thống nếu xảy ra lỗi
             raise
 
     def stop(self):
@@ -75,6 +81,7 @@ class SystemManager:
             self.system_logger.error(f"Lỗi khi dừng SystemManager: {e}")
             raise
 
+
 def load_config(config_path: Path) -> Dict[str, Any]:
     """
     Tải cấu hình từ tệp JSON.
@@ -89,7 +96,13 @@ def load_config(config_path: Path) -> Dict[str, Any]:
         with open(config_path, 'r') as f:
             config = json.load(f)
         system_logger.info(f"Đã tải cấu hình từ {config_path}")
+
+        # [CHANGES] Kiểm tra config, tránh lỗi len(int) hay so sánh dict < dict
+        if not isinstance(config, dict):
+            system_logger.error("Cấu hình không phải kiểu dict.")
+            sys.exit(1)
         return config
+
     except FileNotFoundError:
         system_logger.error(f"Tệp cấu hình không tìm thấy: {config_path}")
         sys.exit(1)
@@ -97,13 +110,14 @@ def load_config(config_path: Path) -> Dict[str, Any]:
         system_logger.error(f"Lỗi cú pháp JSON trong tệp cấu hình {config_path}: {e}")
         sys.exit(1)
 
+
 def start():
     """
     Bắt đầu toàn bộ hệ thống.
     """
     global _system_manager_instance
 
-    # Tải cấu hình từ tệp JSON duy nhất
+    # Tải cấu hình từ tệp JSON
     resource_config_path = CONFIG_DIR / "resource_config.json"
     config = load_config(resource_config_path)
 
@@ -128,7 +142,11 @@ def start():
         _system_manager_instance.stop()
         sys.exit(1)
 
+
 def stop():
+    """
+    Dừng hệ thống nếu nó đang chạy.
+    """
     global _system_manager_instance
 
     if _system_manager_instance:
@@ -137,6 +155,7 @@ def stop():
         system_logger.info("SystemManager đã dừng thành công.")
     else:
         system_logger.warning("SystemManager instance chưa được khởi tạo.")
+
 
 if __name__ == "__main__":
     # Đảm bảo script được chạy với quyền root

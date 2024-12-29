@@ -74,7 +74,7 @@ class AzureBaseClient:
     def discover_resources(self, resource_type: str) -> List[Dict[str, Any]]:
         """
         Sử dụng Azure Resource Graph để tự động khám phá tài nguyên theo loại.
-        Trả về danh sách các tài nguyên dưới dạng dict với các khóa 'id', 'name', và 'resourceGroup'.
+        Trả về danh sách dict với các khóa 'id', 'name', 'resourceGroup'.
         """
         try:
             query = f"Resources | where type =~ '{resource_type}' | project name, resourceGroup, id"
@@ -87,15 +87,17 @@ class AzureBaseClient:
 
             resources = []
             for res in response.data:
-                if isinstance(res, dict):  # Đảm bảo res là dictionary
+                # [CHANGES] Kiểm tra chắc chắn res là dict
+                if isinstance(res, dict):
+                    # Không so sánh dict < dict ở đây, chỉ truy cập key cụ thể
                     resource_dict = {
-                        'id': res['id'],
-                        'name': res['name'],
-                        'resourceGroup': res['resourceGroup']
+                        'id': res.get('id', ''),
+                        'name': res.get('name', ''),
+                        'resourceGroup': res.get('resourceGroup', '')
                     }
                     resources.append(resource_dict)
                 else:
-                    self.logger.warning(f"Unexpected data type: {type(res)}")
+                    self.logger.warning(f"Unexpected data type in ResourceGraphClient: {type(res)}")
             
             self.logger.info(f"Đã khám phá {len(resources)} tài nguyên loại {resource_type}.")
             return resources
@@ -139,7 +141,7 @@ class AzureMonitorClient(AzureBaseClient):
                 metrics[metric.name] = []
                 for ts in metric.timeseries:
                     for dp in ts.data:
-                        # Sử dụng giá trị tương ứng trong các aggregation
+                        # Sử dụng giá trị tương ứng
                         value = dp.average or dp.total or dp.minimum or dp.maximum or dp.count or 0
                         metrics[metric.name].append(value)
             self.logger.info(f"Đã lấy metrics cho tài nguyên {resource_id}: {metric_names}")
@@ -151,7 +153,7 @@ class AzureMonitorClient(AzureBaseClient):
 
 class AzureSentinelClient(AzureBaseClient):
     """
-    Lớp để tương tác với Azure Sentinel.
+    Lớp để tương tác với Azure Sentinel (thông qua SecurityCenter).
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
@@ -160,23 +162,19 @@ class AzureSentinelClient(AzureBaseClient):
     def get_recent_alerts(self, days: int = 1) -> List[Any]:
         """
         Lấy các cảnh báo (alerts) gần đây từ Azure Security Center.
-
-        Args:
-            days (int): Số ngày để lấy các cảnh báo gần đây.
-
-        Returns:
-            List[Any]: Danh sách các alerts.
         """
         try:
             alerts = self.security_client.alerts.list()
             recent_alerts = []
             cutoff_time = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+
+            # [CHANGES] Không so sánh dict < dict ở đây
             for alert in alerts:
-                # Kiểm tra thuộc tính 'properties' và 'created_time'
-                if (hasattr(alert, 'properties') and 
-                    hasattr(alert.properties, 'created_time') and 
-                    alert.properties.created_time >= cutoff_time):
+                if (hasattr(alert, 'properties') 
+                    and hasattr(alert.properties, 'created_time') 
+                    and alert.properties.created_time >= cutoff_time):
                     recent_alerts.append(alert)
+
             self.logger.info(f"Đã lấy {len(recent_alerts)} alerts từ Azure Sentinel trong {days} ngày gần đây.")
             return recent_alerts
         except Exception as e:
@@ -196,6 +194,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
     def get_workspace_ids(self) -> List[str]:
         try:
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
+            # [CHANGES] Chỉ truy cập key cụ thể, không so sánh dictionary
             workspace_ids = [res['id'] for res in resources if 'id' in res]
             if workspace_ids:
                 self.logger.info(f"Đã tìm thấy {len(workspace_ids)} Log Analytics Workspaces.")
@@ -209,13 +208,6 @@ class AzureLogAnalyticsClient(AzureBaseClient):
     def query_logs(self, query: str, timespan: Optional[str] = "P1D") -> List[Any]:
         """
         Thực hiện truy vấn log trên Azure Log Analytics.
-
-        Args:
-            query (str): Truy vấn Kusto (KQL) để thực hiện.
-            timespan (Optional[str]): Khoảng thời gian để truy vấn (ISO 8601 duration hoặc start/end).
-
-        Returns:
-            List[Any]: Danh sách các bảng kết quả từ các Workspace.
         """
         results = []
         if not self.workspace_ids:
@@ -225,6 +217,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             for workspace_id in self.workspace_ids:
                 body = logmodels.QueryBody(query=query, timespan=timespan)
                 response = self.client.query(workspace_id=workspace_id, body=body)
+                # [CHANGES] Kiểm tra response.tables trước khi duyệt
                 if response.tables:
                     results.extend(response.tables)
                     self.logger.info(f"Đã thực hiện truy vấn logs thành công trên Workspace ID: {workspace_id}.")
@@ -235,17 +228,11 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi truy vấn logs từ Azure Log Analytics: {e}")
             return []
 
-    def query_logs_with_time_range(self, query: str, start_time: datetime.datetime, end_time: datetime.datetime) -> List[Any]:
+    def query_logs_with_time_range(
+        self, query: str, start_time: datetime.datetime, end_time: datetime.datetime
+    ) -> List[Any]:
         """
-        Thực hiện truy vấn log với khoảng thời gian cụ thể trên Azure Log Analytics.
-
-        Args:
-            query (str): Truy vấn Kusto (KQL) để thực hiện.
-            start_time (datetime.datetime): Thời gian bắt đầu.
-            end_time (datetime.datetime): Thời gian kết thúc.
-
-        Returns:
-            List[Any]: Danh sách các bảng kết quả từ các Workspace.
+        Truy vấn log với khoảng thời gian cụ thể trên Azure Log Analytics.
         """
         results = []
         if not self.workspace_ids:
@@ -258,12 +245,18 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                 response = self.client.query(workspace_id=workspace_id, body=body)
                 if response.tables:
                     results.extend(response.tables)
-                    self.logger.info(f"Đã thực hiện truy vấn logs thành công trên Workspace ID: {workspace_id} với timespan: {timespan}.")
+                    self.logger.info(
+                        f"Đã truy vấn logs thành công trên Workspace ID: {workspace_id} với timespan: {timespan}."
+                    )
                 else:
-                    self.logger.info(f"Không có dữ liệu trả về từ Workspace ID: {workspace_id} với timespan: {timespan}.")
+                    self.logger.info(
+                        f"Không có dữ liệu trả về từ Workspace ID: {workspace_id} với timespan: {timespan}."
+                    )
             return results
         except Exception as e:
-            self.logger.error(f"Lỗi khi truy vấn logs với khoảng thời gian cụ thể từ Azure Log Analytics: {e}")
+            self.logger.error(
+                f"Lỗi khi truy vấn logs với khoảng thời gian cụ thể từ Azure Log Analytics: {e}"
+            )
             return []
 
 
@@ -278,14 +271,13 @@ class AzureSecurityCenterClient(AzureBaseClient):
     def get_security_recommendations(self) -> List[Any]:
         """
         Lấy các khuyến nghị bảo mật từ Azure Security Center.
-
-        Returns:
-            List[Any]: Danh sách các khuyến nghị bảo mật.
         """
         try:
             recommendations = self.security_client.security_recommendations.list()
             recommendations_list = list(recommendations)
-            self.logger.info(f"Đã lấy {len(recommendations_list)} security recommendations từ Azure Security Center.")
+            self.logger.info(
+                f"Đã lấy {len(recommendations_list)} security recommendations từ Azure Security Center."
+            )
             return recommendations_list
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy security recommendations từ Azure Security Center: {e}")
@@ -309,13 +301,19 @@ class AzureNetworkWatcherClient(AzureBaseClient):
                 resource_group_name=resource_group,
                 network_watcher_name=network_watcher_name
             )
+            # [CHANGES] flow_log_configurations có thể là iterable, kiểm tra cẩn thận
             flow_logs = [
-                log for log in flow_log_configurations if log.target_resource_id.endswith(nsg_name)
+                log for log in flow_log_configurations 
+                if hasattr(log, 'target_resource_id') and log.target_resource_id.endswith(nsg_name)
             ]
-            self.logger.info(f"Đã lấy {len(flow_logs)} flow logs từ NSG {nsg_name} trong Resource Group {resource_group}.")
+            self.logger.info(
+                f"Đã lấy {len(flow_logs)} flow logs từ NSG {nsg_name} trong Resource Group {resource_group}."
+            )
             return flow_logs
         except Exception as e:
-            self.logger.error(f"Lỗi khi lấy flow logs từ NSG {nsg_name} trong Resource Group {resource_group}: {e}")
+            self.logger.error(
+                f"Lỗi khi lấy flow logs từ NSG {nsg_name} trong Resource Group {resource_group}: {e}"
+            )
             return []
 
     def get_network_watcher_name(self, resource_group: str) -> Optional[str]:
@@ -325,16 +323,25 @@ class AzureNetworkWatcherClient(AzureBaseClient):
         try:
             watchers = self.network_client.network_watchers.list_all()
             for watcher in watchers:
-                resource_group_from_id = watcher.id.split("/resourceGroups/")[1].split("/")[0]
-                if resource_group_from_id.lower() == resource_group.lower():
-                    return watcher.name
+                # watcher.id: /subscriptions/.../resourceGroups/...
+                if "/resourceGroups/" in watcher.id:
+                    resource_group_from_id = (
+                        watcher.id.split("/resourceGroups/")[1].split("/")[0]
+                    )
+                    if resource_group_from_id.lower() == resource_group.lower():
+                        return watcher.name
             self.logger.warning(f"Không tìm thấy Network Watcher cho Resource Group {resource_group}.")
             return None
         except Exception as e:
-            self.logger.error(f"Lỗi khi lấy Network Watcher cho Resource Group {resource_group}: {e}")
+            self.logger.error(
+                f"Lỗi khi lấy Network Watcher cho Resource Group {resource_group}: {e}"
+            )
             return None
 
-    def create_flow_log(self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str, params: Dict[str, Any]) -> Optional[Any]:
+    def create_flow_log(
+        self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str,
+        params: Dict[str, Any]
+    ) -> Optional[Any]:
         """
         Tạo một flow log mới cho một NSG.
         """
@@ -345,13 +352,19 @@ class AzureNetworkWatcherClient(AzureBaseClient):
                 flow_log_name=flow_log_name,
                 parameters=params
             ).result()
-            self.logger.info(f"Đã tạo flow log {flow_log_name} cho NSG {nsg_name} trong Resource Group {resource_group}.")
+            self.logger.info(
+                f"Đã tạo flow log {flow_log_name} cho NSG {nsg_name} trong Resource Group {resource_group}."
+            )
             return flow_log
         except Exception as e:
-            self.logger.error(f"Lỗi khi tạo flow log {flow_log_name} cho NSG {nsg_name} trong Resource Group {resource_group}: {e}")
+            self.logger.error(
+                f"Lỗi khi tạo flow log {flow_log_name} cho NSG {nsg_name} trong Resource Group {resource_group}: {e}"
+            )
             return None
 
-    def delete_flow_log(self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str) -> bool:
+    def delete_flow_log(
+        self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str
+    ) -> bool:
         """
         Xóa một flow log từ NSG.
         """
@@ -361,10 +374,14 @@ class AzureNetworkWatcherClient(AzureBaseClient):
                 network_security_group_name=nsg_name,
                 flow_log_name=flow_log_name
             ).result()
-            self.logger.info(f"Đã xóa flow log {flow_log_name} từ NSG {nsg_name} trong Resource Group {resource_group}.")
+            self.logger.info(
+                f"Đã xóa flow log {flow_log_name} từ NSG {nsg_name} trong Resource Group {resource_group}."
+            )
             return True
         except Exception as e:
-            self.logger.error(f"Lỗi khi xóa flow log {flow_log_name} từ NSG {nsg_name} trong Resource Group {resource_group}: {e}")
+            self.logger.error(
+                f"Lỗi khi xóa flow log {flow_log_name} từ NSG {nsg_name} trong Resource Group {resource_group}: {e}"
+            )
             return False
 
 
@@ -383,7 +400,7 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
             traffic_workspace_ids = [
                 res['id'] for res in resources
-                if 'id' in res and 'trafficanalytics' in res['name'].lower()
+                if 'id' in res and 'trafficanalytics' in res.get('name', '').lower()
             ]
             if traffic_workspace_ids:
                 self.logger.info(f"Đã tìm thấy {len(traffic_workspace_ids)} Traffic Analytics Workspaces.")
@@ -394,7 +411,9 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy Workspace IDs của Traffic Analytics: {e}")
             return []
 
-    def get_traffic_data(self, query: Optional[str] = None, timespan: Optional[str] = "P1D") -> List[Any]:
+    def get_traffic_data(
+        self, query: Optional[str] = None, timespan: Optional[str] = "P1D"
+    ) -> List[Any]:
         """
         Lấy dữ liệu Traffic Analytics từ Azure Log Analytics.
         """
@@ -414,7 +433,9 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
                 response = self.log_analytics_client.query(workspace_id=workspace_id, body=body)
                 if response.tables:
                     results.extend(response.tables)
-                    self.logger.info(f"Đã lấy dữ liệu Traffic Analytics thành công từ Workspace ID: {workspace_id}.")
+                    self.logger.info(
+                        f"Đã lấy dữ liệu Traffic Analytics thành công từ Workspace ID: {workspace_id}."
+                    )
                 else:
                     self.logger.info(f"Không có dữ liệu trả về từ Workspace ID: {workspace_id}.")
             return results
@@ -422,8 +443,15 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy dữ liệu Traffic Analytics: {e}")
             return []
 
-    def enable_traffic_analytics(self, resource_group: str, network_watcher_name: str, nsg_name: str,
-                                 workspace_resource_id: str, storage_account_id: str, retention_days: int = 7) -> bool:
+    def enable_traffic_analytics(
+        self,
+        resource_group: str,
+        network_watcher_name: str,
+        nsg_name: str,
+        workspace_resource_id: str,
+        storage_account_id: str,
+        retention_days: int = 7
+    ) -> bool:
         """
         Bật Traffic Analytics cho một NSG bằng cách tạo hoặc cập nhật Flow Logs.
         """
@@ -458,7 +486,9 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi bật Traffic Analytics cho NSG {nsg_name}: {e}")
             return False
 
-    def disable_traffic_analytics(self, resource_group: str, network_watcher_name: str, nsg_name: str) -> bool:
+    def disable_traffic_analytics(
+        self, resource_group: str, network_watcher_name: str, nsg_name: str
+    ) -> bool:
         """
         Tắt Traffic Analytics cho một NSG bằng cách xóa Flow Logs.
         """
@@ -518,12 +548,16 @@ class AzureMLClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi khám phá Azure ML Clusters: {e}")
             return []
 
-    def get_ml_cluster_metrics(self, compute_id: str, metric_names: List[str],
-                               timespan: Optional[str] = 'PT1H', interval: Optional[str] = 'PT1M') -> Dict[str, List[float]]:
+    def get_ml_cluster_metrics(
+        self, 
+        compute_id: str, 
+        metric_names: List[str],
+        timespan: Optional[str] = 'PT1H', 
+        interval: Optional[str] = 'PT1M'
+    ) -> Dict[str, List[float]]:
         if not compute_id or not metric_names:
             self.logger.error("compute_id và metric_names không được để trống.")
             return {}
-        
         try:
             monitor_client = MetricsQueryClient(self.credential)
             metrics_data = monitor_client.list(
@@ -579,30 +613,41 @@ class AzureAnomalyDetectorClient:
         """
         try:
             for pid, metrics in metric_data.items():
-                series = []
-                cpu_usage = metrics.get('cpu_usage_percent', [])
+                # [CHANGES] Kiểm tra metrics có phải dict không
+                if not isinstance(metrics, dict):
+                    self.logger.warning(f"Metric data cho PID {pid} không phải dict, bỏ qua.")
+                    continue
+
+                cpu_usage = metrics.get('cpu_usage', [])
+                # [CHANGES] Chỉ gọi len() nếu cpu_usage là list
+                if not isinstance(cpu_usage, list):
+                    self.logger.warning(f"cpu_usage cho PID {pid} không phải list, bỏ qua.")
+                    continue
+
                 if len(cpu_usage) < 12:
                     self.logger.warning(f"Tiến trình PID {pid} có ít hơn 12 điểm dữ liệu, bỏ qua.")
                     continue
 
+                series = []
                 for i, usage in enumerate(cpu_usage):
+                    # usage có thể là int/float, kiểm tra tránh len(int)
+                    if not isinstance(usage, (int, float)):
+                        self.logger.warning(f"usage={usage} cho PID {pid} không phải kiểu số, bỏ qua điểm dữ liệu.")
+                        continue
                     timestamp = datetime.datetime.utcnow() - datetime.timedelta(minutes=len(cpu_usage) - i)
                     series.append(TimeSeriesPoint(timestamp=timestamp.isoformat(), value=usage))
 
                 options = UnivariateDetectionOptions(
                     series=series,
                     granularity="minutely",
-                    sensitivity=95  # Điều chỉnh sensitivity theo nhu cầu
+                    sensitivity=95  # Điều chỉnh sensitivity
                 )
 
-                response: UnivariateEntireDetectionResult = self.client.detect_univariate_entire_series(
-                    options=options
-                )
+                response: UnivariateEntireDetectionResult = self.client.detect_univariate_entire_series(options=options)
 
                 if any(response.is_anomaly):
                     self.logger.warning(f"Phát hiện bất thường trong tiến trình PID {pid}.")
                     return True
-
             return False
         except Exception as e:
             self.logger.error(f"Lỗi khi phát hiện bất thường với Azure Anomaly Detector: {e}")
@@ -615,7 +660,6 @@ class AzureAnomalyDetectorClient:
         if not self.endpoint or not self.api_key:
             self.logger.error("Endpoint hoặc API Key chưa được cấu hình đúng cách.")
             raise ValueError("Cấu hình Azure Anomaly Detector không đầy đủ.")
-
         self.logger.info("Cấu hình Azure Anomaly Detector đã được xác thực thành công.")
 
     def log_configuration(self):
@@ -652,8 +696,8 @@ class AzureOpenAIClient(AzureBaseClient):
         Cấu hình OpenAI với endpoint và API key.
         """
         if not self.endpoint or not self.api_key or not self.deployment_name:
-            self.logger.error("Thông tin endpoint, api_key hoặc deployment_name cho Azure OpenAI không được thiết lập.")
-            raise ValueError("Thiếu thông tin cấu hình cho Azure OpenAI Service.")
+            self.logger.error("Thiếu thông tin cấu hình cho Azure OpenAI.")
+            raise ValueError("Thiếu thông tin endpoint, api_key hoặc deployment_name.")
         
         try:
             openai.api_type = "azure"
@@ -680,8 +724,14 @@ class AzureOpenAIClient(AzureBaseClient):
                 stop=None,
             )
             suggestion_text = response.choices[0].text.strip()
-            # Giả định gợi ý được trả về dưới dạng danh sách số, ngăn cách bằng dấu phẩy
-            suggestions = [float(x.strip()) for x in suggestion_text.split(',') if x.strip()]
+            # [CHANGES] Kiểm tra suggestion_text có phải chuỗi và parse float cẩn thận
+            suggestions = []
+            if isinstance(suggestion_text, str) and suggestion_text:
+                for x in suggestion_text.split(','):
+                    try:
+                        suggestions.append(float(x.strip()))
+                    except ValueError:
+                        self.logger.warning(f"Không parse được '{x.strip()}' thành float, bỏ qua.")
             self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI: {suggestions}")
             return suggestions
         except Exception as e:
@@ -694,6 +744,11 @@ class AzureOpenAIClient(AzureBaseClient):
         """
         prompt = "Dựa trên các thông số hệ thống sau đây, đề xuất các điều chỉnh tối ưu hóa tài nguyên:\n"
         for pid, metrics in state_data.items():
+            # [CHANGES] Kiểm tra metrics có phải dict
+            if not isinstance(metrics, dict):
+                self.logger.warning(f"metrics cho PID {pid} không phải dict, bỏ qua.")
+                continue
+
             prompt += (
                 f"Tiến trình PID {pid}: CPU Usage: {metrics.get('cpu_usage_percent', 0)}%, "
                 f"RAM Usage: {metrics.get('memory_usage_mb', 0)}MB, "
