@@ -587,28 +587,62 @@ class ResourceManager(BaseManager):
             sleep(max(temperature_check_interval, power_check_interval))
 
     def gather_metric_data_for_anomaly_detection(self) -> Dict[str, Any]:
+        """
+        Thu thập dữ liệu metric để phát hiện bất thường.
+        """
         data = {}
         with self.mining_processes_lock.gen_rlock():
             for process in self.mining_processes:
                 try:
                     proc = psutil.Process(process.pid)
+                    
+                    # Thu thập từng metric và đảm bảo giá trị hợp lệ
+                    cpu_usage = proc.cpu_percent(interval=None)
+                    ram_usage_mb = proc.memory_info().rss / (1024 * 1024)
+                    gpu_usage_percent = (
+                        temperature_monitor.get_current_gpu_usage(process.pid)
+                        if self.shared_resource_manager.is_gpu_initialized()
+                        else 0
+                    )
+                    disk_io_mbps = temperature_monitor.get_current_disk_io_limit(process.pid)
+                    network_bandwidth_mbps = self.config.get('resource_allocation', {}).get(
+                        'network', {}
+                    ).get('bandwidth_limit_mbps', 100)
+                    cache_limit_percent = self.config.get('resource_allocation', {}).get(
+                        'cache', {}
+                    ).get('limit_percent', 50)
+
+                    # Kiểm tra và loại bỏ giá trị không hợp lệ (đặc biệt là dict)
+                    def validate_metric(value, field_name):
+                        if isinstance(value, dict):
+                            self.logger.warning(
+                                f"Metric data cho PID {process.pid}, field '{field_name}' không phải giá trị hợp lệ, bỏ qua."
+                            )
+                            return None
+                        return value
+
                     data[process.pid] = {
-                        'cpu_usage': proc.cpu_percent(interval=None),
-                        'ram_usage_mb': proc.memory_info().rss / (1024 * 1024),
-                        'gpu_usage_percent': temperature_monitor.get_current_gpu_usage(process.pid)
-                        if self.shared_resource_manager.is_gpu_initialized() else 0,
-                        'disk_io_mbps': temperature_monitor.get_current_disk_io_limit(process.pid),
-                        'network_bandwidth_mbps': self.config.get('resource_allocation', {})
-                            .get('network', {}).get('bandwidth_limit_mbps', 100),
-                        'cache_limit_percent': self.config.get('resource_allocation', {})
-                            .get('cache', {}).get('limit_percent', 50)
+                        'cpu_usage': validate_metric(cpu_usage, 'cpu_usage'),
+                        'ram_usage_mb': validate_metric(ram_usage_mb, 'ram_usage_mb'),
+                        'gpu_usage_percent': validate_metric(gpu_usage_percent, 'gpu_usage_percent'),
+                        'disk_io_mbps': validate_metric(disk_io_mbps, 'disk_io_mbps'),
+                        'network_bandwidth_mbps': validate_metric(network_bandwidth_mbps, 'network_bandwidth_mbps'),
+                        'cache_limit_percent': validate_metric(cache_limit_percent, 'cache_limit_percent'),
                     }
+
+                    # Xóa các trường có giá trị None để tránh ảnh hưởng đến downstream processing
+                    data[process.pid] = {
+                        k: v for k, v in data[process.pid].items() if v is not None
+                    }
+
                 except psutil.NoSuchProcess:
                     self.logger.warning(
-                        f"Tiến trình PID {process.pid} không còn tồn tại.")
+                        f"Tiến trình PID {process.pid} không còn tồn tại."
+                    )
                 except Exception as e:
                     self.logger.error(
-                        f"Lỗi khi thu thập dữ liệu cho PID {process.pid}: {e}")
+                        f"Lỗi khi thu thập dữ liệu cho PID {process.pid}: {e}"
+                    )
         return data
 
     def allocate_resources_with_priority(self):
@@ -616,11 +650,23 @@ class ResourceManager(BaseManager):
         Phân bổ tài nguyên cho các tiến trình theo thứ tự ưu tiên.
         """
         with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
+            # Sử dụng danh sách đã lọc và sửa lỗi priority nếu cần
+            filtered_processes = []
+            for process in self.mining_processes:
+                if not isinstance(process.priority, int):
+                    self.logger.warning(
+                        f"Priority của tiến trình {process.name} (PID: {process.pid}) không hợp lệ. Sử dụng giá trị mặc định là 1."
+                    )
+                    process.priority = 1  # Gán giá trị mặc định nếu không hợp lệ
+                filtered_processes.append(process)
+
+            # Sắp xếp các tiến trình
             sorted_processes = sorted(
-                self.mining_processes,
-                key=lambda p: p.priority if isinstance(p.priority, int) else 0,
+                filtered_processes,
+                key=lambda p: p.priority,
                 reverse=True
             )
+            
             total_cpu_cores = psutil.cpu_count(logical=True)
             allocated_cores = 0
 
@@ -630,13 +676,6 @@ class ResourceManager(BaseManager):
                         f"Không còn lõi CPU để phân bổ cho tiến trình {process.name} (PID: {process.pid})."
                     )
                     continue
-
-                # Kiểm tra và gán giá trị mặc định cho priority nếu không hợp lệ
-                if not isinstance(process.priority, int):
-                    self.logger.warning(
-                        f"Priority của tiến trình {process.name} (PID: {process.pid}) không hợp lệ. Sử dụng giá trị mặc định là 1."
-                    )
-                    process.priority = 1
 
                 available_cores = total_cpu_cores - allocated_cores
                 cores_to_allocate = min(process.priority, available_cores)
@@ -802,27 +841,34 @@ class ResourceManager(BaseManager):
         """
         while not self.stop_event.is_set():
             try:
+                # Lấy mục từ hàng đợi, nếu hết thời gian chờ thì tiếp tục vòng lặp
                 priority, adjustment_task = self.resource_adjustment_queue.get(timeout=1)
+                task_id = hash(str(adjustment_task))  # Tạo ID duy nhất cho nhiệm vụ
 
-                # Kiểm tra xem nhiệm vụ đã xử lý chưa
-                task_id = hash(str(adjustment_task))
+                # Kiểm tra xem nhiệm vụ đã được xử lý chưa
                 if task_id in self.processed_tasks:
                     self.logger.warning(f"Nhiệm vụ đã xử lý: {adjustment_task}")
+                    # Đánh dấu hoàn thành mục này trong hàng đợi và tiếp tục
                     self.resource_adjustment_queue.task_done()
                     continue
 
                 # Xử lý nhiệm vụ
-                self.execute_adjustment_task(adjustment_task)
-                self.resource_adjustment_queue.task_done()
+                try:
+                    self.execute_adjustment_task(adjustment_task)
+                except Exception as task_error:
+                    self.logger.error(f"Lỗi khi thực thi nhiệm vụ: {adjustment_task}, lỗi: {task_error}")
+                finally:
+                    # Đảm bảo gọi task_done() cho mọi trường hợp
+                    self.resource_adjustment_queue.task_done()
 
                 # Ghi nhận nhiệm vụ đã xử lý
                 self.processed_tasks.add(task_id)
 
             except Empty:
+                # Nếu hàng đợi trống, tiếp tục vòng lặp
                 continue
             except Exception as e:
-                self.logger.error(
-                    f"Lỗi trong quá trình xử lý điều chỉnh tài nguyên: {e}")
+                self.logger.error(f"Lỗi trong quá trình xử lý điều chỉnh tài nguyên: {e}")
 
     def execute_adjustment_task(self, adjustment_task):
         """
