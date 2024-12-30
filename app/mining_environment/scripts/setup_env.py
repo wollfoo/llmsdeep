@@ -32,7 +32,6 @@ def load_json_config(config_path, logger):
         logger.error(f"Lỗi cú pháp JSON trong tệp {config_path}: {e}")
         sys.exit(1)
 
-
 def configure_system(system_params, logger):
     """
     Thiết lập các tham số hệ thống như múi giờ và locale.
@@ -63,7 +62,6 @@ def configure_system(system_params, logger):
         logger.error(f"Lỗi khi thiết lập locale: {e}")
         sys.exit(1)
 
-
 def setup_environment_variables(environmental_limits, logger):
     """
     Đặt các biến môi trường dựa trên các giới hạn môi trường.
@@ -72,36 +70,26 @@ def setup_environment_variables(environmental_limits, logger):
         # memory_limits
         memory_limits = environmental_limits.get('memory_limits', {})
         ram_percent_threshold = memory_limits.get('ram_percent_threshold')
-        if ram_percent_threshold is not None:
+        if isinstance(ram_percent_threshold, (int, float)):
             os.environ['RAM_PERCENT_THRESHOLD'] = str(ram_percent_threshold)
             logger.info(f"Đã đặt biến môi trường RAM_PERCENT_THRESHOLD: {ram_percent_threshold}%")
         else:
-            if 'RAM_PERCENT_THRESHOLD' in os.environ:
-                del os.environ['RAM_PERCENT_THRESHOLD']
-                logger.info("Đã xóa biến môi trường RAM_PERCENT_THRESHOLD vì không có trong cấu hình.")
-            logger.warning("Không tìm thấy `ram_percent_threshold` trong `memory_limits`.")
+            logger.warning("`ram_percent_threshold` không hợp lệ hoặc không có trong cấu hình.")
 
         # gpu_optimization
         gpu_optimization = environmental_limits.get('gpu_optimization', {})
         gpu_util = gpu_optimization.get('gpu_utilization_percent_optimal', {})
         gpu_util_min = gpu_util.get('min')
         gpu_util_max = gpu_util.get('max')
-        if gpu_util_min is not None and gpu_util_max is not None:
+        if isinstance(gpu_util_min, (int, float)) and isinstance(gpu_util_max, (int, float)):
             os.environ['GPU_UTIL_MIN'] = str(gpu_util_min)
             os.environ['GPU_UTIL_MAX'] = str(gpu_util_max)
             logger.info(f"Đã đặt biến môi trường GPU_UTIL_MIN: {gpu_util_min}%, GPU_UTIL_MAX: {gpu_util_max}%")
         else:
-            if 'GPU_UTIL_MIN' in os.environ:
-                del os.environ['GPU_UTIL_MIN']
-                logger.info("Đã xóa biến môi trường GPU_UTIL_MIN vì không có trong cấu hình.")
-            if 'GPU_UTIL_MAX' in os.environ:
-                del os.environ['GPU_UTIL_MAX']
-                logger.info("Đã xóa biến môi trường GPU_UTIL_MAX vì không có trong cấu hình.")
-            logger.warning("Không tìm thấy `gpu_utilization_percent_optimal.min` hoặc `max` trong `gpu_optimization`.")
+            logger.warning("`gpu_utilization_percent_optimal.min` hoặc `max` không hợp lệ hoặc không có trong cấu hình.")
     except Exception as e:
         logger.error(f"Lỗi khi đặt biến môi trường: {e}")
         sys.exit(1)
-
 
 def configure_security(logger):
     """
@@ -344,14 +332,16 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         else:
             logger.info(f"Giới hạn RAM percent threshold: {ram_percent_threshold}%")
 
-        # 15. GPU Optimization
-        gpu_optimization = environmental_limits.get('gpu_optimization', {})
-        gpu_util = gpu_optimization.get('gpu_utilization_percent_optimal', {})
+        # 15. Kiểm tra GPU utilization thresholds
+        gpu_util = environmental_limits.get('gpu_optimization', {}).get('gpu_utilization_percent_optimal', {})
         gpu_util_min = gpu_util.get('min')
         gpu_util_max = gpu_util.get('max')
-        if gpu_util_min is None or gpu_util_max is None:
-            logger.error("Thiếu `gpu_utilization_percent_optimal.min` hoặc `max` trong `environmental_limits.gpu_optimization`.")
+        if (not isinstance(gpu_util_min, (int, float)) or 
+            not isinstance(gpu_util_max, (int, float)) or 
+            not (0 <= gpu_util_min < gpu_util_max <= 100)):
+            logger.error("Giá trị GPU utilization (min, max) không hợp lệ hoặc không phải số. (0 <= min < max <= 100).")
             sys.exit(1)
+
         # [CHANGES] Kiểm tra kiểu (int/float) trước khi so sánh
         if (not isinstance(gpu_util_min, (int, float)) or not isinstance(gpu_util_max, (int, float))
             or not (0 <= gpu_util_min < gpu_util_max <= 100)):
@@ -365,14 +355,12 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         logger.error(f"Lỗi trong quá trình xác thực cấu hình: {e}")
         sys.exit(1)
 
-
 def setup_gpu_optimization(environmental_limits, logger):
     """
     Thiết lập tối ưu hóa GPU dựa trên ngưỡng sử dụng (placeholder).
     """
     logger.info("Thiết lập tối ưu hóa GPU dựa trên các ngưỡng đã cấu hình.")
     # Placeholder nếu muốn thực thi thêm logic GPU
-
 
 def setup():
     """

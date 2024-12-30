@@ -201,6 +201,13 @@ class BaseManager:
                     msg = f"resource_allocation['{resource}'] phải định nghĩa các khóa '{keys}'."
                 raise KeyError(msg)
 
+            # Kiểm tra cụ thể gpu['max_usage_percent']
+            if resource == "gpu" and not isinstance(resource_allocation[resource].get("max_usage_percent", []), list):
+                self.logger.warning(
+                    f"resource_allocation['gpu']['max_usage_percent'] không phải list. Thiết lập mặc định = []."
+                )
+                resource_allocation[resource]["max_usage_percent"] = []
+
     def _validate_temperature_limits(self, temperature_limits: Dict[str, Any]):
         """
         Kiểm tra cấu hình giới hạn nhiệt độ.
@@ -315,7 +322,7 @@ class BaseManager:
         if not isinstance(process_priority_map, dict) or not process_priority_map:
             raise ValueError("process_priority_map phải là một dictionary không trống.")
 
-        # [CHANGES] Đảm bảo mọi giá trị priority trong map là int, tránh lỗi so sánh dict/int
+        # Đảm bảo mọi giá trị priority trong map là int
         for p_name, priority_value in process_priority_map.items():
             if not isinstance(priority_value, int):
                 self.logger.warning(

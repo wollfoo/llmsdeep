@@ -27,25 +27,42 @@ class CpuCloakStrategy(CloakStrategy):
     Throttles CPU frequency and reduces CPU threads if needed.
     """
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+        """
+        Initialize the CPU cloaking strategy with configuration and logger.
+
+        """
         self.throttle_percentage = config.get('throttle_percentage', 20)
+        if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
+            logger.warning("Invalid throttle_percentage, defaulting to 20%.")
+            self.throttle_percentage = 20
+        
         self.freq_adjustment = config.get('frequency_adjustment_mhz', 2000)
+        if not isinstance(self.freq_adjustment, int) or self.freq_adjustment <= 0:
+            logger.warning("Invalid frequency_adjustment_mhz, defaulting to 2000MHz.")
+            self.freq_adjustment = 2000
+        
         self.logger = logger
 
-    @retry(Exception, tries=3, delay=2, backoff=2)  # [CHANGES] rút gọn delay
+    @retry(Exception, tries=3, delay=2, backoff=2)
     def apply(self, process: Any) -> Dict[str, Any]:
         try:
             if not getattr(process, 'pid', None):
                 self.logger.error("Process PID is not available.")
                 return {}
 
-            # [CHANGES] Không so sánh dict < dict, chỉ trả về adjustments dict
+            if not hasattr(process, 'name') or not process.name:
+                self.logger.warning("Process name is missing or empty.")
+                process_name = "unknown"
+            else:
+                process_name = process.name
+
             adjustments = {
                 'cpu_freq': self.freq_adjustment,
-                # Có thể thêm 'cpu_threads' nếu muốn giảm CPU thread
+                'throttle_percentage': self.throttle_percentage,
             }
             self.logger.info(
                 f"Prepared CPU throttling adjustments: freq={self.freq_adjustment}MHz "
-                f"({self.throttle_percentage}% reduction) for process {process.name} (PID: {process.pid})."
+                f"({self.throttle_percentage}% reduction) for process {process_name} (PID: {process.pid})."
             )
             return adjustments
 

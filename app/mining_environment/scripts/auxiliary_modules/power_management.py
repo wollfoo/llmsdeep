@@ -119,7 +119,6 @@ class PowerManager:
             cpu_freq = psutil.cpu_freq().current  # MHz
             new_freq = cpu_freq * (1 - reduction_percentage / 100.0)
 
-            # [CHANGES] min_freq giả định. Có thể tham chiếu config hay logic khác.
             min_freq = 1800  # MHz
             new_freq = max(new_freq, min_freq)
 
@@ -175,7 +174,7 @@ class PowerManager:
             logger.warning("Không có GPU nào để điều chỉnh mức sử dụng.")
             return
 
-        if len(usage_percentages) != self.gpu_count:
+        if not isinstance(usage_percentages, list) or len(usage_percentages) != self.gpu_count:
             logger.error("Số lượng phần trăm sử dụng không khớp với số lượng GPU.")
             return
 
@@ -202,15 +201,6 @@ class PowerManager:
         except Exception as e:
             logger.error(f"Lỗi không mong muốn khi thiết lập mức sử dụng GPU: {e}")
 
-    def setup_power_management(self):
-        """
-        Thiết lập quản lý năng lượng (nếu cần khởi chạy tiến trình giám sát riêng).
-        """
-        try:
-            logger.info("Đã thiết lập quản lý năng lượng (PowerManager).")
-        except Exception as e:
-            logger.error(f"Lỗi khi thiết lập quản lý năng lượng: {e}")
-
     def shutdown(self):
         """
         Dừng quản lý năng lượng và giải phóng tài nguyên GPU.
@@ -227,13 +217,6 @@ class PowerManager:
 
 # Singleton instance của PowerManager
 _power_manager_instance = PowerManager()
-
-
-def setup_power_management():
-    """
-    Được gọi bởi setup_env.py.
-    """
-    _power_manager_instance.setup_power_management()
 
 
 def get_cpu_power(pid: Optional[int] = None) -> float:

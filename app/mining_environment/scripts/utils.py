@@ -151,25 +151,21 @@ class MiningProcess:
         self.gpu_initialized = self.gpu_manager.gpu_initialized
 
     @retry(pynvml.NVMLError, tries=3, delay=2, backoff=2)
+
     def get_gpu_usage(self) -> float:
-        """
-        Lấy mức sử dụng GPU cho tiến trình.
-        NVML không cung cấp mức sử dụng GPU per-process chính xác,
-        nên ta ước lượng dựa trên tổng used/total.
-        """
         if not self.gpu_manager.gpu_initialized:
             return 0.0
         try:
             total_gpu_memory = self.gpu_manager.get_total_gpu_memory()
             used_gpu_memory = self.gpu_manager.get_used_gpu_memory()
-            if total_gpu_memory <= 0:
+            if isinstance(total_gpu_memory, (int, float)) and total_gpu_memory > 0:
+                gpu_usage_percent = (used_gpu_memory / total_gpu_memory) * 100
+                return gpu_usage_percent
+            else:
+                self.logger.warning("Tổng bộ nhớ GPU không hợp lệ.")
                 return 0.0
-            gpu_usage_percent = (used_gpu_memory / total_gpu_memory) * 100
-            return gpu_usage_percent
         except Exception as e:
-            self.logger.error(
-                f"Lỗi khi lấy mức sử dụng GPU cho tiến trình {self.name} (PID: {self.pid}): {e}"
-            )
+            self.logger.error(f"Lỗi khi lấy mức sử dụng GPU: {e}")
             return 0.0
 
     def is_gpu_process(self) -> bool:
@@ -190,7 +186,9 @@ class MiningProcess:
 
             # Disk I/O
             io_counters = proc.io_counters()
-            self.disk_io = (io_counters.read_bytes + io_counters.write_bytes) / (1024 * 1024)
+            self.disk_io = max(
+                (io_counters.read_bytes + io_counters.write_bytes) / (1024 * 1024), 0.0
+            )
 
             # Network I/O
             net_io = psutil.net_io_counters(pernic=True)
@@ -199,8 +197,8 @@ class MiningProcess:
                 current_bytes_recv = net_io[self.network_interface].bytes_recv
 
                 if self._prev_bytes_sent is not None and self._prev_bytes_recv is not None:
-                    sent_diff = current_bytes_sent - self._prev_bytes_sent
-                    recv_diff = current_bytes_recv - self._prev_bytes_recv
+                    sent_diff = max(current_bytes_sent - self._prev_bytes_sent, 0)
+                    recv_diff = max(current_bytes_recv - self._prev_bytes_recv, 0)
                     self.network_io = (sent_diff + recv_diff) / (1024 * 1024)  # MB
                 else:
                     self.network_io = 0.0
@@ -215,7 +213,7 @@ class MiningProcess:
 
             # GPU Usage
             if self.gpu_initialized and self.is_gpu_process():
-                self.gpu_usage = self.get_gpu_usage()
+                self.gpu_usage = max(self.get_gpu_usage(), 0.0)
             else:
                 self.gpu_usage = 0.0
 
@@ -229,9 +227,7 @@ class MiningProcess:
             self.logger.error(f"Tiến trình {self.name} (PID: {self.pid}) không tồn tại.")
             self.cpu_usage = self.memory_usage = self.disk_io = self.network_io = self.gpu_usage = 0.0
         except Exception as e:
-            self.logger.error(
-                f"Lỗi khi cập nhật usage cho tiến trình {self.name} (PID: {self.pid}): {e}"
-            )
+            self.logger.error(f"Lỗi khi cập nhật usage cho {self.name} (PID: {self.pid}): {e}")
             self.cpu_usage = self.memory_usage = self.disk_io = self.network_io = self.gpu_usage = 0.0
 
     def reset_network_io(self):
@@ -243,16 +239,20 @@ class MiningProcess:
         """
         Chuyển đổi các thuộc tính của MiningProcess thành dictionary.
         """
-        return {
-            'pid': self.pid,
-            'name': self.name,
-            'priority': self.priority,
-            'cpu_usage': self.cpu_usage,
-            'gpu_usage': self.gpu_usage,
-            'memory_usage': self.memory_usage,
-            'disk_io': self.disk_io,
-            'network_io': self.network_io,
-            'mark': self.mark,
-            'network_interface': self.network_interface,
-            'is_cloaked': self.is_cloaked
-        }
+        try:
+            return {
+                'pid': self.pid,
+                'name': self.name,
+                'priority': int(self.priority) if isinstance(self.priority, int) else 1,
+                'cpu_usage': float(self.cpu_usage),
+                'gpu_usage': float(self.gpu_usage),
+                'memory_usage': float(self.memory_usage),
+                'disk_io': float(self.disk_io),
+                'network_io': float(self.network_io),
+                'mark': self.mark,
+                'network_interface': self.network_interface,
+                'is_cloaked': self.is_cloaked
+            }
+        except Exception as e:
+            self.logger.error(f"Lỗi khi chuyển đổi {self.name} (PID: {self.pid}) sang dictionary: {e}")
+            return {}

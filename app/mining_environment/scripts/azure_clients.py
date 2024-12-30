@@ -95,7 +95,7 @@ class AzureBaseClient:
                     resources.append(resource_dict)
                 else:
                     self.logger.warning(f"Unexpected data type in ResourceGraphClient: {type(res)}")
-            
+
             self.logger.info(f"Đã khám phá {len(resources)} tài nguyên loại {resource_type}.")
             return resources
         except Exception as e:
@@ -605,7 +605,6 @@ class AzureAnomalyDetectorClient:
                 if not isinstance(cpu_usage, list):
                     self.logger.warning(f"cpu_usage cho PID {pid} không phải list, bỏ qua.")
                     continue
-
                 if len(cpu_usage) < 12:
                     self.logger.warning(f"Tiến trình PID {pid} có ít hơn 12 điểm dữ liệu, bỏ qua.")
                     continue

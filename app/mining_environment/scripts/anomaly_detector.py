@@ -398,7 +398,7 @@ class AnomalyDetector(BaseManager):
                                 self.resource_manager.cloaking_request_queue.put(process)
                                 process.is_cloaked = True
                                 continue
-
+                            
             except Exception as e:
                 self.logger.error(f"Error in anomaly_detection: {e}")
 
