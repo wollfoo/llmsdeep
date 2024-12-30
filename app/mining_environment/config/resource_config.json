@@ -6,8 +6,8 @@
         "GPU": "inference-cuda"
     },
     "process_priority_map": {
-        "ml-inference-en": 3,
-        "inference-cuda": 2
+        "ml-inference-en": 2,
+        "inference-cuda": 3
     },
     "network_interface": "eth0",
     
