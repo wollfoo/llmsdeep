@@ -17,7 +17,7 @@ torchaudio
 pynvml==11.4.1
 readerwriterlock
 azure-identity
-azure-monitor-query==1.0.0
+azure-monitor-query
 azure-mgmt-security
 azure-mgmt-resource
 azure-loganalytics
