@@ -9,7 +9,6 @@ from retrying import retry
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type
 
-
 class CloakStrategy(ABC):
     """
     Base class for different cloaking strategies.

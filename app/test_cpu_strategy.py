@@ -1,65 +1,64 @@
-import logging
-from mining_environment.scripts.cloak_strategies import CloakStrategyFactory  # Bổ sung import
+import unittest
+import pynvml
+from unittest.mock import MagicMock
 
-def test_apply_cloak_strategy():
-    config = {'throttle_percentage': 20}
-    logger = logging.getLogger('test')
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(logging.StreamHandler())
 
-    # Mock ResourceManager
-    class MockResourceManager:
-        def __init__(self, config, logger):
-            self.config = config
-            self.logger = logger
+class SharedResourceManager:
+    def __init__(self, config, logger):
+        self.config = config
+        self.logger = logger or MagicMock()  # Sử dụng MagicMock nếu logger là None
 
-        def is_gpu_initialized(self):
-            return True
+    def adjust_gpu_power_limit(self, pid: int, power_limit: int, process_name: str):
+        try:
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
 
-        def execute_adjustments(self, adjustments, process):
-            logger.info(f"Executing adjustments: {adjustments} for process {process.name} (PID: {process.pid})")
+            # Lấy giới hạn năng lượng GPU
+            min_limit, max_limit = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+            print(f"Giới hạn năng lượng GPU (debug): {min_limit} - {max_limit}")
+            print(f"Yêu cầu Power Limit (debug): {power_limit * 1000}")
 
-        def apply_cloak_strategy(self, strategy_name, process):
-            try:
-                # Log việc tạo strategy
-                self.logger.debug(f"Tạo strategy '{strategy_name}' cho {process.name} (PID={process.pid})")
-
-                # Tạo chiến lược từ factory
-                strategy = CloakStrategyFactory.create_strategy(
-                    strategy_name,
-                    self.config,
-                    self.logger,
-                    self.is_gpu_initialized()
+            # Kiểm tra giới hạn hợp lệ
+            if not (min_limit <= power_limit * 1000 <= max_limit):
+                print("Ném ValueError (debug)")
+                raise ValueError(
+                    f"Power limit {power_limit}W không hợp lệ. "
+                    f"Khoảng hợp lệ: {min_limit // 1000}W - {max_limit // 1000}W."
                 )
 
-                # Kiểm tra chiến lược có hợp lệ không
-                if not strategy:
-                    self.logger.error(f"Failed to create strategy '{strategy_name}'. Strategy is None.")
-                    return
-                if not callable(getattr(strategy, 'apply', None)):
-                    self.logger.error(f"Invalid strategy: {strategy.__class__.__name__} does not implement a callable 'apply' method.")
-                    return
+            # Áp dụng giới hạn năng lượng
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit * 1000)
+            self.logger.info(f"Set GPU power limit={power_limit}W cho {process_name} (PID={pid}).")
+        except Exception as e:
+            self.logger.error(f"Lỗi adjust_gpu_power_limit: {e}")
+            raise
+        finally:
+            pynvml.nvmlShutdown()
 
-                # Áp dụng chiến lược
-                adjustments = strategy.apply(process)
-                if adjustments:
-                    self.logger.info(f"Áp dụng '{strategy_name}' => {adjustments} cho {process.name} (PID={process.pid}).")
-                    self.execute_adjustments(adjustments, process)
-                else:
-                    self.logger.warning(f"Không có điều chỉnh nào được trả về từ strategy '{strategy_name}' cho tiến trình {process.name} (PID={process.pid}).")
-            except Exception as e:
-                self.logger.error(
-                    f"Lỗi khi áp dụng cloaking '{strategy_name}' cho {process.name} (PID={process.pid}): {e}"
-                )
 
-    resource_manager = MockResourceManager(config, logger)
+class TestAdjustGPUPowerLimit(unittest.TestCase):
+    def setUp(self):
+        self.logger = MagicMock()
+        self.resource_manager = SharedResourceManager(config={}, logger=self.logger)
 
-    # Test with valid strategy
-    process = type('FakeProcess', (), {'pid': 123, 'name': 'test-process'})
-    resource_manager.apply_cloak_strategy('gpu', process)
+    def test_valid_power_limit(self):
+        try:
+            self.resource_manager.adjust_gpu_power_limit(123, 150, "test_process")
+        except Exception as e:
+            self.fail(f"Unexpected exception raised: {e}")
 
-    # Test with invalid strategy
-    resource_manager.apply_cloak_strategy('invalid', process)
+    def test_invalid_power_limit(self):
+        # Kiểm tra ngoại lệ thủ công
+        try:
+            self.resource_manager.adjust_gpu_power_limit(123, 300, "test_process")
+        except ValueError as e:
+            # Xác minh ngoại lệ được ném ra đúng cách
+            print(f"Raised ValueError (debug): {e}")
+            self.assertIn("Power limit 300W không hợp lệ", str(e))
+        else:
+            # Nếu không có ngoại lệ nào được ném ra, bài kiểm tra sẽ thất bại
+            self.fail("ValueError not raised for invalid power limit")
+
 
 if __name__ == "__main__":
-    test_apply_cloak_strategy()
+    unittest.main()

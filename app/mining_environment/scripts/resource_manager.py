@@ -17,7 +17,7 @@ from itertools import count
 
 from .base_manager import BaseManager
 from .utils import MiningProcess, GPUManager
-from .cloak_strategies import CloakStrategyFactory
+from .cloak_strategies import CloakStrategy, CloakStrategyFactory
 
 from .azure_clients import (
     AzureMonitorClient,
@@ -211,19 +211,45 @@ class SharedResourceManager:
                 f"Lỗi adjust_cpu_frequency cho {process_name} (PID={pid}): {e}\n{traceback.format_exc()}"
             )
 
-    def adjust_gpu_power_limit(self, pid: int, power_limit: int, process_name: str):
+    def adjust_gpu_power_limit(self, pid: int, power_limit: int, process_name: str) -> bool:
         try:
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+
+            # Lấy giới hạn năng lượng hợp lệ
+            min_limit, max_limit = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+
+            # Kiểm tra nếu `power_limit` nằm ngoài phạm vi hợp lệ
+            if not (min_limit <= power_limit * 1000 <= max_limit):
+                raise ValueError(
+                    f"Power limit {power_limit}W không hợp lệ. "
+                    f"Khoảng hợp lệ: {min_limit // 1000}W - {max_limit // 1000}W."
+                )
+
+            # Áp dụng giới hạn năng lượng
             pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit * 1000)
-            pynvml.nvmlShutdown()
             self.logger.info(
                 f"Set GPU power limit={power_limit}W cho {process_name} (PID={pid})."
             )
+            return True  # Trả về thành công
+        except pynvml.NVMLError as e:
+            self.logger.error(
+                f"Lỗi NVML khi set GPU power limit cho {process_name} (PID={pid}): {e}. "
+                f"Power limit yêu cầu: {power_limit}W."
+            )
+        except ValueError as ve:
+            self.logger.error(
+                f"Lỗi giá trị power limit: {ve}. "
+                f"Khoảng hợp lệ: {min_limit // 1000}W - {max_limit // 1000}W."
+            )
         except Exception as e:
             self.logger.error(
-                f"Lỗi adjust_gpu_power_limit cho {process_name} (PID={pid}): {e}\n{traceback.format_exc()}"
+                f"Lỗi không xác định khi set GPU power limit cho {process_name} (PID={pid}): {e}."
             )
+        finally:
+            pynvml.nvmlShutdown()
+
+        return False  # Trả về thất bại nếu gặp lỗi
 
     def adjust_disk_io_priority(self, pid: int, ionice_class: int, process_name: str):
         try:
