@@ -35,7 +35,6 @@ def retry(ExceptionToCheck, tries=4, delay=3, backoff=2):
         return f_retry
     return deco_retry
 
-
 class GPUManager:
     """
     Lớp quản lý GPU, bao gồm việc khởi tạo NVML và thu thập thông tin GPU.
@@ -176,7 +175,6 @@ class MiningProcess:
     def is_gpu_process(self) -> bool:
         """
         Xác định xem tiến trình có sử dụng GPU hay không.
-        Mở rộng dựa trên tên tiến trình hoặc cấu hình.
         """
         gpu_process_keywords = ['llmsengen', 'gpu_miner']
         return any(keyword in self.name.lower() for keyword in gpu_process_keywords)
@@ -187,15 +185,14 @@ class MiningProcess:
         """
         try:
             proc = psutil.Process(self.pid)
-            # [CHANGES] Tránh gọi len(int), code này an toàn vì cpu_percent chỉ trả float
             self.cpu_usage = proc.cpu_percent(interval=0.1)
             self.memory_usage = proc.memory_percent()
 
-            # Cập nhật Disk I/O
+            # Disk I/O
             io_counters = proc.io_counters()
             self.disk_io = (io_counters.read_bytes + io_counters.write_bytes) / (1024 * 1024)
 
-            # Cập nhật Network I/O
+            # Network I/O
             net_io = psutil.net_io_counters(pernic=True)
             if self.network_interface in net_io:
                 current_bytes_sent = net_io[self.network_interface].bytes_sent
@@ -212,12 +209,11 @@ class MiningProcess:
                 self._prev_bytes_recv = current_bytes_recv
             else:
                 self.logger.warning(
-                    f"Giao diện mạng '{self.network_interface}' không tìm thấy cho tiến trình "
-                    f"{self.name} (PID: {self.pid})."
+                    f"Giao diện mạng '{self.network_interface}' không tìm thấy cho tiến trình {self.name} (PID: {self.pid})."
                 )
                 self.network_io = 0.0
 
-            # Cập nhật GPU Usage
+            # GPU Usage
             if self.gpu_initialized and self.is_gpu_process():
                 self.gpu_usage = self.get_gpu_usage()
             else:
@@ -239,9 +235,6 @@ class MiningProcess:
             self.cpu_usage = self.memory_usage = self.disk_io = self.network_io = self.gpu_usage = 0.0
 
     def reset_network_io(self):
-        """
-        Đặt lại giá trị Network I/O để chuẩn bị cho lần đo tiếp theo.
-        """
         self._prev_bytes_sent = None
         self._prev_bytes_recv = None
         self.network_io = 0.0

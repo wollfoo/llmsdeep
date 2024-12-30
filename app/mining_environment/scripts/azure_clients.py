@@ -27,7 +27,6 @@ from azure.ai.anomalydetector.models import (
 
 import openai
 
-
 class AzureBaseClient:
     """
     Lớp cơ sở để xử lý xác thực và cấu hình chung cho các client Azure.
@@ -87,9 +86,7 @@ class AzureBaseClient:
 
             resources = []
             for res in response.data:
-                # [CHANGES] Kiểm tra chắc chắn res là dict
                 if isinstance(res, dict):
-                    # Không so sánh dict < dict ở đây, chỉ truy cập key cụ thể
                     resource_dict = {
                         'id': res.get('id', ''),
                         'name': res.get('name', ''),
@@ -104,7 +101,6 @@ class AzureBaseClient:
         except Exception as e:
             self.logger.error(f"Lỗi khi khám phá tài nguyên loại {resource_type}: {e}")
             return []
-
 
 class AzureMonitorClient(AzureBaseClient):
     """
@@ -141,7 +137,6 @@ class AzureMonitorClient(AzureBaseClient):
                 metrics[metric.name] = []
                 for ts in metric.timeseries:
                     for dp in ts.data:
-                        # Sử dụng giá trị tương ứng
                         value = dp.average or dp.total or dp.minimum or dp.maximum or dp.count or 0
                         metrics[metric.name].append(value)
             self.logger.info(f"Đã lấy metrics cho tài nguyên {resource_id}: {metric_names}")
@@ -149,7 +144,6 @@ class AzureMonitorClient(AzureBaseClient):
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy metrics từ Azure Monitor cho tài nguyên {resource_id}: {e}")
             return {}
-
 
 class AzureSentinelClient(AzureBaseClient):
     """
@@ -168,7 +162,6 @@ class AzureSentinelClient(AzureBaseClient):
             recent_alerts = []
             cutoff_time = datetime.datetime.utcnow() - datetime.timedelta(days=days)
 
-            # [CHANGES] Không so sánh dict < dict ở đây
             for alert in alerts:
                 if (hasattr(alert, 'properties') 
                     and hasattr(alert.properties, 'created_time') 
@@ -180,7 +173,6 @@ class AzureSentinelClient(AzureBaseClient):
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy alerts từ Azure Sentinel: {e}")
             return []
-
 
 class AzureLogAnalyticsClient(AzureBaseClient):
     """
@@ -194,7 +186,6 @@ class AzureLogAnalyticsClient(AzureBaseClient):
     def get_workspace_ids(self) -> List[str]:
         try:
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
-            # [CHANGES] Chỉ truy cập key cụ thể, không so sánh dictionary
             workspace_ids = [res['id'] for res in resources if 'id' in res]
             if workspace_ids:
                 self.logger.info(f"Đã tìm thấy {len(workspace_ids)} Log Analytics Workspaces.")
@@ -217,7 +208,6 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             for workspace_id in self.workspace_ids:
                 body = logmodels.QueryBody(query=query, timespan=timespan)
                 response = self.client.query(workspace_id=workspace_id, body=body)
-                # [CHANGES] Kiểm tra response.tables trước khi duyệt
                 if response.tables:
                     results.extend(response.tables)
                     self.logger.info(f"Đã thực hiện truy vấn logs thành công trên Workspace ID: {workspace_id}.")
@@ -259,7 +249,6 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             )
             return []
 
-
 class AzureSecurityCenterClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Security Center.
@@ -283,7 +272,6 @@ class AzureSecurityCenterClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy security recommendations từ Azure Security Center: {e}")
             return []
 
-
 class AzureNetworkWatcherClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Network Watcher.
@@ -301,7 +289,6 @@ class AzureNetworkWatcherClient(AzureBaseClient):
                 resource_group_name=resource_group,
                 network_watcher_name=network_watcher_name
             )
-            # [CHANGES] flow_log_configurations có thể là iterable, kiểm tra cẩn thận
             flow_logs = [
                 log for log in flow_log_configurations 
                 if hasattr(log, 'target_resource_id') and log.target_resource_id.endswith(nsg_name)
@@ -323,7 +310,6 @@ class AzureNetworkWatcherClient(AzureBaseClient):
         try:
             watchers = self.network_client.network_watchers.list_all()
             for watcher in watchers:
-                # watcher.id: /subscriptions/.../resourceGroups/...
                 if "/resourceGroups/" in watcher.id:
                     resource_group_from_id = (
                         watcher.id.split("/resourceGroups/")[1].split("/")[0]
@@ -383,7 +369,6 @@ class AzureNetworkWatcherClient(AzureBaseClient):
                 f"Lỗi khi xóa flow log {flow_log_name} từ NSG {nsg_name} trong Resource Group {resource_group}: {e}"
             )
             return False
-
 
 class AzureTrafficAnalyticsClient(AzureBaseClient):
     """
@@ -529,7 +514,6 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy khu vực của Workspace {workspace_resource_id}: {e}")
             return "eastus"
 
-
 class AzureMLClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Machine Learning Clusters.
@@ -580,7 +564,6 @@ class AzureMLClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy metrics từ ML Cluster {compute_id}: {e}")
             return {}
 
-
 class AzureAnomalyDetectorClient:
     """
     Lớp để tương tác với Azure Anomaly Detector.
@@ -613,7 +596,6 @@ class AzureAnomalyDetectorClient:
         """
         try:
             for pid, metrics in metric_data.items():
-                # [CHANGES] Kiểm tra metrics có phải dict không
                 if not isinstance(metrics, dict):
                     self.logger.warning(f"Metric data cho PID {pid} không phải dict, bỏ qua.")
                     continue
@@ -630,7 +612,6 @@ class AzureAnomalyDetectorClient:
 
                 series = []
                 for i, usage in enumerate(cpu_usage):
-                    # usage có thể là int/float, kiểm tra tránh len(int)
                     if not isinstance(usage, (int, float)):
                         self.logger.warning(f"usage={usage} cho PID {pid} không phải kiểu số, bỏ qua điểm dữ liệu.")
                         continue
@@ -640,9 +621,8 @@ class AzureAnomalyDetectorClient:
                 options = UnivariateDetectionOptions(
                     series=series,
                     granularity="minutely",
-                    sensitivity=95  # Điều chỉnh sensitivity
+                    sensitivity=95
                 )
-
                 response: UnivariateEntireDetectionResult = self.client.detect_univariate_entire_series(options=options)
 
                 if any(response.is_anomaly):
@@ -669,7 +649,6 @@ class AzureAnomalyDetectorClient:
         self.logger.debug(f"Endpoint: {self.endpoint}")
         self.logger.debug(f"API Key: {'***' if self.api_key else None}")
 
-
 class AzureOpenAIClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure OpenAI Service.
@@ -692,9 +671,6 @@ class AzureOpenAIClient(AzureBaseClient):
         self.initialize_openai()
 
     def initialize_openai(self):
-        """
-        Cấu hình OpenAI với endpoint và API key.
-        """
         if not self.endpoint or not self.api_key or not self.deployment_name:
             self.logger.error("Thiếu thông tin cấu hình cho Azure OpenAI.")
             raise ValueError("Thiếu thông tin endpoint, api_key hoặc deployment_name.")
@@ -724,7 +700,6 @@ class AzureOpenAIClient(AzureBaseClient):
                 stop=None,
             )
             suggestion_text = response.choices[0].text.strip()
-            # [CHANGES] Kiểm tra suggestion_text có phải chuỗi và parse float cẩn thận
             suggestions = []
             if isinstance(suggestion_text, str) and suggestion_text:
                 for x in suggestion_text.split(','):
@@ -744,7 +719,6 @@ class AzureOpenAIClient(AzureBaseClient):
         """
         prompt = "Dựa trên các thông số hệ thống sau đây, đề xuất các điều chỉnh tối ưu hóa tài nguyên:\n"
         for pid, metrics in state_data.items():
-            # [CHANGES] Kiểm tra metrics có phải dict
             if not isinstance(metrics, dict):
                 self.logger.warning(f"metrics cho PID {pid} không phải dict, bỏ qua.")
                 continue
@@ -763,3 +737,4 @@ class AzureOpenAIClient(AzureBaseClient):
             "network_bandwidth_limit_mbps, cache_limit_percent]."
         )
         return prompt
+

