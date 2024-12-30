@@ -85,40 +85,56 @@ class GpuCloakStrategy(CloakStrategy):
 
     @retry(Exception, tries=3, delay=2, backoff=2)
     def apply(self, process: Any) -> Dict[str, Any]:
+        """
+        Apply GPU cloaking by throttling power limit.
+
+        Args:
+            process (Any): Process object with attributes 'pid' and 'name'.
+
+        Returns:
+            Dict[str, Any]: Adjustments including GPU index and new power limit.
+        """
         if not self.gpu_initialized:
             self.logger.warning(
-                f"GPU not initialized. Cannot prepare GPU throttling for process {process.name} (PID: {process.pid})."
+                f"GPU not initialized. Cannot prepare GPU throttling for process {getattr(process, 'name', 'unknown')} "
+                f"(PID: {getattr(process, 'pid', 'N/A')})."
             )
             return {}
 
         try:
+            if not hasattr(process, 'pid') or not hasattr(process, 'name'):
+                self.logger.error("Process object is missing required attributes (pid, name).")
+                return {}
+
             pynvml.nvmlInit()
-            GPU_COUNT = pynvml.nvmlDeviceGetCount()
-            if GPU_COUNT == 0:
-                self.logger.warning("No GPUs found on the system.")
-                return {}
+            try:
+                gpu_count = pynvml.nvmlDeviceGetCount()
+                if gpu_count == 0:
+                    self.logger.warning("No GPUs found on the system.")
+                    return {}
 
-            gpu_index = self.assign_gpu(process.pid, GPU_COUNT)
-            if gpu_index == -1:
-                self.logger.warning(
-                    f"No GPU assigned to process {process.name} (PID: {process.pid})."
+                gpu_index = self.assign_gpu(process.pid, gpu_count)
+                if gpu_index == -1:
+                    self.logger.warning(
+                        f"No GPU assigned to process {process.name} (PID: {process.pid})."
+                    )
+                    return {}
+
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+                current_power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+                new_power_limit = int(current_power_limit * (1 - self.throttle_percentage / 100))
+
+                adjustments = {
+                    'gpu_index': gpu_index,
+                    'gpu_power_limit': new_power_limit
+                }
+                self.logger.info(
+                    f"Prepared GPU throttling adjustments: GPU {gpu_index} power limit={new_power_limit} "
+                    f"({self.throttle_percentage}% reduction) for process {process.name} (PID: {process.pid})."
                 )
-                return {}
-
-            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-            current_power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
-            new_power_limit = int(current_power_limit * (1 - self.throttle_percentage / 100))
-
-            adjustments = {
-                'gpu_index': gpu_index,
-                'gpu_power_limit': new_power_limit
-            }
-            self.logger.info(
-                f"Prepared GPU throttling adjustments: GPU {gpu_index} power limit={new_power_limit} "
-                f"({self.throttle_percentage}% reduction) for process {process.name} (PID: {process.pid})."
-            )
-            pynvml.nvmlShutdown()
-            return adjustments
+                return adjustments
+            finally:
+                pynvml.nvmlShutdown()
 
         except pynvml.NVMLError as e:
             self.logger.error(
@@ -134,13 +150,20 @@ class GpuCloakStrategy(CloakStrategy):
     def assign_gpu(self, pid: int, gpu_count: int) -> int:
         """
         Assign a GPU to a process based on PID.
+
+        Args:
+            pid (int): Process ID.
+            gpu_count (int): Total number of GPUs.
+
+        Returns:
+            int: GPU index or -1 if assignment fails.
         """
         try:
-            # [CHANGES] Tránh so sánh dict < dict, chỉ thực hiện mod
             return pid % gpu_count
         except Exception as e:
             self.logger.error(f"Error assigning GPU based on PID: {e}")
             return -1
+
 
 class NetworkCloakStrategy(CloakStrategy):
     """
