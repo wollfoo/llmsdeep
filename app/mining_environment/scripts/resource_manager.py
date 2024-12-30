@@ -238,10 +238,8 @@ class SharedResourceManager:
                 f"Power limit yêu cầu: {power_limit}W."
             )
         except ValueError as ve:
-            self.logger.error(
-                f"Lỗi giá trị power limit: {ve}. "
-                f"Khoảng hợp lệ: {min_limit // 1000}W - {max_limit // 1000}W."
-            )
+            # Log trực tiếp thông báo ngoại lệ mà không lặp lại "Khoảng hợp lệ"
+            self.logger.error(f"Lỗi giá trị power limit: {ve}")
         except Exception as e:
             self.logger.error(
                 f"Lỗi không xác định khi set GPU power limit cho {process_name} (PID={pid}): {e}."
