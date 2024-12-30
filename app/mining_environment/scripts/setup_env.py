@@ -200,6 +200,9 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
             logger.info(f"{field_name} hợp lệ: {value}")
             return True
 
+        # Lấy baseline_monitoring từ environmental_limits
+        baseline_monitoring = environmental_limits.get('baseline_monitoring', {})
+
         # 1. Kiểm tra RAM Allocation
         ram_allocation = resource_config.get('resource_allocation', {}).get('ram', {})
         ram_max_mb = ram_allocation.get('max_allocation_mb')
