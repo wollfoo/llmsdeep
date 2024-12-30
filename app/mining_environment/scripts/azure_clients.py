@@ -690,15 +690,16 @@ class AzureOpenAIClient(AzureBaseClient):
         """
         try:
             prompt = self.construct_prompt(state_data)
-            response = openai.Completion.create(
-                engine=self.deployment_name,
-                prompt=prompt,
+            response = openai.ChatCompletion.create(
+                model=self.deployment_name,
+                messages=[
+                    {"role": "system", "content": "Bạn là một chuyên gia tối ưu hóa tài nguyên hệ thống."},
+                    {"role": "user", "content": prompt}
+                ],
                 max_tokens=150,
                 temperature=0.5,
-                n=1,
-                stop=None,
             )
-            suggestion_text = response.choices[0].text.strip()
+            suggestion_text = response.choices[0].message['content'].strip()
             suggestions = []
             if isinstance(suggestion_text, str) and suggestion_text:
                 for x in suggestion_text.split(','):
@@ -736,4 +737,3 @@ class AzureOpenAIClient(AzureBaseClient):
             "network_bandwidth_limit_mbps, cache_limit_percent]."
         )
         return prompt
-
