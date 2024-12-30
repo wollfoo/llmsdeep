@@ -25,7 +25,12 @@ from azure.ai.anomalydetector.models import (
     UnivariateEntireDetectionResult
 )
 
-import openai
+from openai import AzureOpenAI
+
+client = AzureOpenAI(azure_endpoint=self.endpoint,
+api_version=self.api_version,
+api_key=self.api_key)
+
 
 class AzureBaseClient:
     """
@@ -37,14 +42,14 @@ class AzureBaseClient:
         if not self.subscription_id:
             self.logger.error("AZURE_SUBSCRIPTION_ID không được thiết lập.")
             raise ValueError("AZURE_SUBSCRIPTION_ID không được thiết lập.")
-        
+
         # Dùng ClientSecretCredential (SDK Azure mới)
         self.credential = self.authenticate()
 
         # Khởi tạo ResourceGraphClient, ResourceManagementClient
         self.resource_graph_client = ResourceGraphClient(self.credential)
         self.resource_management_client = ResourceManagementClient(self.credential, self.subscription_id)
-    
+
     def authenticate(self) -> ClientSecretCredential:
         """
         Xác thực với Azure AD bằng ClientSecretCredential (Azure.Identity).
@@ -57,7 +62,7 @@ class AzureBaseClient:
         if not all([client_id, client_secret, tenant_id]):
             self.logger.error("AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, và AZURE_TENANT_ID phải được thiết lập.")
             raise ValueError("Thiếu thông tin xác thực Azure.")
-        
+
         try:
             credential = ClientSecretCredential(
                 client_id=client_id,
@@ -123,7 +128,7 @@ class AzureMonitorClient(AzureBaseClient):
             return {}
         if aggregations is None:
             aggregations = [MetricAggregationType.AVERAGE]
-        
+
         try:
             metrics_data = self.client.list(
                 resource_id=resource_id,
@@ -673,33 +678,27 @@ class AzureOpenAIClient(AzureBaseClient):
         if not self.endpoint or not self.api_key or not self.deployment_name:
             self.logger.error("Thiếu thông tin cấu hình cho Azure OpenAI.")
             raise ValueError("Thiếu thông tin endpoint, api_key hoặc deployment_name.")
-        
+
         try:
-            openai.api_type = "azure"
-            openai.api_base = self.endpoint
-            openai.api_version = self.api_version
-            openai.api_key = self.api_key
             self.logger.info("Đã cấu hình thành công Azure OpenAI Service.")
         except Exception as e:
             self.logger.error(f"Lỗi khi cấu hình Azure OpenAI Service: {e}")
             raise e
-    
+
     def get_optimization_suggestions(self, state_data: Dict[str, Any]) -> List[float]:
         """
         Gửi dữ liệu trạng thái hệ thống đến Azure OpenAI và nhận gợi ý tối ưu hóa.
         """
         try:
             prompt = self.construct_prompt(state_data)
-            response = openai.ChatCompletion.create(
-                model=self.deployment_name,
-                messages=[
-                    {"role": "system", "content": "Bạn là một chuyên gia tối ưu hóa tài nguyên hệ thống."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=150,
-                temperature=0.5,
-            )
-            suggestion_text = response.choices[0].message['content'].strip()
+            response = client.chat.completions.create(model=self.deployment_name,
+            messages=[
+                {"role": "system", "content": "Bạn là một chuyên gia tối ưu hóa tài nguyên hệ thống."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150,
+            temperature=0.5)
+            suggestion_text = response.choices[0].message.content.strip()
             suggestions = []
             if isinstance(suggestion_text, str) and suggestion_text:
                 for x in suggestion_text.split(','):
@@ -712,7 +711,7 @@ class AzureOpenAIClient(AzureBaseClient):
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy gợi ý từ Azure OpenAI Service: {e}")
             return []
-    
+
     def construct_prompt(self, state_data: Dict[str, Any]) -> str:
         """
         Xây dựng prompt gửi đến OpenAI dựa trên dữ liệu trạng thái hệ thống.
