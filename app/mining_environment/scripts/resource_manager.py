@@ -298,13 +298,20 @@ class SharedResourceManager:
                 self.is_gpu_initialized()
             )
             
+            # Ghi lại trạng thái của strategy
+            if strategy:
+                self.logger.debug(f"Strategy class: {strategy.__class__.__name__}, available methods: {dir(strategy)}")
+                self.logger.debug(f"Strategy.apply: {getattr(strategy, 'apply', None)}")
+            
             # Xác minh chiến lược
             if not strategy:
                 raise RuntimeError(f"Failed to create strategy '{strategy_name}'. Strategy is None.")
             if not hasattr(strategy, 'apply') or not callable(getattr(strategy, 'apply', None)):
+                self.logger.error(f"Strategy details: {dir(strategy)}")
                 raise TypeError(f"Invalid strategy: {strategy.__class__.__name__} does not implement a callable 'apply' method.")
             
             # Áp dụng chiến lược
+            self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {process.name} (PID={process.pid})")
             adjustments = strategy.apply(process)
             if adjustments:
                 self.logger.info(
