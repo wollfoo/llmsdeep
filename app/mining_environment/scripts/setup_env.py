@@ -178,98 +178,74 @@ def normalize_max_usage_percent(max_usage_percent, logger):
 def validate_configs(resource_config, system_params, environmental_limits, logger):
     """
     Kiểm tra tính hợp lệ của các tệp cấu hình.
-    (Chỉ so sánh giá trị trong dict, không so sánh dict < dict)
     """
     try:
-        # [CHANGES] Kiểm tra trước xem chúng có phải dict không
-        if not all(isinstance(cfg, dict) for cfg in (resource_config, system_params, environmental_limits)):
-            logger.error("resource_config, system_params, hoặc environmental_limits không phải dict.")
-            sys.exit(1)
+        # Kiểm tra xem các cấu hình chính có đúng kiểu dict hay không
+        for cfg_name, cfg in [("resource_config", resource_config),
+                              ("system_params", system_params),
+                              ("environmental_limits", environmental_limits)]:
+            if not isinstance(cfg, dict):
+                logger.error(f"{cfg_name} không phải kiểu dict.")
+                sys.exit(1)
 
-        # 1. Kiểm Tra RAM
+        # Kiểm tra từng phần trong cấu hình
+        def validate_threshold(value, min_val, max_val, field_name):
+            """Hàm phụ để kiểm tra giá trị ngưỡng."""
+            if not isinstance(value, (int, float)):
+                logger.error(f"{field_name} phải là số (int/float). Nhận được: {type(value)}")
+                return False
+            if not (min_val <= value <= max_val):
+                logger.error(f"{field_name} không nằm trong phạm vi {min_val}-{max_val}. Giá trị: {value}")
+                return False
+            logger.info(f"{field_name} hợp lệ: {value}")
+            return True
+
+        # 1. Kiểm tra RAM Allocation
         ram_allocation = resource_config.get('resource_allocation', {}).get('ram', {})
         ram_max_mb = ram_allocation.get('max_allocation_mb')
-        if ram_max_mb is None:
-            logger.error("Thiếu `max_allocation_mb` trong `resource_allocation.ram`.")
+        if not validate_threshold(ram_max_mb, 1024, 200000, "max_allocation_mb"):
             sys.exit(1)
-        # [CHANGES] kiểm tra kiểu
-        if not isinstance(ram_max_mb, (int, float)) or not (1024 <= ram_max_mb <= 200000):
-            logger.error("Giá trị `ram_max_allocation_mb` không hợp lệ hoặc không phải số. (Yêu cầu 1024-131072 MB).")
-            sys.exit(1)
-        else:
-            logger.info(f"Giới hạn RAM: {ram_max_mb} MB")
 
-        # 2. Kiểm Tra CPU Percent Threshold
-        baseline_monitoring = environmental_limits.get('baseline_monitoring', {})
-        cpu_percent_threshold = baseline_monitoring.get('cpu_percent_threshold')
-        if cpu_percent_threshold is None:
-            logger.error("Thiếu `cpu_percent_threshold` trong `environmental_limits.baseline_monitoring`.")
+        # 2. Kiểm tra CPU Percent Threshold
+        cpu_percent_threshold = environmental_limits.get('baseline_monitoring', {}).get('cpu_percent_threshold')
+        if not validate_threshold(cpu_percent_threshold, 1, 100, "cpu_percent_threshold"):
             sys.exit(1)
-        if not isinstance(cpu_percent_threshold, (int, float)) or not (1 <= cpu_percent_threshold <= 100):
-            logger.error("Giá trị `cpu_percent_threshold` không hợp lệ hoặc không phải số (1-100%).")
-            sys.exit(1)
-        else:
-            logger.info(f"Giới hạn CPU percent threshold: {cpu_percent_threshold}%")
 
-        # 3. Kiểm Tra CPU Max Threads
+        # 3. Kiểm tra CPU Max Threads
         cpu_allocation = resource_config.get('resource_allocation', {}).get('cpu', {})
         cpu_max_threads = cpu_allocation.get('max_threads')
-        if cpu_max_threads is None:
-            logger.error("Thiếu `max_threads` trong `resource_allocation.cpu`.")
-            sys.exit(1)
         if not isinstance(cpu_max_threads, int) or not (1 <= cpu_max_threads <= 64):
-            logger.error("Giá trị `cpu_max_threads` không hợp lệ hoặc không phải số (1-64).")
+            logger.error(f"cpu_max_threads phải là số nguyên trong khoảng 1-64. Giá trị: {cpu_max_threads}")
             sys.exit(1)
-        else:
-            logger.info(f"Giới hạn CPU threads: {cpu_max_threads}")
+        logger.info(f"cpu_max_threads hợp lệ: {cpu_max_threads}")
 
-        # 4. Kiểm Tra GPU Percent Threshold
-        gpu_percent_threshold = baseline_monitoring.get('gpu_percent_threshold')
-        if gpu_percent_threshold is None:
-            logger.error("Thiếu `gpu_percent_threshold` trong `environmental_limits.baseline_monitoring`.")
-            sys.exit(1)
-        if not isinstance(gpu_percent_threshold, (int, float)) or not (1 <= gpu_percent_threshold <= 100):
-            logger.error("Giá trị `gpu_percent_threshold` không hợp lệ hoặc không phải số (1-100%).")
-            sys.exit(1)
-        else:
-            logger.info(f"Giới hạn GPU percent threshold: {gpu_percent_threshold}%")
-
-        # 5. Kiểm Tra GPU Usage Percent Max
-        gpu_usage_max_percent = resource_config.get('resource_allocation', {}) \
-                                              .get('gpu', {}) \
-                                              .get('max_usage_percent')
-        if gpu_usage_max_percent is None:
-            logger.error("Thiếu `max_usage_percent` trong `resource_allocation.gpu`.")
-            sys.exit(1)
-
-        # Kiểm tra nếu là list
+        # 4. Kiểm tra GPU Usage Percent Max
+        gpu_usage_max_percent = resource_config.get('resource_allocation', {}).get('gpu', {}).get('max_usage_percent')
         if isinstance(gpu_usage_max_percent, list):
-            if not all(isinstance(value, (int, float)) and 1 <= value <= 100 for value in gpu_usage_max_percent):
-                logger.error("Giá trị trong danh sách `max_usage_percent` không hợp lệ (1-100%).")
-                sys.exit(1)
-            else:
-                logger.info(f"Danh sách GPU usage percent hợp lệ: {gpu_usage_max_percent}")
-        # Kiểm tra nếu là số
-        elif isinstance(gpu_usage_max_percent, (int, float)):
-            if not (1 <= gpu_usage_max_percent <= 100):
-                logger.error("Giá trị `max_usage_percent` không hợp lệ hoặc không nằm trong phạm vi 1-100%.")
-                sys.exit(1)
-            else:
-                logger.info(f"Giới hạn GPU usage percent: {gpu_usage_max_percent}%")
-        else:
-            logger.error("Giá trị `max_usage_percent` không hợp lệ hoặc không phải số (1-100%).")
+            for value in gpu_usage_max_percent:
+                if not validate_threshold(value, 1, 100, "gpu_usage_max_percent (list phần tử)"):
+                    sys.exit(1)
+        elif not validate_threshold(gpu_usage_max_percent, 1, 100, "gpu_usage_max_percent"):
             sys.exit(1)
 
-        # 6. Kiểm Tra Cache Percent Threshold
-        cache_percent_threshold = baseline_monitoring.get('cache_percent_threshold')
-        if cache_percent_threshold is None:
-            logger.error("Thiếu `cache_percent_threshold` trong `environmental_limits.baseline_monitoring`.")
+        # 5. Kiểm tra GPU Utilization Percent Optimal
+        gpu_optimization = environmental_limits.get('gpu_optimization', {}).get('gpu_utilization_percent_optimal', {})
+        if not isinstance(gpu_optimization, dict):
+            logger.error("gpu_utilization_percent_optimal phải là dict chứa `min` và `max`.")
             sys.exit(1)
-        if not isinstance(cache_percent_threshold, (int, float)) or not (10 <= cache_percent_threshold <= 100):
-            logger.error("Giá trị `cache_percent_threshold` không hợp lệ hoặc không phải số (10-100%).")
+        gpu_util_min = gpu_optimization.get('min')
+        gpu_util_max = gpu_optimization.get('max')
+        if not (validate_threshold(gpu_util_min, 0, 100, "gpu_util_min") and
+                validate_threshold(gpu_util_max, 0, 100, "gpu_util_max")):
             sys.exit(1)
-        else:
-            logger.info(f"Giới hạn Cache percent threshold: {cache_percent_threshold}%")
+        if gpu_util_min >= gpu_util_max:
+            logger.error("gpu_util_min phải nhỏ hơn gpu_util_max.")
+            sys.exit(1)
+
+        # 6. Kiểm tra Cache Percent Threshold
+        cache_percent_threshold = environmental_limits.get('baseline_monitoring', {}).get('cache_percent_threshold')
+        if not validate_threshold(cache_percent_threshold, 10, 100, "cache_percent_threshold"):
+            sys.exit(1)
 
         # 7. Kiểm Tra Network Bandwidth Threshold
         network_bandwidth_threshold = baseline_monitoring.get('network_bandwidth_threshold_mbps')
