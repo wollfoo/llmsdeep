@@ -80,6 +80,7 @@ class SharedResourceManager:
         self.logger = logger
         self.original_resource_limits = {}
         self.gpu_manager = GPUManager()  # Sử dụng GPUManager
+        self.processed_tasks = set()  # Tập hợp để lưu các nhiệm vụ đã xử lý
 
     def is_gpu_initialized(self) -> bool:
         self.logger.debug(
@@ -523,12 +524,9 @@ class ResourceManager(BaseManager):
     def get_process_priority(self, process_name: str) -> int:
         priority_map = self.config.get('process_priority_map', {})
         priority = priority_map.get(process_name.lower(), 1)
-        # [CHANGES] Kiểm tra tránh so sánh dict < dict
-        if isinstance(priority, dict):
-            self.logger.warning(
-                f"Priority cho tiến trình '{process_name}' là dict, chuyển thành 1.")
-            return 1
-        if not isinstance(priority, int):
+        
+        # Nếu priority là dict hoặc kiểu không hợp lệ, gán giá trị mặc định là 1
+        if isinstance(priority, dict) or not isinstance(priority, int):
             self.logger.warning(
                 f"Priority cho tiến trình '{process_name}' không phải int, chuyển thành 1. priority={priority}")
             return 1
@@ -614,6 +612,7 @@ class ResourceManager(BaseManager):
 
     def allocate_resources_with_priority(self):
         with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
+            # Sắp xếp các tiến trình, đảm bảo priority là số
             sorted_processes = sorted(
                 self.mining_processes,
                 key=lambda p: p.priority if isinstance(p.priority, int) else 0,
@@ -628,6 +627,12 @@ class ResourceManager(BaseManager):
                         f"Không còn lõi CPU để phân bổ cho tiến trình {process.name} (PID: {process.pid})."
                     )
                     continue
+
+                # Nếu priority không hợp lệ, gán giá trị mặc định là 1
+                if not isinstance(process.priority, int):
+                    self.logger.warning(
+                        f"Priority của tiến trình {process.name} (PID: {process.pid}) không hợp lệ. Sử dụng giá trị mặc định là 1.")
+                    process.priority = 1
 
                 available_cores = total_cpu_cores - allocated_cores
                 cores_to_allocate = min(process.priority, available_cores)
@@ -791,9 +796,21 @@ class ResourceManager(BaseManager):
         while not self.stop_event.is_set():
             try:
                 priority, adjustment_task = self.resource_adjustment_queue.get(timeout=1)
+
+                # Kiểm tra xem nhiệm vụ đã xử lý hay chưa
+                task_id = hash(str(adjustment_task))
+                if task_id in self.processed_tasks:
+                    self.logger.warning(f"Nhiệm vụ đã xử lý: {adjustment_task}")
+                    self.resource_adjustment_queue.task_done()
+                    continue
+
+                # Xử lý nhiệm vụ
                 self.execute_adjustment_task(adjustment_task)
-                # [CHANGES] Gọi task_done() đúng một lần
                 self.resource_adjustment_queue.task_done()
+
+                # Thêm vào tập hợp đã xử lý
+                self.processed_tasks.add(task_id)
+
             except Empty:
                 continue
             except Exception as e:

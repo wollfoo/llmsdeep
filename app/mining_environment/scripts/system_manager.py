@@ -31,7 +31,7 @@ class SystemManager:
     """
 
     def __init__(self, config: Dict[str, Any]):
-        # [CHANGES] Kiểm tra config có phải dict thật, tránh lỗi so sánh dict
+        # Xác minh cấu hình trước khi khởi tạo
         if not isinstance(config, dict):
             raise ValueError("Cấu hình (config) phải là kiểu dict.")
 
@@ -97,7 +97,7 @@ def load_config(config_path: Path) -> Dict[str, Any]:
             config = json.load(f)
         system_logger.info(f"Đã tải cấu hình từ {config_path}")
 
-        # [CHANGES] Kiểm tra config, tránh lỗi len(int) hay so sánh dict < dict
+        # Xác minh cấu hình
         if not isinstance(config, dict):
             system_logger.error("Cấu hình không phải kiểu dict.")
             sys.exit(1)
