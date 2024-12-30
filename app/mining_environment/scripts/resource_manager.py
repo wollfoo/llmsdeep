@@ -211,31 +211,43 @@ class SharedResourceManager:
                 f"Lỗi adjust_cpu_frequency cho {process_name} (PID={pid}): {e}\n{traceback.format_exc()}"
             )
 
-    def adjust_gpu_power_limit(self, pid: int, power_limit: int, process_name: str) -> bool:
+    def adjust_gpu_power_limit(self, pid: int, power_limit: int, process_name: str, unit: str = 'W') -> bool:
+        self.logger.debug(f"Adjusting GPU power limit for PID={pid}, power_limit={power_limit}, unit={unit}")
         try:
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
 
+            # Chuyển đổi đơn vị nếu cần thiết
+            if unit.lower() == 'mw':
+                power_limit_mw = power_limit
+            elif unit.lower() == 'w':
+                power_limit_mw = power_limit * 1000
+            else:
+                raise ValueError(f"Đơn vị không hợp lệ: {unit}. Chỉ hỗ trợ 'W' và 'mW'.")
+
+            self.logger.debug(f"Converted power_limit to mW: {power_limit_mw} mW")
+
             # Lấy giới hạn năng lượng hợp lệ
             min_limit, max_limit = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+            self.logger.debug(f"GPU power limit constraints: min={min_limit} mW, max={max_limit} mW")
 
             # Kiểm tra nếu `power_limit` nằm ngoài phạm vi hợp lệ
-            if not (min_limit <= power_limit * 1000 <= max_limit):
+            if not (min_limit <= power_limit_mw <= max_limit):
                 raise ValueError(
-                    f"Power limit {power_limit}W không hợp lệ. "
+                    f"Power limit {power_limit}{unit} không hợp lệ. "
                     f"Khoảng hợp lệ: {min_limit // 1000}W - {max_limit // 1000}W."
                 )
 
             # Áp dụng giới hạn năng lượng
-            pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit * 1000)
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit_mw)
             self.logger.info(
-                f"Set GPU power limit={power_limit}W cho {process_name} (PID={pid})."
+                f"Set GPU power limit={power_limit}{unit} cho {process_name} (PID={pid})."
             )
             return True  # Trả về thành công
         except pynvml.NVMLError as e:
             self.logger.error(
                 f"Lỗi NVML khi set GPU power limit cho {process_name} (PID={pid}): {e}. "
-                f"Power limit yêu cầu: {power_limit}W."
+                f"Power limit yêu cầu: {power_limit}{unit}."
             )
         except ValueError as ve:
             # Log trực tiếp thông báo ngoại lệ mà không lặp lại "Khoảng hợp lệ"

@@ -105,9 +105,9 @@
     },
     
     "azure_openai": {
-        "api_base": "https://anomalyd.openai.azure.com/",
-        "deployment_name": "gpt4-deployment-name",
-        "api_version": "2023-03-15-preview"
+        "api_base": "https://arm-openaiservice.openai.azure.com/",
+        "deployment_name": "gpt-4o",
+        "api_version": "2024-08-01-preview"
     },
     
     "cloak_strategies": {
