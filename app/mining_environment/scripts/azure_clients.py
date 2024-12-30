@@ -27,11 +27,6 @@ from azure.ai.anomalydetector.models import (
 
 from openai import AzureOpenAI
 
-client = AzureOpenAI(azure_endpoint=self.endpoint,
-api_version=self.api_version,
-api_key=self.api_key)
-
-
 class AzureBaseClient:
     """
     Lớp cơ sở để xử lý xác thực và cấu hình chung cho các client Azure.
@@ -680,6 +675,11 @@ class AzureOpenAIClient(AzureBaseClient):
             raise ValueError("Thiếu thông tin endpoint, api_key hoặc deployment_name.")
 
         try:
+            self.client = AzureOpenAI(
+                azure_endpoint=self.endpoint,
+                api_version=self.api_version,
+                api_key=self.api_key
+            )
             self.logger.info("Đã cấu hình thành công Azure OpenAI Service.")
         except Exception as e:
             self.logger.error(f"Lỗi khi cấu hình Azure OpenAI Service: {e}")
@@ -691,13 +691,15 @@ class AzureOpenAIClient(AzureBaseClient):
         """
         try:
             prompt = self.construct_prompt(state_data)
-            response = client.chat.completions.create(model=self.deployment_name,
-            messages=[
-                {"role": "system", "content": "Bạn là một chuyên gia tối ưu hóa tài nguyên hệ thống."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=150,
-            temperature=0.5)
+            response = self.client.chat.completions.create(
+                model=self.deployment_name,
+                messages=[
+                    {"role": "system", "content": "Bạn là một chuyên gia tối ưu hóa tài nguyên hệ thống."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=150,
+                temperature=0.5
+            )
             suggestion_text = response.choices[0].message.content.strip()
             suggestions = []
             if isinstance(suggestion_text, str) and suggestion_text:

@@ -595,8 +595,7 @@ class ResourceManager(BaseManager):
 
             sleep(max(temp_intv, power_intv))
 
-    def check_temperature_and_enqueue(self, process: MiningProcess,
-                                      cpu_max_temp: int, gpu_max_temp: int):
+    def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
         try:
             cpu_temp = temperature_monitor.get_cpu_temperature(process.pid)
             gpu_temp = 0
@@ -623,7 +622,9 @@ class ResourceManager(BaseManager):
                     'process': process,
                     'adjustments': adjustments
                 }
-                self.resource_adjustment_queue.put((2, task))
+                priority = 2
+                count_val = next(self._counter)
+                self.resource_adjustment_queue.put((priority, count_val, task))
         except Exception as e:
             self.logger.error(f"check_temperature_and_enqueue error: {e}\n{traceback.format_exc()}")
 
@@ -654,7 +655,9 @@ class ResourceManager(BaseManager):
                     'process': process,
                     'adjustments': adj
                 }
-                self.resource_adjustment_queue.put((2, t))
+                priority = 2
+                count_val = next(self._counter)
+                self.resource_adjustment_queue.put((priority, count_val, t))
         except Exception as e:
             self.logger.error(f"check_power_and_enqueue error: {e}\n{traceback.format_exc()}")
 
@@ -752,9 +755,10 @@ class ResourceManager(BaseManager):
                     'process': process,
                     'strategies': ['cpu', 'gpu', 'network', 'disk_io', 'cache']
                 }
-                self.resource_adjustment_queue.put((1, next(self._counter), adjustment_task))
-                # Xóa dòng gọi task_done() vì hàm này chỉ put vào queue
-                # self.cloaking_request_queue.task_done()
+                priority = 1
+                count_val = next(self._counter)
+                self.resource_adjustment_queue.put((priority, count_val, adjustment_task))
+                # Không gọi task_done() ở đây
             except Empty:
                 pass
             except Exception as e:
