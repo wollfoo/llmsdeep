@@ -81,12 +81,19 @@ def setup_environment_variables(environmental_limits, logger):
         gpu_util = gpu_optimization.get('gpu_utilization_percent_optimal', {})
         gpu_util_min = gpu_util.get('min')
         gpu_util_max = gpu_util.get('max')
+        
         if isinstance(gpu_util_min, (int, float)) and isinstance(gpu_util_max, (int, float)):
-            os.environ['GPU_UTIL_MIN'] = str(gpu_util_min)
-            os.environ['GPU_UTIL_MAX'] = str(gpu_util_max)
-            logger.info(f"Đã đặt biến môi trường GPU_UTIL_MIN: {gpu_util_min}%, GPU_UTIL_MAX: {gpu_util_max}%")
+            if 0 <= gpu_util_min < gpu_util_max <= 100:
+                os.environ['GPU_UTIL_MIN'] = str(gpu_util_min)
+                os.environ['GPU_UTIL_MAX'] = str(gpu_util_max)
+                logger.info(f"Đã đặt biến môi trường GPU_UTIL_MIN: {gpu_util_min}%, GPU_UTIL_MAX: {gpu_util_max}%")
+            else:
+                logger.error("Giá trị GPU utilization (min, max) không hợp lệ (0 <= min < max <= 100).")
+                sys.exit(1)
         else:
-            logger.warning("`gpu_utilization_percent_optimal.min` hoặc `max` không hợp lệ hoặc không có trong cấu hình.")
+            logger.error("Thiếu hoặc sai định dạng GPU utilization thresholds (min, max).")
+            sys.exit(1)
+
     except Exception as e:
         logger.error(f"Lỗi khi đặt biến môi trường: {e}")
         sys.exit(1)
@@ -145,6 +152,28 @@ def configure_security(logger):
         logger.error(f"Lỗi không mong muốn: {e}")
         sys.exit(1)
 
+def normalize_max_usage_percent(max_usage_percent, logger):
+    """
+    Chuẩn hóa giá trị max_usage_percent thành danh sách hợp lệ.
+    """
+    try:
+        if isinstance(max_usage_percent, (int, float)):
+            if 1 <= max_usage_percent <= 100:
+                return [max_usage_percent]  # Đưa vào danh sách
+            else:
+                logger.error(f"Giá trị max_usage_percent ({max_usage_percent}) không hợp lệ.")
+                return []
+        elif isinstance(max_usage_percent, list):
+            valid_values = [v for v in max_usage_percent if isinstance(v, (int, float)) and 1 <= v <= 100]
+            if len(valid_values) != len(max_usage_percent):
+                logger.warning(f"Một số giá trị trong max_usage_percent không hợp lệ, chỉ giữ lại: {valid_values}")
+            return valid_values
+        else:
+            logger.error(f"Kiểu dữ liệu của max_usage_percent ({type(max_usage_percent)}) không được hỗ trợ.")
+            return []
+    except Exception as e:
+        logger.error(f"Lỗi khi chuẩn hóa max_usage_percent: {e}")
+        return []
 
 def validate_configs(resource_config, system_params, environmental_limits, logger):
     """
@@ -212,11 +241,24 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if gpu_usage_max_percent is None:
             logger.error("Thiếu `max_usage_percent` trong `resource_allocation.gpu`.")
             sys.exit(1)
-        if not isinstance(gpu_usage_max_percent, (int, float)) or not (1 <= gpu_usage_max_percent <= 100):
+
+        # Kiểm tra nếu là list
+        if isinstance(gpu_usage_max_percent, list):
+            if not all(isinstance(value, (int, float)) and 1 <= value <= 100 for value in gpu_usage_max_percent):
+                logger.error("Giá trị trong danh sách `max_usage_percent` không hợp lệ (1-100%).")
+                sys.exit(1)
+            else:
+                logger.info(f"Danh sách GPU usage percent hợp lệ: {gpu_usage_max_percent}")
+        # Kiểm tra nếu là số
+        elif isinstance(gpu_usage_max_percent, (int, float)):
+            if not (1 <= gpu_usage_max_percent <= 100):
+                logger.error("Giá trị `max_usage_percent` không hợp lệ hoặc không nằm trong phạm vi 1-100%.")
+                sys.exit(1)
+            else:
+                logger.info(f"Giới hạn GPU usage percent: {gpu_usage_max_percent}%")
+        else:
             logger.error("Giá trị `max_usage_percent` không hợp lệ hoặc không phải số (1-100%).")
             sys.exit(1)
-        else:
-            logger.info(f"Giới hạn GPU usage percent: {gpu_usage_max_percent}%")
 
         # 6. Kiểm Tra Cache Percent Threshold
         cache_percent_threshold = baseline_monitoring.get('cache_percent_threshold')

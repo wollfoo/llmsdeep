@@ -28,7 +28,7 @@
         },
         "gpu": {
  
-            "max_usage_percent": 90
+            "max_usage_percent": [90]
         },
         "disk_io": {
             "min_limit_mbps": 50,
