@@ -148,7 +148,7 @@ class SafeRestoreEvaluator:
                     return False
 
             # 11) Kiểm tra khuyến nghị từ Azure Security Center
-            recommendations = self.resource_manager.azure_security_center_client.get_security_recommendations()
+            recommendations = self.resource_manager.azure_security_center_client.recommendations.list_by_subscription()
             if isinstance(recommendations, list) and len(recommendations) > 0:
                 self.logger.info(
                     f"Vẫn còn {len(recommendations)} khuyến nghị bảo mật từ Azure Security Center."
@@ -357,7 +357,7 @@ class AnomalyDetector(BaseManager):
                                 break
 
                         # Kiểm tra recommendations từ Azure Security Center
-                        recommendations = self.resource_manager.azure_security_center_client.get_security_recommendations()
+                        recommendations = self.resource_manager.azure_security_center_client.recommendations.list_by_subscription()
                         if isinstance(recommendations, list) and len(recommendations) > 0:
                             self.logger.warning(
                                 f"Detected {len(recommendations)} security recommendations từ Azure Security Center."

@@ -3,7 +3,7 @@
 import os
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from azure.monitor.query import MetricsQueryClient, MetricAggregationType, LogsQueryClient
 from azure.mgmt.security import SecurityCenter
@@ -152,7 +152,7 @@ class AzureMonitorClient(AzureBaseClient):
             return {}
 
         if not timespan:
-            end_time = datetime.datetime.utcnow()
+            end_time = datetime.utcnow()
             start_time = end_time - datetime.timedelta(hours=1)  # Mặc định là 1 giờ qua
             timespan = f"{start_time.isoformat()}/{end_time.isoformat()}"
 
@@ -198,7 +198,7 @@ class AzureSentinelClient(AzureBaseClient):
         try:
             alerts = self.security_client.alerts.list()
             recent_alerts = []
-            cutoff_time = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+            cutoff_time = datetime.utcnow() - timedelta(days=days)
 
             for alert in alerts:
                 if (hasattr(alert, 'properties') 
