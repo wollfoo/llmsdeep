@@ -5,7 +5,9 @@ import logging
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Tuple
+
+from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
 from azure.monitor.query import MetricsQueryClient, MetricAggregationType, LogsQueryClient
 from azure.mgmt.security import SecurityCenter
 from azure.loganalytics import LogAnalyticsDataClient, models as logmodels
@@ -17,7 +19,6 @@ from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.resourcegraph.models import QueryRequest
 from azure.mgmt.machinelearningservices import AzureMachineLearningWorkspaces
 from azure.mgmt.loganalytics import LogAnalyticsManagementClient
-
 
 from azure.ai.anomalydetector import AnomalyDetectorClient
 from azure.core.credentials import AzureKeyCredential
@@ -273,6 +274,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy Workspace IDs: {e}")
             return []
 
+
     def query_logs(self, query: str, days: int = 7) -> List[Dict[str, Any]]:
         """
         Thực hiện truy vấn log trên Azure Log Analytics.
@@ -286,9 +288,14 @@ class AzureLogAnalyticsClient(AzureBaseClient):
         """
         results = []
 
-        # Kiểm tra danh sách workspace IDs
+        # Kiểm tra workspace IDs
         if not self.workspace_ids:
             self.logger.error("Không có Workspace ID để truy vấn logs.")
+            return results
+
+        # Kiểm tra query
+        if not query:
+            self.logger.error("Query không được để trống.")
             return results
 
         try:
@@ -296,19 +303,19 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=days)
 
-            # Xác thực `timespan`
+            # Xác thực timespan
+            timespan = (start_time, end_time)
             if not (isinstance(start_time, datetime) and isinstance(end_time, datetime)):
                 raise ValueError(
                     f"timespan không hợp lệ: start_time={start_time}, end_time={end_time}. "
                     "Cả hai phải là kiểu datetime."
                 )
-            timespan = (start_time, end_time)
 
-            # Duyệt qua từng workspace và thực hiện truy vấn
+            # Duyệt qua các workspace
             for workspace_id in self.workspace_ids:
                 try:
-                    self.logger.info(
-                        f"Truy vấn logs trên Workspace ID {workspace_id} với timespan: {timespan}"
+                    self.logger.debug(
+                        f"Truy vấn logs trên Workspace ID {workspace_id} với timespan: {timespan}."
                     )
 
                     # Gọi API để lấy logs
@@ -318,24 +325,43 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                         timespan=timespan
                     )
 
-                    # Xử lý dữ liệu trả về
+                    # Xử lý kết quả trả về
+                    workspace_results = []
                     for table in response.tables:
                         if table.rows:
-                            table_data = [dict(zip(table.columns, row)) for row in table.rows]
-                            results.extend(table_data)
+                            workspace_results.extend(
+                                [dict(zip(table.columns, row)) for row in table.rows]
+                            )
 
-                    self.logger.info(
-                        f"Đã truy vấn logs thành công trên Workspace ID {workspace_id}. "
-                        f"Đã lấy {len(results)} dòng dữ liệu."
+                    if workspace_results:
+                        results.extend(workspace_results)
+                        self.logger.info(
+                            f"Đã truy vấn thành công trên Workspace ID {workspace_id}. "
+                            f"Lấy được {len(workspace_results)} dòng dữ liệu."
+                        )
+                    else:
+                        self.logger.warning(
+                            f"Không có dữ liệu trả về từ Workspace ID {workspace_id}."
+                        )
+
+                except ResourceNotFoundError as not_found_error:
+                    self.logger.error(
+                        f"Workspace không tồn tại hoặc không có dữ liệu trên Workspace ID {workspace_id}: {not_found_error}\n"
+                        f"Query: {query}, Timespan: {timespan}\n"
                     )
-
+                except HttpResponseError as http_error:
+                    self.logger.error(
+                        f"Lỗi HTTP trên Workspace ID {workspace_id}: {http_error}\n"
+                        f"Query: {query}, Timespan: {timespan}\n"
+                    )
                 except Exception as workspace_error:
                     self.logger.error(
-                        f"Lỗi khi truy vấn logs trên Workspace ID {workspace_id}: {workspace_error}\n"
-                        f"Query: {query}, Timespan: ({start_time}, {end_time})\n"
+                        f"Lỗi không xác định trên Workspace ID {workspace_id}: {workspace_error}\n"
+                        f"Query: {query}, Timespan: {timespan}\n"
                         f"Stack Trace:\n{traceback.format_exc()}"
                     )
 
+            self.logger.info(f"Tổng cộng lấy được {len(results)} dòng dữ liệu từ tất cả các workspace.")
             return results
 
         except ValueError as ve:
