@@ -2,11 +2,10 @@
 
 import os
 import logging
-from typing import List, Dict, Any, Optional
-import datetime
 import time
-
-from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+from azure.monitor.query import MetricsQueryClient, MetricAggregationType, LogsQueryClient
 from azure.mgmt.security import SecurityCenter
 from azure.loganalytics import LogAnalyticsDataClient, models as logmodels
 from azure.loganalytics.models import QueryBody
@@ -16,6 +15,8 @@ from azure.identity import ClientSecretCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.resourcegraph.models import QueryRequest
 from azure.mgmt.machinelearningservices import AzureMachineLearningWorkspaces
+from azure.mgmt.loganalytics import LogAnalyticsManagementClient
+
 
 from azure.ai.anomalydetector import AnomalyDetectorClient
 from azure.core.credentials import AzureKeyCredential
@@ -70,36 +71,51 @@ class AzureBaseClient:
             self.logger.error(f"Lỗi khi xác thực với Azure AD: {e}")
             raise e
 
-    def discover_resources(self, resource_type: str) -> List[Dict[str, Any]]:
+    def discover_resources(self, resource_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Sử dụng Azure Resource Graph để tự động khám phá tài nguyên theo loại.
-        Trả về danh sách dict với các khóa 'id', 'name', 'resourceGroup'.
+        Nếu không truyền `resource_type`, hàm sẽ trả về tất cả tài nguyên.
+
+        Args:
+            resource_type (Optional[str]): Loại tài nguyên cần tìm kiếm, ví dụ: 
+                'Microsoft.Compute/virtualMachines'.
+                Nếu None, tìm kiếm tất cả tài nguyên.
+
+        Returns:
+            List[Dict[str, Any]]: Danh sách tài nguyên được tìm thấy.
         """
         try:
-            query = f"Resources | where type =~ '{resource_type}' | project name, resourceGroup, id"
+            # Xây dựng truy vấn
+            query = "Resources"
+            if resource_type:
+                query += f" | where type =~ '{resource_type}'"
+            query += " | project name, type, resourceGroup, id"
+
+            # Tạo yêu cầu truy vấn
             request = QueryRequest(
                 subscriptions=[self.subscription_id],
                 query=query
             )
+
+            # Gửi truy vấn
             response = self.resource_graph_client.resources(request)
             self.logger.debug(f"Response Data: {response.data}")
 
+            # Xử lý kết quả trả về
             resources = []
-            for res in response.data:
-                if isinstance(res, dict):
-                    resource_dict = {
-                        'id': res.get('id', ''),
-                        'name': res.get('name', ''),
-                        'resourceGroup': res.get('resourceGroup', '')
-                    }
-                    resources.append(resource_dict)
-                else:
-                    self.logger.warning(f"Unexpected data type in ResourceGraphClient: {type(res)}")
+            for res in response.data or []:  # Xử lý trường hợp response.data là None
+                resource_dict = {
+                    'id': res.get('id', 'N/A'),
+                    'name': res.get('name', 'N/A'),
+                    'type': res.get('type', 'N/A'),
+                    'resourceGroup': res.get('resourceGroup', 'N/A')
+                }
+                resources.append(resource_dict)
 
-            self.logger.info(f"Đã khám phá {len(resources)} tài nguyên loại {resource_type}.")
+            self.logger.info(f"Đã khám phá {len(resources)} tài nguyên.")
             return resources
         except Exception as e:
-            self.logger.error(f"Lỗi khi khám phá tài nguyên loại {resource_type}: {e}")
+            self.logger.error(f"Lỗi khi khám phá tài nguyên: {e}", exc_info=True)
             return []
 
 class AzureMonitorClient(AzureBaseClient):
@@ -111,36 +127,58 @@ class AzureMonitorClient(AzureBaseClient):
         self.client = MetricsQueryClient(self.credential)
 
     def get_metrics(
-        self, 
-        resource_id: str, 
-        metric_names: List[str], 
-        timespan: Optional[str] = 'PT1H', 
-        interval: Optional[str] = 'PT1M',
-        aggregations: Optional[List[MetricAggregationType]] = None
+        self,
+        resource_id: str,
+        metric_names: List[str],
+        timespan: Optional[str] = None,
+        interval: Optional[str] = "PT1M",
+        aggregations: Optional[List[str]] = None
     ) -> Dict[str, List[float]]:
+        """
+        Lấy metrics từ Azure Monitor cho một tài nguyên cụ thể.
+        
+        Args:
+            resource_id (str): ID của tài nguyên cần lấy metrics.
+            metric_names (List[str]): Danh sách tên metrics cần lấy.
+            timespan (Optional[str]): Khoảng thời gian (ISO 8601).
+            interval (Optional[str]): Khoảng thời gian giữa các điểm dữ liệu (ISO 8601).
+            aggregations (Optional[List[str]]): Loại tổng hợp (ví dụ: ["Average", "Maximum"]).
+
+        Returns:
+            Dict[str, List[float]]: Metrics theo thời gian.
+        """
         if not resource_id or not metric_names:
             self.logger.error("resource_id và metric_names không được để trống.")
             return {}
+
+        if not timespan:
+            end_time = datetime.datetime.utcnow()
+            start_time = end_time - datetime.timedelta(hours=1)  # Mặc định là 1 giờ qua
+            timespan = f"{start_time.isoformat()}/{end_time.isoformat()}"
+
         if aggregations is None:
-            aggregations = [MetricAggregationType.AVERAGE]
+            aggregations = ["Average"]
 
         try:
-            metrics_data = self.client.list(
-                resource_id=resource_id,
+            self.logger.info(f"Truy vấn metrics cho tài nguyên {resource_id} với các metrics {metric_names}.")
+            response = self.client.query_resource(
+                resource_uri=resource_id,
                 metric_names=metric_names,
                 timespan=timespan,
-                interval=interval,
+                granularity=interval,
                 aggregations=aggregations
             )
+
             metrics = {}
-            for metric in metrics_data.metrics:
+            for metric in response.metrics:
                 metrics[metric.name] = []
                 for ts in metric.timeseries:
                     for dp in ts.data:
                         value = dp.average or dp.total or dp.minimum or dp.maximum or dp.count or 0
                         metrics[metric.name].append(value)
-            self.logger.info(f"Đã lấy metrics cho tài nguyên {resource_id}: {metric_names}")
+            self.logger.info(f"Đã lấy thành công metrics cho tài nguyên {resource_id}.")
             return metrics
+
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy metrics từ Azure Monitor cho tài nguyên {resource_id}: {e}")
             return {}
@@ -174,16 +212,23 @@ class AzureSentinelClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy alerts từ Azure Sentinel: {e}")
             return []
 
+
 class AzureLogAnalyticsClient(AzureBaseClient):
     """
-    Lớp để tương tác với Azure Log Analytics.
+    Lớp để tương tác với Azure Log Analytics bằng LogsQueryClient.
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        self.client = LogAnalyticsDataClient(self.credential)
+        self.logs_client = LogsQueryClient(self.credential)
         self.workspace_ids = self.get_workspace_ids()
 
     def get_workspace_ids(self) -> List[str]:
+        """
+        Lấy danh sách Workspace IDs từ tài nguyên Log Analytics.
+
+        Returns:
+            List[str]: Danh sách Workspace IDs.
+        """
         try:
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
             workspace_ids = [res['id'] for res in resources if 'id' in res]
@@ -196,57 +241,76 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy Workspace IDs: {e}")
             return []
 
-    def query_logs(self, query: str, timespan: Optional[str] = "P1D") -> List[Any]:
+    def query_logs(self, query: str, days: int = 7) -> List[Dict[str, Any]]:
         """
         Thực hiện truy vấn log trên Azure Log Analytics.
+
+        Args:
+            query (str): Câu lệnh KQL để truy vấn logs.
+            days (int): Khoảng thời gian truy vấn (mặc định là 7 ngày).
+
+        Returns:
+            List[Dict[str, Any]]: Danh sách logs kết quả.
         """
         results = []
         if not self.workspace_ids:
             self.logger.error("Không có Workspace ID để truy vấn logs.")
             return results
         try:
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=days)
+
             for workspace_id in self.workspace_ids:
-                body = logmodels.QueryBody(query=query, timespan=timespan)
-                response = self.client.query(workspace_id=workspace_id, body=body)
-                if response.tables:
-                    results.extend(response.tables)
-                    self.logger.info(f"Đã thực hiện truy vấn logs thành công trên Workspace ID: {workspace_id}.")
-                else:
-                    self.logger.info(f"Không có dữ liệu trả về từ Workspace ID: {workspace_id}.")
+                response = self.logs_client.query_workspace(
+                    workspace_id=workspace_id,
+                    query=query,
+                    timespan=(start_time, end_time)
+                )
+
+                for table in response.tables:
+                    for row in table.rows:
+                        results.append(dict(zip(table.columns, row)))
+                self.logger.info(f"Đã thực hiện truy vấn logs thành công trên Workspace ID: {workspace_id}.")
             return results
         except Exception as e:
             self.logger.error(f"Lỗi khi truy vấn logs từ Azure Log Analytics: {e}")
             return []
 
     def query_logs_with_time_range(
-        self, query: str, start_time: datetime.datetime, end_time: datetime.datetime
-    ) -> List[Any]:
+        self, query: str, start_time: datetime, end_time: datetime
+    ) -> List[Dict[str, Any]]:
         """
-        Truy vấn log với khoảng thời gian cụ thể trên Azure Log Analytics.
+        Truy vấn logs với khoảng thời gian cụ thể trên Azure Log Analytics.
+
+        Args:
+            query (str): Câu lệnh KQL để truy vấn logs.
+            start_time (datetime): Thời gian bắt đầu.
+            end_time (datetime): Thời gian kết thúc.
+
+        Returns:
+            List[Dict[str, Any]]: Danh sách logs kết quả.
         """
         results = []
         if not self.workspace_ids:
             self.logger.error("Không có Workspace ID để truy vấn logs.")
             return results
         try:
-            timespan = f"{start_time.isoformat()}/{end_time.isoformat()}"
             for workspace_id in self.workspace_ids:
-                body = logmodels.QueryBody(query=query, timespan=timespan)
-                response = self.client.query(workspace_id=workspace_id, body=body)
-                if response.tables:
-                    results.extend(response.tables)
-                    self.logger.info(
-                        f"Đã truy vấn logs thành công trên Workspace ID: {workspace_id} với timespan: {timespan}."
-                    )
-                else:
-                    self.logger.info(
-                        f"Không có dữ liệu trả về từ Workspace ID: {workspace_id} với timespan: {timespan}."
-                    )
+                response = self.logs_client.query_workspace(
+                    workspace_id=workspace_id,
+                    query=query,
+                    timespan=(start_time, end_time)
+                )
+
+                for table in response.tables:
+                    for row in table.rows:
+                        results.append(dict(zip(table.columns, row)))
+                self.logger.info(
+                    f"Đã truy vấn logs thành công trên Workspace ID: {workspace_id} với timespan từ {start_time} đến {end_time}."
+                )
             return results
         except Exception as e:
-            self.logger.error(
-                f"Lỗi khi truy vấn logs với khoảng thời gian cụ thể từ Azure Log Analytics: {e}"
-            )
+            self.logger.error(f"Lỗi khi truy vấn logs với khoảng thời gian cụ thể: {e}")
             return []
 
 class AzureSecurityCenterClient(AzureBaseClient):
@@ -257,19 +321,33 @@ class AzureSecurityCenterClient(AzureBaseClient):
         super().__init__(logger)
         self.security_client = SecurityCenter(self.credential, self.subscription_id)
 
-    def get_security_recommendations(self) -> List[Any]:
+    def get_security_assessments(self) -> List[Any]:
         """
-        Lấy các khuyến nghị bảo mật từ Azure Security Center.
+        Lấy các đánh giá bảo mật từ Azure Security Center.
         """
         try:
-            recommendations = self.security_client.security_recommendations.list()
-            recommendations_list = list(recommendations)
-            self.logger.info(
-                f"Đã lấy {len(recommendations_list)} security recommendations từ Azure Security Center."
-            )
-            return recommendations_list
+            scope = f"/subscriptions/{self.subscription_id}"  # Phạm vi subscription
+            self.logger.info(f"Lấy đánh giá bảo mật cho scope: {scope}")
+            assessments = self.security_client.assessments.list(scope=scope)
+            assessments_list = list(assessments)
+            self.logger.info(f"Đã lấy {len(assessments_list)} đánh giá bảo mật từ Azure Security Center.")
+            return assessments_list
         except Exception as e:
-            self.logger.error(f"Lỗi khi lấy security recommendations từ Azure Security Center: {e}")
+            self.logger.error(f"Lỗi khi lấy đánh giá bảo mật từ Azure Security Center: {e}")
+            return []
+
+    def get_secure_scores(self) -> List[Any]:
+        """
+        Lấy điểm bảo mật từ Azure Security Center.
+        """
+        try:
+            self.logger.info("Lấy điểm bảo mật...")
+            secure_scores = self.security_client.secure_scores.list()
+            secure_scores_list = list(secure_scores)
+            self.logger.info(f"Đã lấy {len(secure_scores_list)} điểm bảo mật từ Azure Security Center.")
+            return secure_scores_list
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy điểm bảo mật từ Azure Security Center: {e}")
             return []
 
 class AzureNetworkWatcherClient(AzureBaseClient):
@@ -280,13 +358,44 @@ class AzureNetworkWatcherClient(AzureBaseClient):
         super().__init__(logger)
         self.network_client = NetworkManagementClient(self.credential, self.subscription_id)
 
-    def get_flow_logs(self, resource_group: str, network_watcher_name: str, nsg_name: str) -> List[Any]:
+    def get_network_watcher_name(self, resource_group: str) -> Optional[str]:
+        """
+        Lấy tên của Network Watcher dựa trên Resource Group.
+
+        Args:
+            resource_group (str): Tên Resource Group.
+
+        Returns:
+            Optional[str]: Tên Network Watcher nếu tìm thấy, None nếu không.
+        """
+        try:
+            region = self.resource_management_client.resource_groups.get(resource_group).location
+            watchers = self.network_client.network_watchers.list_all()
+            for watcher in watchers:
+                if watcher.location.lower() == region.lower():
+                    self.logger.info(f"Đã tìm thấy Network Watcher '{watcher.name}' cho vùng '{region}'.")
+                    return watcher.name
+            self.logger.warning(f"Không tìm thấy Network Watcher cho vùng '{region}'.")
+            return None
+        except Exception as e:
+            self.logger.error(f"Lỗi khi tìm Network Watcher cho Resource Group '{resource_group}': {e}")
+            return None
+
+    def get_flow_logs(self, network_watcher_resource_group: str, network_watcher_name: str, nsg_name: str) -> List[Any]:
         """
         Lấy các flow logs từ Network Security Groups (NSGs) thông qua Azure Network Watcher.
+
+        Args:
+            network_watcher_resource_group (str): Tên Resource Group chứa Network Watcher.
+            network_watcher_name (str): Tên Network Watcher.
+            nsg_name (str): Tên Network Security Group.
+
+        Returns:
+            List[Any]: Danh sách Flow Logs.
         """
         try:
             flow_log_configurations = self.network_client.flow_logs.list(
-                resource_group_name=resource_group,
+                resource_group_name=network_watcher_resource_group,
                 network_watcher_name=network_watcher_name
             )
             flow_logs = [
@@ -294,35 +403,14 @@ class AzureNetworkWatcherClient(AzureBaseClient):
                 if hasattr(log, 'target_resource_id') and log.target_resource_id.endswith(nsg_name)
             ]
             self.logger.info(
-                f"Đã lấy {len(flow_logs)} flow logs từ NSG {nsg_name} trong Resource Group {resource_group}."
+                f"Đã lấy {len(flow_logs)} flow logs từ NSG {nsg_name} trong Resource Group {network_watcher_resource_group}."
             )
             return flow_logs
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi lấy flow logs từ NSG {nsg_name} trong Resource Group {resource_group}: {e}"
+                f"Lỗi khi lấy flow logs từ NSG {nsg_name} trong Resource Group {network_watcher_resource_group}: {e}"
             )
             return []
-
-    def get_network_watcher_name(self, resource_group: str) -> Optional[str]:
-        """
-        Lấy tên Network Watcher theo Resource Group.
-        """
-        try:
-            watchers = self.network_client.network_watchers.list_all()
-            for watcher in watchers:
-                if "/resourceGroups/" in watcher.id:
-                    resource_group_from_id = (
-                        watcher.id.split("/resourceGroups/")[1].split("/")[0]
-                    )
-                    if resource_group_from_id.lower() == resource_group.lower():
-                        return watcher.name
-            self.logger.warning(f"Không tìm thấy Network Watcher cho Resource Group {resource_group}.")
-            return None
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khi lấy Network Watcher cho Resource Group {resource_group}: {e}"
-            )
-            return None
 
     def create_flow_log(
         self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str,
@@ -330,6 +418,16 @@ class AzureNetworkWatcherClient(AzureBaseClient):
     ) -> Optional[Any]:
         """
         Tạo một flow log mới cho một NSG.
+
+        Args:
+            resource_group (str): Resource Group của NSG.
+            network_watcher_name (str): Tên Network Watcher.
+            nsg_name (str): Tên NSG.
+            flow_log_name (str): Tên Flow Log.
+            params (Dict[str, Any]): Cấu hình Flow Log.
+
+        Returns:
+            Optional[Any]: Thông tin Flow Log vừa tạo.
         """
         try:
             flow_log = self.network_client.flow_logs.begin_create_or_update(
@@ -353,6 +451,15 @@ class AzureNetworkWatcherClient(AzureBaseClient):
     ) -> bool:
         """
         Xóa một flow log từ NSG.
+
+        Args:
+            resource_group (str): Resource Group của NSG.
+            network_watcher_name (str): Tên Network Watcher.
+            nsg_name (str): Tên NSG.
+            flow_log_name (str): Tên Flow Log.
+
+        Returns:
+            bool: True nếu xóa thành công, False nếu không.
         """
         try:
             self.network_client.flow_logs.begin_delete(
@@ -369,6 +476,35 @@ class AzureNetworkWatcherClient(AzureBaseClient):
                 f"Lỗi khi xóa flow log {flow_log_name} từ NSG {nsg_name} trong Resource Group {resource_group}: {e}"
             )
             return False
+
+    def check_flow_log_status(self, network_watcher_resource_group: str, network_watcher_name: str, flow_log_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Kiểm tra trạng thái của Flow Log.
+
+        Args:
+            network_watcher_resource_group (str): Resource Group của Network Watcher.
+            network_watcher_name (str): Tên Network Watcher.
+            flow_log_name (str): Tên Flow Log.
+
+        Returns:
+            Optional[Dict[str, Any]]: Thông tin trạng thái Flow Log, None nếu không tìm thấy.
+        """
+        try:
+            flow_log = self.network_client.flow_logs.get(
+                resource_group_name=network_watcher_resource_group,
+                network_watcher_name=network_watcher_name,
+                flow_log_name=flow_log_name
+            )
+            self.logger.info(f"Trạng thái Flow Log {flow_log_name}: {flow_log.provisioning_state}")
+            return {
+                "id": flow_log.id,
+                "state": flow_log.provisioning_state,
+                "storageId": flow_log.storage_id,
+                "targetResourceId": flow_log.target_resource_id
+            }
+        except Exception as e:
+            self.logger.error(f"Lỗi khi kiểm tra trạng thái Flow Log {flow_log_name}: {e}")
+            return None
 
 class AzureTrafficAnalyticsClient(AzureBaseClient):
     """

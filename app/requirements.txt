@@ -21,8 +21,10 @@ azure-monitor-query
 azure-mgmt-security
 azure-mgmt-resource
 azure-loganalytics
+azure-mgmt-loganalytics
 azure-mgmt-network
 azure-mgmt-resourcegraph
 azure-mgmt-machinelearningservices --pre
 azure-ai-anomalydetector
 openai
+
