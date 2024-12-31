@@ -153,7 +153,7 @@ class AzureMonitorClient(AzureBaseClient):
 
         if not timespan:
             end_time = datetime.utcnow()
-            start_time = end_time - datetime.timedelta(hours=1)  # Mặc định là 1 giờ qua
+            start_time = end_time - timedelta(hours=1)  # Mặc định là 1 giờ qua
             timespan = f"{start_time.isoformat()}/{end_time.isoformat()}"
 
         if aggregations is None:

@@ -5,8 +5,9 @@ import logging
 import subprocess
 import psutil
 import pynvml
-import traceback  # <-- Import traceback để in stacktrace đầy đủ khi có ngoại lệ
+import traceback 
 from time import sleep, time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import PriorityQueue, Empty, Queue
 from threading import Event, Thread, Lock
@@ -724,14 +725,28 @@ class ResourceManager(BaseManager):
         return False
 
     def collect_azure_monitor_data(self):
+        """
+        Thu thập dữ liệu giám sát từ Azure Monitor.
+        Ghi log chi tiết khi gặp lỗi, bao gồm thông tin VM.
+        """
         try:
             for vm in self.vms:
-                rid = vm['id']
-                metric_names = ['Percentage CPU', 'Available Memory Bytes']
-                metrics = self.azure_monitor_client.get_metrics(rid, metric_names)
-                self.logger.info(f"Thu thập chỉ số VM {vm['name']}: {metrics}")
+                try:
+                    rid = vm.get('id', 'Unknown ID')
+                    name = vm.get('name', 'Unknown Name')
+                    metric_names = ['Percentage CPU', 'Available Memory Bytes']
+                    metrics = self.azure_monitor_client.get_metrics(rid, metric_names)
+                    self.logger.info(f"Thu thập chỉ số VM '{name}' (ID: {rid}): {metrics}")
+                except Exception as vm_error:
+                    self.logger.error(
+                        f"Lỗi khi thu thập chỉ số cho VM '{vm.get('name', 'Unknown Name')}' (ID: {vm.get('id', 'Unknown ID')}): {vm_error}\n"
+                        f"Stack Trace:\n{traceback.format_exc()}"
+                    )
         except Exception as e:
-            self.logger.error(f"Lỗi collect_azure_monitor_data: {e}\n{traceback.format_exc()}")
+            self.logger.critical(
+                f"Lỗi nghiêm trọng trong collect_azure_monitor_data: {e}\n"
+                f"Stack Trace:\n{traceback.format_exc()}"
+            )
 
     def optimize_resources(self):
         opt_intv = self.config.get("monitoring_parameters", {}).get("optimization_interval_seconds", 30)
