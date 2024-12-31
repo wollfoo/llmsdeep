@@ -127,21 +127,22 @@ class AzureMonitorClient(AzureBaseClient):
         super().__init__(logger)
         self.client = MetricsQueryClient(self.credential)
 
+
     def get_metrics(
         self,
         resource_id: str,
         metric_names: List[str],
-        timespan: Optional[str] = None,
+        timespan: Optional[Union[str, Tuple[datetime, datetime]]] = None,
         interval: Optional[str] = "PT1M",
         aggregations: Optional[List[str]] = None
     ) -> Dict[str, List[float]]:
         """
         Lấy metrics từ Azure Monitor cho một tài nguyên cụ thể.
-        
+
         Args:
             resource_id (str): ID của tài nguyên cần lấy metrics.
             metric_names (List[str]): Danh sách tên metrics cần lấy.
-            timespan (Optional[str]): Khoảng thời gian (ISO 8601).
+            timespan (Optional[Union[str, Tuple[datetime, datetime]]]): Khoảng thời gian.
             interval (Optional[str]): Khoảng thời gian giữa các điểm dữ liệu (ISO 8601).
             aggregations (Optional[List[str]]): Loại tổng hợp (ví dụ: ["Average", "Maximum"]).
 
@@ -153,23 +154,36 @@ class AzureMonitorClient(AzureBaseClient):
             return {}
 
         # Đảm bảo `timespan` có định dạng chính xác
-        if not timespan:
-            try:
+        try:
+            if timespan is None:
                 end_time = datetime.utcnow()
                 start_time = end_time - timedelta(hours=1)  # Mặc định là 1 giờ qua
-                timespan = f"{start_time.isoformat()}/{end_time.isoformat()}"
-            except Exception as e:
-                self.logger.error(f"Lỗi khi tính toán timespan: {e}")
-                return {}
+                timespan = (start_time, end_time)
+            elif isinstance(timespan, str):
+                # Chuyển đổi ISO8601 sang tuple nếu cần
+                start_time, end_time = map(datetime.fromisoformat, timespan.split("/"))
+                timespan = (start_time, end_time)
+            elif isinstance(timespan, tuple):
+                if not (isinstance(timespan[0], datetime) and isinstance(timespan[1], datetime)):
+                    raise ValueError("timespan tuple không hợp lệ. Phải chứa hai đối tượng datetime.")
+            else:
+                raise ValueError(f"timespan không hợp lệ: {timespan}")
 
+        except Exception as e:
+            self.logger.error(f"Lỗi khi xử lý timespan: {e}\nTimespan đầu vào: {timespan}")
+            return {}
+
+        # Đảm bảo `aggregations` có giá trị mặc định
         if aggregations is None:
             aggregations = ["Average"]
 
         try:
             self.logger.info(
                 f"Truy vấn metrics cho tài nguyên {resource_id} với các metrics {metric_names}, "
-                f"timespan: {timespan}, interval: {interval}, aggregations: {aggregations}."
+                f"timespan: ({timespan[0]}, {timespan[1]}), interval: {interval}, aggregations: {aggregations}."
             )
+
+            # Gọi API để lấy metrics
             response = self.client.query_resource(
                 resource_uri=resource_id,
                 metric_names=metric_names,
@@ -181,22 +195,23 @@ class AzureMonitorClient(AzureBaseClient):
             # Xử lý kết quả trả về
             metrics = {}
             for metric in response.metrics:
-                metrics[metric.name] = []
-                for ts in metric.timeseries:
-                    for dp in ts.data:
-                        value = dp.average or dp.total or dp.minimum or dp.maximum or dp.count or 0
-                        metrics[metric.name].append(value)
+                metrics[metric.name] = [
+                    dp.average or dp.total or dp.minimum or dp.maximum or dp.count or 0
+                    for ts in metric.timeseries for dp in ts.data
+                ]
 
-            self.logger.info(f"Đã lấy thành công metrics cho tài nguyên {resource_id}: {metrics}.")
+            self.logger.info(f"Đã lấy thành công metrics cho tài nguyên {resource_id}: {metrics}")
             return metrics
 
         except Exception as e:
             self.logger.error(
                 f"Lỗi khi lấy metrics từ Azure Monitor cho tài nguyên {resource_id}: {e}\n"
-                f"Đầu vào: timespan={timespan}, metrics={metric_names}, interval={interval}, aggregations={aggregations}\n"
+                f"Timespan: ({timespan[0]}, {timespan[1]}), Metrics: {metric_names}, Interval: {interval}, Aggregations: {aggregations}\n"
                 f"Stack Trace:\n{traceback.format_exc()}"
             )
             return {}
+
+
 
 class AzureSentinelClient(AzureBaseClient):
     """
@@ -270,37 +285,49 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             List[Dict[str, Any]]: Danh sách logs kết quả.
         """
         results = []
+
+        # Kiểm tra danh sách workspace IDs
         if not self.workspace_ids:
             self.logger.error("Không có Workspace ID để truy vấn logs.")
             return results
 
         try:
-            # Tính toán start_time và end_time
+            # Tính toán thời gian truy vấn
             end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=days)
 
-            # Kiểm tra định dạng timespan trước khi sử dụng
-            if not isinstance(start_time, datetime) or not isinstance(end_time, datetime):
+            # Xác thực `timespan`
+            if not (isinstance(start_time, datetime) and isinstance(end_time, datetime)):
                 raise ValueError(
                     f"timespan không hợp lệ: start_time={start_time}, end_time={end_time}. "
-                    "Cả hai phải là datetime."
+                    "Cả hai phải là kiểu datetime."
                 )
+            timespan = (start_time, end_time)
 
+            # Duyệt qua từng workspace và thực hiện truy vấn
             for workspace_id in self.workspace_ids:
                 try:
-                    # Thực hiện truy vấn
+                    self.logger.info(
+                        f"Truy vấn logs trên Workspace ID {workspace_id} với timespan: {timespan}"
+                    )
+
+                    # Gọi API để lấy logs
                     response = self.logs_client.query_workspace(
                         workspace_id=workspace_id,
                         query=query,
-                        timespan=(start_time, end_time)  # Tuple chính xác
+                        timespan=timespan
                     )
 
-                    # Xử lý kết quả trả về
+                    # Xử lý dữ liệu trả về
                     for table in response.tables:
-                        for row in table.rows:
-                            results.append(dict(zip(table.columns, row)))
+                        if table.rows:
+                            table_data = [dict(zip(table.columns, row)) for row in table.rows]
+                            results.extend(table_data)
 
-                    self.logger.info(f"Đã thực hiện truy vấn logs thành công trên Workspace ID: {workspace_id}.")
+                    self.logger.info(
+                        f"Đã truy vấn logs thành công trên Workspace ID {workspace_id}. "
+                        f"Đã lấy {len(results)} dòng dữ liệu."
+                    )
 
                 except Exception as workspace_error:
                     self.logger.error(
@@ -311,13 +338,19 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 
             return results
 
+        except ValueError as ve:
+            self.logger.error(
+                f"Lỗi xác thực thời gian trong query_logs: {ve}\n"
+                f"Query: {query}, Days: {days}"
+            )
         except Exception as e:
             self.logger.critical(
                 f"Lỗi nghiêm trọng khi thực hiện truy vấn logs: {e}\n"
-                f"Query: {query}, Days: {days}\n"
+                f"Query: {query}, Days: {days}, Timespan: ({start_time}, {end_time})\n"
                 f"Stack Trace:\n{traceback.format_exc()}"
             )
-            return []
+
+        return []
 
     def query_logs_with_time_range(
         self, query: str, start_time: datetime, end_time: datetime
