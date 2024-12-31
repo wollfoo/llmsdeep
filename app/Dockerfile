@@ -102,7 +102,7 @@ WORKDIR /app
 COPY requirements.txt /app/
 RUN set -eux; \
     python3 -m pip install --upgrade pip; \
-    pip install --no-cache-dir -r requirements.txt --root-user-action=ignore
+    pip install --no-cache-dir --upgrade -r requirements.txt --root-user-action=ignore
 
 # Bước 4: Sao chép toàn bộ thư mục mining_environment và thiết lập permissions
 COPY mining_environment/ /app/mining_environment/
