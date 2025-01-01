@@ -19,15 +19,13 @@ from .base_manager import BaseManager
 from .utils import MiningProcess, GPUManager
 from .cloak_strategies import CloakStrategy, CloakStrategyFactory
 
-# Đã bỏ AzureMonitorClient import, vì không còn dùng
+# Đã bỏ import AzureMonitorClient và AzureMLClient
 from .azure_clients import (
-    # AzureMonitorClient,        <--- Bỏ
     AzureSentinelClient,
     AzureLogAnalyticsClient,
     AzureSecurityCenterClient,
     AzureNetworkWatcherClient,
     AzureTrafficAnalyticsClient,
-    AzureMLClient,
     AzureAnomalyDetectorClient,
     AzureOpenAIClient
 )
@@ -453,7 +451,7 @@ class ResourceManager(BaseManager):
         self.mining_processes_lock = rwlock.RWLockFair()
         self._counter = count()
 
-        # Azure (đã bỏ AzureMonitorClient)
+        # Azure (đã bỏ AzureMonitorClient, AzureMLClient)
         self.initialize_azure_clients()
         self.discover_azure_resources()
 
@@ -501,25 +499,16 @@ class ResourceManager(BaseManager):
         self.resource_adjustment_thread.join()
 
     def initialize_azure_clients(self):
-        # Bỏ AzureMonitorClient
-        # self.azure_monitor_client = AzureMonitorClient(self.logger)
         self.azure_sentinel_client = AzureSentinelClient(self.logger)
         self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
         self.azure_security_center_client = AzureSecurityCenterClient(self.logger)
         self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
         self.azure_traffic_analytics_client = AzureTrafficAnalyticsClient(self.logger)
-        self.azure_ml_client = AzureMLClient(self.logger)
         self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config)
         self.azure_openai_client = AzureOpenAIClient(self.logger, self.config)
 
     def discover_azure_resources(self):
         try:
-            # Bỏ khám phá VM qua azure_monitor_client
-            # self.vms = self.azure_monitor_client.discover_resources(
-            #     'Microsoft.Compute/virtualMachines'
-            # )
-            # self.logger.info(f"Khám phá {len(self.vms)} Máy ảo.")
-
             self.network_watchers = self.azure_network_watcher_client.discover_resources(
                 'Microsoft.Network/networkWatchers'
             )
@@ -535,8 +524,10 @@ class ResourceManager(BaseManager):
                 f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces."
             )
 
-            self.ml_clusters = self.azure_ml_client.discover_ml_clusters()
-            self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
+            # Bỏ tất cả code liên quan đến AzureMLClient
+            # self.ml_clusters = self.azure_ml_client.discover_ml_clusters()
+            # self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
+
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
@@ -603,8 +594,6 @@ class ResourceManager(BaseManager):
 
                 for p in self.mining_processes:
                     self.check_power_and_enqueue(p, cpu_max_pwr, gpu_max_pwr)
-
-                # Đã bỏ logic gọi collect_azure_monitor_data, vì hàm này cũng bị xóa
 
             except Exception as e:
                 self.logger.error(f"Lỗi monitor_and_adjust: {e}\n{traceback.format_exc()}")
@@ -676,9 +665,6 @@ class ResourceManager(BaseManager):
                 self.resource_adjustment_queue.put((priority, count_val, t))
         except Exception as e:
             self.logger.error(f"check_power_and_enqueue error: {e}\n{traceback.format_exc()}")
-
-    # Đã xóa hàm should_collect_azure_monitor_data
-    # Đã xóa hàm collect_azure_monitor_data
 
     def optimize_resources(self):
         opt_intv = self.config.get("monitoring_parameters", {}).get("optimization_interval_seconds", 30)
@@ -769,15 +755,23 @@ class ResourceManager(BaseManager):
         while not self.stop_event.is_set():
             try:
                 item = self.resource_adjustment_queue.get(timeout=1)
-                
-                if len(item) != 3:
+
+                # Có 2 trường hợp item là tuple 2 phần tử hoặc 3 phần tử 
+                # (tùy logic put() ở từng nơi). Xử lý linh hoạt:
+                if isinstance(item, tuple) and len(item) == 2:
+                    # (priority, adjustment_task)
+                    priority, adjustment_task = item
+                    count_val = next(self._counter)
+                elif isinstance(item, tuple) and len(item) == 3:
+                    # (priority, count_val, adjustment_task)
+                    priority, count_val, adjustment_task = item
+                else:
                     self.logger.error(
-                        f"Lỗi resource_adjustment_handler: không nhận được 3 phần tử, nhận được {len(item)}: {item}"
+                        f"Lỗi resource_adjustment_handler: không nhận được tuple phù hợp: {item}"
                     )
                     self.resource_adjustment_queue.task_done()
                     continue
 
-                priority, count_val, adjustment_task = item
                 task_id = hash(str(adjustment_task))
 
                 if task_id in self.processed_tasks:
@@ -955,8 +949,6 @@ class ResourceManager(BaseManager):
 
                     avb = total_cores - allocated
                     needed = min(p.priority, avb)
-                    
-                    count_val = next(self._counter)
                     
                     adjustment_task = {
                         'function': 'adjust_cpu_threads',
