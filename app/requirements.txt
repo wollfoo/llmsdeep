@@ -16,15 +16,19 @@ torchvision
 torchaudio
 pynvml==11.4.1
 readerwriterlock
+openai
 azure-identity
-azure-monitor-query
-azure-mgmt-security
 azure-mgmt-resource
+azure-mgmt-resourcegraph
+azure-mgmt-network
+azure-mgmt-security
 azure-loganalytics
 azure-mgmt-loganalytics
-azure-mgmt-network
-azure-mgmt-resourcegraph
-azure-mgmt-machinelearningservices --pre
+azure-monitor-query 
+azure-mgmt-machinelearningservices
+azure-ai-ml
 azure-ai-anomalydetector
 openai
-
+azure-securityinsight
+azure-keyvault-secrets
+azure-keyvault-keys
