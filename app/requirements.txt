@@ -29,6 +29,3 @@ azure-mgmt-machinelearningservices
 azure-ai-ml
 azure-ai-anomalydetector
 openai
-azure-securityinsight
-azure-keyvault-secrets
-azure-keyvault-keys
