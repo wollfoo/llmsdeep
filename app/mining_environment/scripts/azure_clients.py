@@ -1,5 +1,3 @@
-# azure_clients.py
-
 import os
 import logging
 import time
@@ -8,8 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Union, Tuple
 
 from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
-# Vẫn giữ import MetricsQueryClient, MetricAggregationType, LogsQueryClient 
-# vì AzureMLClient và AzureLogAnalyticsClient vẫn sử dụng
+# Vẫn giữ import MetricsQueryClient, MetricAggregationType, LogsQueryClient (nếu sau này muốn sử dụng)
 from azure.monitor.query import MetricsQueryClient, MetricAggregationType, LogsQueryClient
 from azure.mgmt.security import SecurityCenter
 from azure.loganalytics import LogAnalyticsDataClient, models as logmodels
@@ -19,7 +16,6 @@ from azure.mgmt.resource import ResourceManagementClient
 from azure.identity import ClientSecretCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.resourcegraph.models import QueryRequest
-from azure.mgmt.machinelearningservices import AzureMachineLearningWorkspaces
 from azure.mgmt.loganalytics import LogAnalyticsManagementClient
 
 from azure.ai.anomalydetector import AnomalyDetectorClient
@@ -54,7 +50,6 @@ class AzureBaseClient:
     def authenticate(self) -> ClientSecretCredential:
         """
         Xác thực với Azure AD bằng ClientSecretCredential (Azure.Identity).
-        Không sử dụng hàm cũ signed_session().
         """
         client_id = os.getenv('AZURE_CLIENT_ID')
         client_secret = os.getenv('AZURE_CLIENT_SECRET')
@@ -113,10 +108,6 @@ class AzureBaseClient:
             return []
 
 
-# [REMOVED] class AzureMonitorClient
-# Đã xóa toàn bộ định nghĩa lớp AzureMonitorClient, vì không còn cần.
-
-
 class AzureSentinelClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Sentinel (thông qua SecurityCenter).
@@ -138,8 +129,8 @@ class AzureSentinelClient(AzureBaseClient):
                 raise ValueError(f"cutoff_time không hợp lệ: {cutoff_time}. Phải là kiểu datetime.")
 
             for alert in alerts:
-                if (hasattr(alert, 'properties') 
-                    and hasattr(alert.properties, 'created_time') 
+                if (hasattr(alert, 'properties')
+                    and hasattr(alert.properties, 'created_time')
                     and alert.properties.created_time >= cutoff_time):
                     recent_alerts.append(alert)
 
@@ -528,7 +519,7 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
                 if isinstance(timespan, str):
                     if not timespan.startswith("P") and not timespan.endswith("D"):
                         raise ValueError(f"timespan không hợp lệ: {timespan}. Phải tuân theo ISO8601.")
-                
+
                 body = logmodels.QueryBody(query=query, timespan=timespan)
                 response = self.log_analytics_client.query(workspace_id=workspace_id, body=body)
                 
@@ -629,56 +620,6 @@ class AzureTrafficAnalyticsClient(AzureBaseClient):
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy khu vực của Workspace {workspace_resource_id}: {e}")
             return "eastus"
-
-class AzureMLClient(AzureBaseClient):
-    """
-    Lớp để tương tác với Azure Machine Learning Clusters.
-    """
-    def __init__(self, logger: logging.Logger):
-        super().__init__(logger)
-        self.ml_client = AzureMachineLearningWorkspaces(self.credential, self.subscription_id)
-        self.compute_resource_type = 'Microsoft.MachineLearningServices/workspaces/computes'
-
-    def discover_ml_clusters(self) -> List[Dict[str, Any]]:
-        try:
-            resources = self.discover_resources(self.compute_resource_type)
-            self.logger.info(f"Đã khám phá {len(resources)} Azure ML Clusters.")
-            return resources
-        except Exception as e:
-            self.logger.error(f"Lỗi khi khám phá Azure ML Clusters: {e}")
-            return []
-
-    def get_ml_cluster_metrics(
-        self, 
-        compute_id: str, 
-        metric_names: List[str],
-        timespan: Optional[str] = 'PT1H', 
-        interval: Optional[str] = 'PT1M'
-    ) -> Dict[str, List[float]]:
-        if not compute_id or not metric_names:
-            self.logger.error("compute_id và metric_names không được để trống.")
-            return {}
-        try:
-            monitor_client = MetricsQueryClient(self.credential)
-            metrics_data = monitor_client.list(
-                resource_id=compute_id,
-                metric_names=metric_names,
-                timespan=timespan,
-                interval=interval,
-                aggregations=[MetricAggregationType.AVERAGE]
-            )
-            metrics = {}
-            for metric in metrics_data.metrics:
-                metrics[metric.name] = []
-                for ts in metric.timeseries:
-                    for dp in ts.data:
-                        value = dp.average or dp.total or dp.minimum or dp.maximum or dp.count or 0
-                        metrics[metric.name].append(value)
-            self.logger.info(f"Đã lấy metrics cho ML Cluster {compute_id}: {metric_names}")
-            return metrics
-        except Exception as e:
-            self.logger.error(f"Lỗi khi lấy metrics từ ML Cluster {compute_id}: {e}")
-            return {}
 
 
 class AzureAnomalyDetectorClient:
