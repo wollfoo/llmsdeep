@@ -30,6 +30,9 @@ from azure.ai.anomalydetector.models import (
 
 from openai import AzureOpenAI
 
+
+
+
 class AzureBaseClient:
     """
     Lớp cơ sở để xử lý xác thực và cấu hình chung cho các client Azure.
@@ -76,43 +79,32 @@ class AzureBaseClient:
     def discover_resources(self, resource_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Sử dụng Azure Resource Graph để tự động khám phá tài nguyên theo loại.
-        Nếu không truyền `resource_type`, hàm sẽ trả về tất cả tài nguyên.
-
-        Args:
-            resource_type (Optional[str]): Loại tài nguyên cần tìm kiếm, ví dụ: 
-                'Microsoft.Compute/virtualMachines'.
-                Nếu None, tìm kiếm tất cả tài nguyên.
-
-        Returns:
-            List[Dict[str, Any]]: Danh sách tài nguyên được tìm thấy.
         """
         try:
-            # Xây dựng truy vấn
             query = "Resources"
             if resource_type:
                 query += f" | where type =~ '{resource_type}'"
             query += " | project name, type, resourceGroup, id"
 
-            # Tạo yêu cầu truy vấn
             request = QueryRequest(
                 subscriptions=[self.subscription_id],
                 query=query
             )
 
-            # Gửi truy vấn
             response = self.resource_graph_client.resources(request)
-            self.logger.debug(f"Response Data: {response.data}")
+            if not isinstance(response.data, list):
+                self.logger.warning("Dữ liệu trả về không phải là danh sách.")
+                return []
 
-            # Xử lý kết quả trả về
-            resources = []
-            for res in response.data or []:  # Xử lý trường hợp response.data là None
-                resource_dict = {
+            resources = [
+                {
                     'id': res.get('id', 'N/A'),
                     'name': res.get('name', 'N/A'),
                     'type': res.get('type', 'N/A'),
-                    'resourceGroup': res.get('resourceGroup', 'N/A')
+                    'resourceGroup': res.get('resourceGroup', 'N/A'),
                 }
-                resources.append(resource_dict)
+                for res in response.data
+            ]
 
             self.logger.info(f"Đã khám phá {len(resources)} tài nguyên.")
             return resources
@@ -212,8 +204,6 @@ class AzureMonitorClient(AzureBaseClient):
             )
             return {}
 
-
-
 class AzureSentinelClient(AzureBaseClient):
     """
     Lớp để tương tác với Azure Sentinel (thông qua SecurityCenter).
@@ -252,6 +242,8 @@ class AzureLogAnalyticsClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
+        if not hasattr(self, "credential") or not self.credential:
+            raise AttributeError("Credential không được định nghĩa trong AzureBaseClient.")
         self.logs_client = LogsQueryClient(self.credential)
         self.workspace_ids = self.get_workspace_ids()
 
@@ -264,119 +256,73 @@ class AzureLogAnalyticsClient(AzureBaseClient):
         """
         try:
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
+            if not resources:
+                self.logger.warning("Không tìm thấy tài nguyên Log Analytics Workspace nào.")
+                return []
+
             workspace_ids = [res['id'] for res in resources if 'id' in res]
-            if workspace_ids:
-                self.logger.info(f"Đã tìm thấy {len(workspace_ids)} Log Analytics Workspaces.")
-            else:
-                self.logger.warning("Không tìm thấy Log Analytics Workspace nào.")
+            self.logger.info(f"Đã tìm thấy {len(workspace_ids)} Log Analytics Workspaces.")
             return workspace_ids
+
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy Workspace IDs: {e}")
             return []
 
-
     def query_logs(self, query: str, days: int = 7) -> List[Dict[str, Any]]:
         """
-        Thực hiện truy vấn log trên Azure Log Analytics.
-
-        Args:
-            query (str): Câu lệnh KQL để truy vấn logs.
-            days (int): Khoảng thời gian truy vấn (mặc định là 7 ngày).
-
-        Returns:
-            List[Dict[str, Any]]: Danh sách logs kết quả.
+        Truy vấn log từ các workspace Log Analytics.
         """
         results = []
+        if days < 0:
+            self.logger.error("Giá trị days phải >= 0.")
+            return results
 
-        # Kiểm tra workspace IDs
         if not self.workspace_ids:
             self.logger.error("Không có Workspace ID để truy vấn logs.")
             return results
 
-        # Kiểm tra query
         if not query:
             self.logger.error("Query không được để trống.")
             return results
 
         try:
-            # Tính toán thời gian truy vấn
             end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=days)
-
-            # Xác thực timespan
             timespan = (start_time, end_time)
-            if not (isinstance(start_time, datetime) and isinstance(end_time, datetime)):
-                raise ValueError(
-                    f"timespan không hợp lệ: start_time={start_time}, end_time={end_time}. "
-                    "Cả hai phải là kiểu datetime."
-                )
 
-            # Duyệt qua các workspace
             for workspace_id in self.workspace_ids:
                 try:
-                    self.logger.debug(
-                        f"Truy vấn logs trên Workspace ID {workspace_id} với timespan: {timespan}."
-                    )
-
-                    # Gọi API để lấy logs
                     response = self.logs_client.query_workspace(
                         workspace_id=workspace_id,
                         query=query,
                         timespan=timespan
                     )
 
-                    # Xử lý kết quả trả về
-                    workspace_results = []
-                    for table in response.tables:
-                        if table.rows:
-                            workspace_results.extend(
-                                [dict(zip(table.columns, row)) for row in table.rows]
-                            )
+                    if not isinstance(response.tables, list):
+                        self.logger.warning(f"Kết quả không hợp lệ từ Workspace ID {workspace_id}.")
+                        continue
+
+                    workspace_results = [
+                        dict(zip(table.columns, row))
+                        for table in response.tables if table.rows
+                        for row in table.rows
+                    ]
 
                     if workspace_results:
                         results.extend(workspace_results)
-                        self.logger.info(
-                            f"Đã truy vấn thành công trên Workspace ID {workspace_id}. "
-                            f"Lấy được {len(workspace_results)} dòng dữ liệu."
-                        )
+                        self.logger.info(f"Đã truy vấn thành công trên Workspace ID {workspace_id}.")
                     else:
-                        self.logger.warning(
-                            f"Không có dữ liệu trả về từ Workspace ID {workspace_id}."
-                        )
+                        self.logger.warning(f"Không có dữ liệu trả về từ Workspace ID {workspace_id}.")
 
-                except ResourceNotFoundError as not_found_error:
-                    self.logger.error(
-                        f"Workspace không tồn tại hoặc không có dữ liệu trên Workspace ID {workspace_id}: {not_found_error}\n"
-                        f"Query: {query}, Timespan: {timespan}\n"
-                    )
                 except HttpResponseError as http_error:
-                    self.logger.error(
-                        f"Lỗi HTTP trên Workspace ID {workspace_id}: {http_error}\n"
-                        f"Query: {query}, Timespan: {timespan}\n"
-                    )
+                    self.logger.error(f"Lỗi HTTP trên Workspace ID {workspace_id}: {http_error}")
                 except Exception as workspace_error:
-                    self.logger.error(
-                        f"Lỗi không xác định trên Workspace ID {workspace_id}: {workspace_error}\n"
-                        f"Query: {query}, Timespan: {timespan}\n"
-                        f"Stack Trace:\n{traceback.format_exc()}"
-                    )
+                    self.logger.error(f"Lỗi trên Workspace ID {workspace_id}: {workspace_error}")
 
             self.logger.info(f"Tổng cộng lấy được {len(results)} dòng dữ liệu từ tất cả các workspace.")
-            return results
-
-        except ValueError as ve:
-            self.logger.error(
-                f"Lỗi xác thực thời gian trong query_logs: {ve}\n"
-                f"Query: {query}, Days: {days}"
-            )
         except Exception as e:
-            self.logger.critical(
-                f"Lỗi nghiêm trọng khi thực hiện truy vấn logs: {e}\n"
-                f"Query: {query}, Days: {days}, Timespan: ({start_time}, {end_time})\n"
-                f"Stack Trace:\n{traceback.format_exc()}"
-            )
-
-        return []
+            self.logger.critical(f"Lỗi nghiêm trọng khi truy vấn logs: {e}", exc_info=True)
+        return results
 
     def query_logs_with_time_range(
         self, query: str, start_time: datetime, end_time: datetime
@@ -397,54 +343,32 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.error("Không có Workspace ID để truy vấn logs.")
             return results
 
-        try:
-            # Kiểm tra định dạng của start_time và end_time
-            if not isinstance(start_time, datetime) or not isinstance(end_time, datetime):
-                raise ValueError(
-                    f"start_time hoặc end_time không hợp lệ: start_time={start_time}, end_time={end_time}. "
-                    "Cả hai phải là kiểu datetime."
-                )
+        if start_time > end_time:
+            self.logger.error("start_time phải <= end_time.")
+            return results
 
+        try:
             for workspace_id in self.workspace_ids:
                 try:
-                    # Thực hiện truy vấn
                     response = self.logs_client.query_workspace(
                         workspace_id=workspace_id,
                         query=query,
-                        timespan=(start_time, end_time)  # Tuple định dạng đúng
+                        timespan=(start_time, end_time)
                     )
 
-                    # Xử lý kết quả trả về
                     for table in response.tables:
-                        for row in table.rows:
-                            results.append(dict(zip(table.columns, row)))
+                        results.extend(
+                            dict(zip(table.columns, row)) for row in table.rows
+                        )
 
-                    self.logger.info(
-                        f"Đã truy vấn logs thành công trên Workspace ID: {workspace_id} "
-                        f"với timespan từ {start_time.isoformat()} đến {end_time.isoformat()}."
-                    )
+                    self.logger.info(f"Đã truy vấn logs thành công trên Workspace ID: {workspace_id}")
 
                 except Exception as workspace_error:
-                    self.logger.error(
-                        f"Lỗi khi truy vấn logs trên Workspace ID {workspace_id}: {workspace_error}\n"
-                        f"Query: {query}, Timespan: ({start_time}, {end_time})\n"
-                        f"Stack Trace:\n{traceback.format_exc()}"
-                    )
+                    self.logger.error(f"Lỗi trên Workspace ID {workspace_id}: {workspace_error}")
 
-            return results
-
-        except ValueError as ve:
-            self.logger.error(
-                f"Lỗi xác thực thời gian trong query_logs_with_time_range: {ve}\n"
-                f"start_time={start_time}, end_time={end_time}"
-            )
         except Exception as e:
-            self.logger.critical(
-                f"Lỗi nghiêm trọng khi truy vấn logs với khoảng thời gian cụ thể: {e}\n"
-                f"Query: {query}, Timespan: ({start_time}, {end_time})\n"
-                f"Stack Trace:\n{traceback.format_exc()}"
-            )
-        return []
+            self.logger.critical(f"Lỗi nghiêm trọng khi truy vấn logs: {e}")
+        return results
 
 class AzureSecurityCenterClient(AzureBaseClient):
     """
