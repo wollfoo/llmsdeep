@@ -131,6 +131,10 @@ class GpuCloakStrategy(CloakStrategy):
 
     def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_initialized: bool):
         self.throttle_percentage = config.get('throttle_percentage', 20)
+        if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
+            logger.warning("Invalid throttle_percentage, defaulting to 20%.")
+            self.throttle_percentage = 20
+
         self.logger = logger
         self.gpu_initialized = gpu_initialized
 
@@ -178,20 +182,41 @@ class GpuCloakStrategy(CloakStrategy):
                     )
                     return {}
 
-                # Lấy giới hạn nguồn hiện tại (mW) và tính giới hạn mới (mW)
+                # Lấy handle của GPU
                 handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-                current_power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
-                new_power_limit_mw = int(
-                    current_power_limit_mw * (1 - self.throttle_percentage / 100)
-                )
 
-                # Chuyển sang W để ResourceManager hiểu đúng
-                new_power_limit_w = max(new_power_limit_mw // 1000, 1)
-                # Dùng max(..., 1) để tránh bị 0W, phòng trường hợp throttle quá cao.
+                # Lấy giới hạn power hiện tại và constraints
+                current_power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+                min_limit_mw, max_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+
+                # Chuyển sang W
+                current_power_limit_w = current_power_limit_mw / 1000
+                min_w = min_limit_mw / 1000
+                max_w = max_limit_mw / 1000
+
+                # Tính power limit mới theo throttle_percentage
+                desired_power_limit_w = current_power_limit_w * (1 - self.throttle_percentage / 100)
+
+                # Clamp power limit mới vào [min_w, max_w]
+                if desired_power_limit_w < min_w:
+                    self.logger.warning(
+                        f"Desired GPU power limit {desired_power_limit_w}W < min_limit {min_w}W. Clamping to {min_w}W."
+                    )
+                    new_power_limit_w = min_w
+                elif desired_power_limit_w > max_w:
+                    self.logger.warning(
+                        f"Desired GPU power limit {desired_power_limit_w}W > max_limit {max_w}W. Clamping to {max_w}W."
+                    )
+                    new_power_limit_w = max_w
+                else:
+                    new_power_limit_w = desired_power_limit_w
+
+                # Làm tròn giá trị power limit (nếu cần)
+                new_power_limit_w = int(round(new_power_limit_w))
 
                 adjustments = {
                     "gpu_index": gpu_index,
-                    "gpu_power_limit": new_power_limit_w  # Đơn vị W
+                    "gpu_power_limit": new_power_limit_w  # Đơn vị W, đã nằm trong khoảng hợp lệ
                 }
 
                 self.logger.info(

