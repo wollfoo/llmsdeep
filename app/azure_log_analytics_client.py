@@ -148,7 +148,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
     def parse_log_analytics_id(self, resource_id: str) -> Dict[str, str]:
         """
         Tách subscription_id, resource_group, workspace_name từ Resource ID.
-        VD chuỗi:
+        Ví dụ:
           /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/<ws>
         """
         pattern = (
@@ -271,33 +271,46 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             return results
 
         try:
-            for workspace_id in self.workspace_ids:
+            for resource_id in self.workspace_ids:
+                ws_details = self.get_workspace_details(resource_id)
+                if not ws_details:
+                    continue
+                customer_id = ws_details.customer_id
+                if not customer_id:
+                    self.logger.warning(f"Workspace {ws_details.name} không có customer_id.")
+                    continue
+
                 try:
                     response = self.logs_client.query_workspace(
-                        workspace_id=workspace_id,
+                        workspace_id=customer_id,
                         query=query,
                         timespan=(start_time, end_time)
                     )
+
                     for table in response.tables:
                         for row in table.rows:
                             row_dict = dict(zip(table.columns, row))
                             results.append(row_dict)
 
-                    self.logger.info(f"Đã truy vấn logs thành công trên Workspace ID: {workspace_id}")
+                    self.logger.info(
+                        f"Đã truy vấn logs thành công trên Workspace GUID={customer_id}"
+                    )
                 except Exception as workspace_error:
-                    self.logger.error(f"Lỗi trên Workspace ID {workspace_id}: {workspace_error}")
+                    self.logger.error(f"Lỗi trên Workspace GUID={customer_id}: {workspace_error}")
+
         except Exception as e:
             self.logger.critical(f"Lỗi nghiêm trọng khi truy vấn logs: {e}")
         return results
 
-    def query_aml_logs(self, days: int = 1) -> List[Dict[str, Any]]:
+    def query_aml_logs(self, days: int = 2) -> List[Dict[str, Any]]:
         """
-        Truy vấn các log AML (Azure Machine Learning) trong AzureDiagnostics.
+        Truy vấn tất cả Category (thay vì chỉ AML) trong AzureDiagnostics,
+        thời gian mặc định = 2 ngày.
         """
         kql = f"""
         AzureDiagnostics
         | where TimeGenerated > ago({days}d)
-        | where Category in ("AmlComputeClusterEvent", "AmlComputeJobEvent")
+        // Không lọc Category => lấy tất cả
         | project TimeGenerated, ResourceId, Category, OperationName
         | limit 50
         """
@@ -333,10 +346,9 @@ if __name__ == "__main__":
             if ws_info:
                 logger.info(f"Workspace {ws_info.name} có CustomerId (Workspace GUID): {ws_info.customer_id}")
 
-        # 4. Thử query logs (KQL đơn giản)
-        sample_query = "AzureActivity | limit 5"
-        results = azure_log_client.query_logs(sample_query, days=1)
-        logger.info(f"Kết quả query logs:\n{results}")
+        # 4. Thử query AML logs trong 2 ngày (tất cả Category)
+        aml_logs = azure_log_client.query_aml_logs(days=2)
+        logger.info(f"Kết quả AML logs (tất cả Category) trong 2 ngày:\n{aml_logs}")
 
     except Exception as e:
         logger.error(f"Runtime test gặp lỗi: {e}", exc_info=True)

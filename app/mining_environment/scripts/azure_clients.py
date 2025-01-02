@@ -4,6 +4,7 @@ import os
 import logging
 import time
 import traceback
+import re  # <-- thêm import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Union, Tuple
 
@@ -18,7 +19,10 @@ from azure.mgmt.resource import ResourceManagementClient
 from azure.identity import ClientSecretCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.resourcegraph.models import QueryRequest
+
+# Import để quản trị Log Analytics (mới thêm)
 from azure.mgmt.loganalytics import LogAnalyticsManagementClient
+from azure.mgmt.loganalytics.models import Workspace
 
 from azure.ai.anomalydetector import AnomalyDetectorClient
 from azure.core.credentials import AzureKeyCredential
@@ -151,15 +155,17 @@ class AzureLogAnalyticsClient(AzureBaseClient):
         super().__init__(logger)
         if not hasattr(self, "credential") or not self.credential:
             raise AttributeError("Credential không được định nghĩa trong AzureBaseClient.")
+
         self.logs_client = LogsQueryClient(self.credential)
+        # Thêm client để quản trị workspace, lấy customer_id
+        self.log_analytics_mgmt_client = LogAnalyticsManagementClient(self.credential, self.subscription_id)
+
+        # Thay vì gán cứng, ta vẫn discover resource ID, sau đó parse -> get customer_id
         self.workspace_ids = self.get_workspace_ids()
 
     def get_workspace_ids(self) -> List[str]:
         """
-        Lấy danh sách Workspace IDs từ tài nguyên Log Analytics.
-
-        Returns:
-            List[str]: Danh sách Workspace IDs.
+        Lấy danh sách Workspace IDs (thực chất là Resource ID) từ tài nguyên Log Analytics.
         """
         try:
             resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
@@ -175,16 +181,49 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi lấy Workspace IDs: {e}")
             return []
 
+    def parse_log_analytics_id(self, resource_id: str) -> Dict[str, str]:
+        """
+        Tách subscription_id, resource_group, workspace_name từ Resource ID.
+        Ví dụ: /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/<wsName>
+        """
+        pattern = (
+            r"^/subscriptions/(?P<sub>[^/]+)/resourceGroups/(?P<rg>[^/]+)/providers/"
+            r"Microsoft\.OperationalInsights/workspaces/(?P<ws>[^/]+)$"
+        )
+        match = re.match(pattern, resource_id.strip())
+        if not match:
+            raise ValueError(f"Resource ID không đúng format: {resource_id}")
+        return {
+            "subscription_id": match.group("sub"),
+            "resource_group": match.group("rg"),
+            "workspace_name": match.group("ws")
+        }
+
+    def get_workspace_details(self, resource_id: str) -> Optional[Workspace]:
+        """
+        Dựa vào Resource ID, parse ra (resource_group, workspace_name), 
+        rồi dùng LogAnalyticsManagementClient để lấy Workspace (có customer_id).
+        """
+        try:
+            parsed = self.parse_log_analytics_id(resource_id)
+            resource_group = parsed["resource_group"]
+            workspace_name = parsed["workspace_name"]
+
+            ws = self.log_analytics_mgmt_client.workspaces.get(
+                resource_group_name=resource_group,
+                workspace_name=workspace_name
+            )
+            self.logger.info(
+                f"Đã lấy thông tin workspace '{ws.name}' tại group '{resource_group}' (location={ws.location})."
+            )
+            return ws
+        except Exception as e:
+            self.logger.error(f"Không thể get workspace details cho resource_id={resource_id}: {e}")
+            return None
+
     def query_logs(self, query: str, days: int = 7) -> List[Dict[str, Any]]:
         """
-        Truy vấn log từ các workspace Log Analytics.
-
-        Args:
-            query (str): Câu lệnh KQL.
-            days (int): Lấy dữ liệu trong khoảng thời gian (ngày) gần nhất.
-
-        Returns:
-            List[Dict[str, Any]]: Danh sách kết quả truy vấn (các hàng dữ liệu).
+        Truy vấn log từ các workspace Log Analytics, dùng GUID (customer_id) thay vì Resource ID.
         """
         results = []
         if days < 0:
@@ -204,34 +243,48 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             start_time = end_time - timedelta(days=days)
             timespan = (start_time, end_time)
 
-            for workspace_id in self.workspace_ids:
+            for resource_id in self.workspace_ids:
+                # 1) Lấy thông tin workspace => customer_id
+                ws_details = self.get_workspace_details(resource_id)
+                if not ws_details:
+                    continue
+                customer_id = ws_details.customer_id
+                if not customer_id:
+                    self.logger.warning(f"Workspace {ws_details.name} không có customer_id (GUID).")
+                    continue
+
                 try:
                     response = self.logs_client.query_workspace(
-                        workspace_id=workspace_id,
+                        workspace_id=customer_id,  # Dùng GUID thay vì resource_id
                         query=query,
                         timespan=timespan
                     )
 
                     if not isinstance(response.tables, list):
-                        self.logger.warning(f"Kết quả không hợp lệ từ Workspace ID {workspace_id}.")
+                        self.logger.warning(f"Kết quả không hợp lệ từ Workspace GUID {customer_id}.")
                         continue
 
-                    workspace_results = [
-                        dict(zip(table.columns, row))
-                        for table in response.tables if table.rows
-                        for row in table.rows
-                    ]
+                    workspace_results = []
+                    for table in response.tables:
+                        if table.rows:
+                            for row in table.rows:
+                                row_dict = dict(zip(table.columns, row))
+                                workspace_results.append(row_dict)
 
                     if workspace_results:
                         results.extend(workspace_results)
-                        self.logger.info(f"Đã truy vấn thành công trên Workspace ID {workspace_id}.")
+                        self.logger.info(
+                            f"Đã truy vấn thành công trên workspace '{ws_details.name}' (GUID={customer_id})."
+                        )
                     else:
-                        self.logger.warning(f"Không có dữ liệu trả về từ Workspace ID {workspace_id}.")
+                        self.logger.warning(
+                            f"Không có dữ liệu trả về từ workspace '{ws_details.name}'."
+                        )
 
                 except HttpResponseError as http_error:
-                    self.logger.error(f"Lỗi HTTP trên Workspace ID {workspace_id}: {http_error}")
+                    self.logger.error(f"Lỗi HTTP trên Workspace GUID={customer_id}: {http_error}")
                 except Exception as workspace_error:
-                    self.logger.error(f"Lỗi trên Workspace ID {workspace_id}: {workspace_error}")
+                    self.logger.error(f"Lỗi trên Workspace GUID={customer_id}: {workspace_error}")
 
             self.logger.info(f"Tổng cộng lấy được {len(results)} dòng dữ liệu từ tất cả các workspace.")
         except Exception as e:
@@ -242,15 +295,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
         self, query: str, start_time: datetime, end_time: datetime
     ) -> List[Dict[str, Any]]:
         """
-        Truy vấn logs với khoảng thời gian cụ thể trên Azure Log Analytics.
-
-        Args:
-            query (str): Câu lệnh KQL để truy vấn logs.
-            start_time (datetime): Thời gian bắt đầu.
-            end_time (datetime): Thời gian kết thúc.
-
-        Returns:
-            List[Dict[str, Any]]: Danh sách logs kết quả.
+        Truy vấn logs với khoảng thời gian cụ thể trên Azure Log Analytics (dùng GUID).
         """
         results = []
         if not self.workspace_ids:
@@ -262,23 +307,32 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             return results
 
         try:
-            for workspace_id in self.workspace_ids:
+            for resource_id in self.workspace_ids:
+                ws_details = self.get_workspace_details(resource_id)
+                if not ws_details:
+                    continue
+                customer_id = ws_details.customer_id
+                if not customer_id:
+                    self.logger.warning(f"Workspace {ws_details.name} không có customer_id.")
+                    continue
+
                 try:
                     response = self.logs_client.query_workspace(
-                        workspace_id=workspace_id,
+                        workspace_id=customer_id,
                         query=query,
                         timespan=(start_time, end_time)
                     )
 
                     for table in response.tables:
-                        results.extend(
-                            dict(zip(table.columns, row)) for row in table.rows
-                        )
+                        for row in table.rows:
+                            row_dict = dict(zip(table.columns, row))
+                            results.append(row_dict)
 
-                    self.logger.info(f"Đã truy vấn logs thành công trên Workspace ID: {workspace_id}")
-
+                    self.logger.info(
+                        f"Đã truy vấn logs thành công trên Workspace GUID={customer_id}"
+                    )
                 except Exception as workspace_error:
-                    self.logger.error(f"Lỗi trên Workspace ID {workspace_id}: {workspace_error}")
+                    self.logger.error(f"Lỗi trên Workspace GUID={customer_id}: {workspace_error}")
 
         except Exception as e:
             self.logger.critical(f"Lỗi nghiêm trọng khi truy vấn logs: {e}")
@@ -286,24 +340,17 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 
     def query_aml_logs(self, days: int = 1) -> List[Dict[str, Any]]:
         """
-        Truy vấn các log AML (Azure Machine Learning) trong AzureDiagnostics.
-        Lọc các Category như AmlComputeClusterEvent, AmlComputeJobEvent.
-
-        Args:
-            days (int): Số ngày gần nhất muốn truy vấn (mặc định: 1).
-
-        Returns:
-            List[Dict[str, Any]]: Danh sách kết quả log AML (các hàng dữ liệu).
+        Truy vấn tất cả Category (thay vì chỉ AML).
         """
         kql = f"""
         AzureDiagnostics
         | where TimeGenerated > ago({days}d)
-        | where Category in ("AmlComputeClusterEvent", "AmlComputeJobEvent")
+        // BỎ PHẦN LỌC Category:
+        // | where Category in ("AmlComputeClusterEvent", "AmlComputeJobEvent")
         | project TimeGenerated, ResourceId, Category, OperationName
         | limit 50
         """
         return self.query_logs(kql, days=days)
-
 
 class AzureSecurityCenterClient(AzureBaseClient):
     """
