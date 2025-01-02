@@ -332,8 +332,6 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # (ĐÃ LƯỢC BỎ) - Phần gọi azure_security_center_client.get_secure_scores()
-
                         # 5) Kiểm tra flow logs từ Azure Network Watcher
                         for nsg in self.resource_manager.nsgs:
                             flow_logs = self.resource_manager.azure_network_watcher_client.get_flow_logs(
@@ -357,16 +355,32 @@ class AnomalyDetector(BaseManager):
 
                         # 6) Kiểm tra traffic từ Azure Traffic Analytics
                         traffic_data = self.resource_manager.azure_traffic_analytics_client.get_traffic_data()
+
+                        # Nếu dữ liệu trả về không rỗng, kiểm tra xem có bất thường hay không
                         if traffic_data:
-                            if (isinstance(traffic_data, list) and len(traffic_data) > 0) \
-                            or (isinstance(traffic_data, dict) and len(traffic_data.keys()) > 0):
-                                self.logger.warning(
-                                    f"Detected traffic anomalies từ Azure Traffic Analytics cho PID: {process.pid}"
-                                )
+                            anomalies_detected = False
+
+                            # Phân tích từng bảng dữ liệu
+                            for table in traffic_data:
+                                for row in table.rows:
+                                    row_dict = dict(zip(table.columns, row))
+                                    destination_ip = row_dict.get("DestinationIP_s")
+                                    destination_port = row_dict.get("DestinationPort")
+                                    connection_count = row_dict.get("ConnectionCount", 0)
+
+                                     # Nếu vượt ngưỡng 100 kết nối mỗi phút
+                                    if connection_count > 100:
+                                        self.logger.warning(
+                                            f"Detected traffic anomalies: {connection_count} connections/min to "
+                                            f"IP: {destination_ip}, Port: {destination_port} (PID: {process.pid})"
+                                        )
+                                        anomalies_detected = True
+                            # Nếu có bất thường, xử lý cloaking process
+                            if anomalies_detected:
                                 self.resource_manager.cloaking_request_queue.put(process)
                                 process.is_cloaked = True
                                 continue
-
+                        
             except Exception as e:
                 self.logger.error(f"Error in anomaly_detection: {e}")
 

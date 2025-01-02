@@ -42,17 +42,21 @@ RUN set -eux; \
         cpufrequtils iproute2 util-linux \
         pciutils openssl lm-sensors powerstat stress-ng bash \
         htop locales iptables powertop tzdata \
-        pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg \
+        pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg locales \
         libuv1 libudev1 libssl3; \
     rm -rf /var/lib/apt/lists/*
 
 
 # Thiết lập múi giờ và locale
 RUN set -eux; \
-    ln -fs /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime; \
-    dpkg-reconfigure -f noninteractive tzdata; \
-    locale-gen en_US.UTF-8; \
-    update-locale LANG=en_US.UTF-8
+    ln -fs /usr/share/zoneinfo/UTC /etc/localtime; \  
+    echo "UTC" > /etc/timezone; \                    
+    dpkg-reconfigure -f noninteractive tzdata; \     
+    apt-get update && apt-get install -y locales; \  
+    locale-gen en_US.UTF-8; \                         
+    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+    
 
 # Cài đặt Azure CLI
 RUN set -eux; \
