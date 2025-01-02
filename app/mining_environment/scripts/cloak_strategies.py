@@ -123,18 +123,21 @@ class CpuCloakStrategy(CloakStrategy):
         except Exception as e:
             self.logger.error(f"Unexpected error in set_cpu_affinity for PID={pid}: {e}")
 
-class GpuCloakStrategy(CloakStrategy):
+class GpuCloakStrategy:
     """
     Cloaking strategy for GPU.
     Throttles GPU power limit.
     """
+
     def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_initialized: bool):
         self.throttle_percentage = config.get('throttle_percentage', 20)
         self.logger = logger
         self.gpu_initialized = gpu_initialized
 
         # Log thông tin khởi tạo
-        self.logger.debug(f"GpuCloakStrategy initialized with throttle_percentage={self.throttle_percentage}")
+        self.logger.debug(
+            f"GpuCloakStrategy initialized with throttle_percentage={self.throttle_percentage}"
+        )
 
     def apply(self, process: Any) -> Dict[str, Any]:
         """
@@ -144,12 +147,12 @@ class GpuCloakStrategy(CloakStrategy):
             process (Any): Process object with attributes 'pid' and 'name'.
 
         Returns:
-            Dict[str, Any]: Adjustments including GPU index and new power limit.
+            Dict[str, Any]: Adjustments including GPU index and new power limit in W.
         """
         if not self.gpu_initialized:
             self.logger.warning(
-                f"GPU not initialized. Cannot prepare GPU throttling for process {getattr(process, 'name', 'unknown')} "
-                f"(PID: {getattr(process, 'pid', 'N/A')})."
+                f"GPU not initialized. Cannot prepare GPU throttling for process "
+                f"{getattr(process, 'name', 'unknown')} (PID: {getattr(process, 'pid', 'N/A')})."
             )
             return {}
 
@@ -175,19 +178,24 @@ class GpuCloakStrategy(CloakStrategy):
                     )
                     return {}
 
-                # Lấy giới hạn nguồn hiện tại và tính giới hạn mới
+                # Lấy giới hạn nguồn hiện tại (mW) và tính giới hạn mới (mW)
                 handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-                current_power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
-                new_power_limit = int(current_power_limit * (1 - self.throttle_percentage / 100))
+                current_power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+                new_power_limit_mw = int(
+                    current_power_limit_mw * (1 - self.throttle_percentage / 100)
+                )
+
+                # Chuyển sang W để ResourceManager hiểu đúng
+                new_power_limit_w = max(new_power_limit_mw // 1000, 1)
+                # Dùng max(..., 1) để tránh bị 0W, phòng trường hợp throttle quá cao.
 
                 adjustments = {
-                    'gpu_index': gpu_index,
-                    'gpu_power_limit': new_power_limit
+                    "gpu_index": gpu_index,
+                    "gpu_power_limit": new_power_limit_w  # Đơn vị W
                 }
 
-                # Log thông tin điều chỉnh
                 self.logger.info(
-                    f"Prepared GPU throttling adjustments: GPU {gpu_index} power limit={new_power_limit} "
+                    f"Prepared GPU throttling adjustments: GPU {gpu_index} power limit={new_power_limit_w}W "
                     f"({self.throttle_percentage}% reduction) for process {process.name} (PID: {process.pid})."
                 )
                 return adjustments
