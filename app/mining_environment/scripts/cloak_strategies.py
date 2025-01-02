@@ -123,7 +123,7 @@ class CpuCloakStrategy(CloakStrategy):
         except Exception as e:
             self.logger.error(f"Unexpected error in set_cpu_affinity for PID={pid}: {e}")
 
-class GpuCloakStrategy:
+class GpuCloakStrategy(CloakStrategy):
     """
     Cloaking strategy for GPU.
     Throttles GPU power limit.
