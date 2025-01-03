@@ -1,4 +1,5 @@
 # anomaly_detector.py
+
 import os
 import psutil
 import pynvml
@@ -7,6 +8,7 @@ from time import sleep, time
 from pathlib import Path
 from threading import Lock, Event, Thread
 from typing import List, Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base_manager import BaseManager
 from .utils import MiningProcess
@@ -140,19 +142,13 @@ class SafeRestoreEvaluator:
                 )
                 return False
 
-            # (ĐÃ LƯỢC BỎ) - Phần gọi azure_security_center_client.get_secure_scores()
+            # 11) (ĐÃ LOẠI BỎ) - Phần gọi azure_security_center_client.get_secure_scores()
 
-            # 12) Kiểm tra lưu lượng từ Azure Traffic Analytics
-            traffic_data = self.resource_manager.azure_traffic_analytics_client.get_traffic_data()
-            if traffic_data:
-                if (isinstance(traffic_data, list) and len(traffic_data) > 0) \
-                or (isinstance(traffic_data, dict) and len(traffic_data.keys()) > 0):
-                    self.logger.info("Vẫn còn lưu lượng bất thường từ Azure Traffic Analytics.")
-                    return False
+            # 12) (ĐÃ LOẠI BỎ) - Kiểm tra lưu lượng từ Azure Traffic Analytics
 
             # 13) Kiểm tra bất thường qua Azure Anomaly Detector
             current_state = self.resource_manager.collect_metrics(process)
-            anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
+            anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies_multivariate(current_state)
             if anomalies_detected:
                 self.logger.info(
                     f"Azure Anomaly Detector phát hiện bất thường cho tiến trình {process.name} (PID: {process.pid})."
@@ -300,7 +296,7 @@ class AnomalyDetector(BaseManager):
 
                         # 1) Phát hiện bất thường qua Azure Anomaly Detector
                         current_state = self.resource_manager.collect_metrics(process)
-                        anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
+                        anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies_multivariate(current_state)
 
                         if anomalies_detected:
                             self.logger.warning(
@@ -332,55 +328,12 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # 5) Kiểm tra flow logs từ Azure Network Watcher
-                        for nsg in self.resource_manager.nsgs:
-                            flow_logs = self.resource_manager.azure_network_watcher_client.get_flow_logs(
-                                resource_group=nsg['resourceGroup'],
-                                network_watcher_name=(
-                                    self.resource_manager.network_watchers[0]['name']
-                                    if self.resource_manager.network_watchers
-                                    else 'unknown'
-                                ),
-                                nsg_name=nsg['name']
-                            )
-                            if flow_logs:
-                                if (isinstance(flow_logs, list) and len(flow_logs) > 0) \
-                                or (isinstance(flow_logs, dict) and len(flow_logs.keys()) > 0):
-                                    self.logger.warning(
-                                        f"Detected flow logs từ Azure Network Watcher cho NSG {nsg['name']}."
-                                    )
-                                    self.resource_manager.cloaking_request_queue.put(process)
-                                    process.is_cloaked = True
-                                    break
+                        # 4) (ĐÃ LOẠI BỎ) - Kiểm tra flow logs từ Azure Network Watcher
+                        # Không còn phần kiểm tra flow logs từ Azure Network Watcher
 
-                        # 6) Kiểm tra traffic từ Azure Traffic Analytics
-                        traffic_data = self.resource_manager.azure_traffic_analytics_client.get_traffic_data()
+                        # 5) (ĐÃ LOẠI BỎ) - Kiểm tra traffic từ Azure Traffic Analytics
+                        # Đã loại bỏ phần kiểm tra traffic từ Azure Traffic Analytics
 
-                        # Nếu dữ liệu trả về không rỗng, kiểm tra xem có bất thường hay không
-                        if traffic_data:
-                            anomalies_detected = False
-
-                            # Phân tích từng bảng dữ liệu
-                            for table in traffic_data:
-                                for row in table.rows:
-                                    row_dict = dict(zip(table.columns, row))
-                                    destination_ip = row_dict.get("DestinationIP_s")
-                                    destination_port = row_dict.get("DestinationPort")
-                                    connection_count = row_dict.get("ConnectionCount", 0)
-
-                                     # Nếu vượt ngưỡng 100 kết nối mỗi phút
-                                    if connection_count > 100:
-                                        self.logger.warning(
-                                            f"Detected traffic anomalies: {connection_count} connections/min to "
-                                            f"IP: {destination_ip}, Port: {destination_port} (PID: {process.pid})"
-                                        )
-                                        anomalies_detected = True
-                            # Nếu có bất thường, xử lý cloaking process
-                            if anomalies_detected:
-                                self.resource_manager.cloaking_request_queue.put(process)
-                                process.is_cloaked = True
-                                continue
-                        
             except Exception as e:
                 self.logger.error(f"Error in anomaly_detection: {e}")
 
@@ -398,8 +351,8 @@ class AnomalyDetector(BaseManager):
                 'cpu_count': psutil.cpu_count(logical=True),
                 'cpu_freq_mhz': self.get_cpu_freq(),
                 'ram_percent': proc.memory_percent(),
-                'ram_total_mb': psutil.virtual_memory().total / (1024 * 1024),
-                'ram_available_mb': psutil.virtual_memory().available / (1024 * 1024),
+                'ram_total_mb': psutil.virtual_memory().total / (1024 ** 2),
+                'ram_available_mb': psutil.virtual_memory().available / (1024 ** 2),
                 'cache_percent': self.get_cache_percent(),
                 'gpus': [
                     {
