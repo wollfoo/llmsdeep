@@ -4,7 +4,8 @@ import os
 import logging
 import time
 import traceback
-import re  # <-- thêm import re
+import re  
+from typing import Dict, Any, List
 from datetime import datetime, timedelta, timezone
 
 from typing import List, Dict, Any, Optional, Union, Tuple
@@ -577,29 +578,43 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
         self.logger.debug(f"Endpoint: {self.endpoint}")
         self.logger.debug(f"API Key: {'***' if self.api_key else None}")
 
-
 class AzureOpenAIClient(AzureBaseClient):
+    """
+    Lớp tích hợp với Azure OpenAI, cho phép lấy gợi ý tối ưu hoá dựa trên dữ liệu trạng thái hệ thống.
+    Có cơ chế xử lý linh hoạt cho trường hợp metrics không phải dict, giúp tránh lỗi khi triển khai.
+    """
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
+        """
+        Khởi tạo AzureOpenAIClient.
+
+        Args:
+            logger (logging.Logger): Logger để ghi log.
+            config (Dict[str, Any]): Cấu hình chứa thông tin azure_openai (api_base, deployment_name, api_version).
+        """
         super().__init__(logger)
+
         self.endpoint = config.get("azure_openai", {}).get("api_base")
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.deployment_name = config.get("azure_openai", {}).get("deployment_name")
         self.api_version = config.get("azure_openai", {}).get("api_version", "2023-03-15-preview")
 
         if not self.api_key:
-            self.logger.error("API key cho Azure OpenAI không được thiết lập trong biến môi trường.")
+            self.logger.error("API key cho Azure OpenAI không được thiết lập trong biến môi trường (OPENAI_API_KEY).")
             raise ValueError("Thiếu thông tin API key trong biến môi trường OPENAI_API_KEY.")
 
         if not self.endpoint:
             self.logger.error("Endpoint cho Azure OpenAI không được thiết lập trong config.")
-            raise ValueError("Thiếu thông tin endpoint trong cấu hình.")
+            raise ValueError("Thiếu thông tin endpoint trong cấu hình azure_openai.api_base.")
 
         self.initialize_openai()
 
     def initialize_openai(self):
+        """
+        Khởi tạo kết nối Azure OpenAI.
+        """
         if not self.endpoint or not self.api_key or not self.deployment_name:
-            self.logger.error("Thiếu thông tin cấu hình cho Azure OpenAI.")
-            raise ValueError("Thiếu thông tin endpoint, api_key hoặc deployment_name.")
+            self.logger.error("Thiếu thông tin cấu hình cần thiết cho Azure OpenAI.")
+            raise ValueError("Cần có endpoint, api_key, và deployment_name cho Azure OpenAI.")
 
         try:
             self.client = AzureOpenAI(
@@ -614,13 +629,20 @@ class AzureOpenAIClient(AzureBaseClient):
 
     def get_optimization_suggestions(self, state_data: Dict[str, Any]) -> List[float]:
         """
-        Lấy các gợi ý tối ưu hóa từ Azure OpenAI dựa trên dữ liệu trạng thái hệ thống.
+        Gửi prompt lên Azure OpenAI để lấy gợi ý tối ưu hóa tài nguyên.
 
         Args:
-            state_data (Dict[str, Any]): Dữ liệu trạng thái hệ thống.
+            state_data (Dict[str, Any]): Dữ liệu trạng thái hệ thống, ví dụ:
+                {
+                  "1234": {"cpu_usage_percent": 50, "memory_usage_mb": 1024, ...},
+                  "2345": 99.9,  # Hoặc list, None, ...
+                  ...
+                }
 
         Returns:
-            List[float]: Danh sách các gợi ý tối ưu hóa dưới dạng số.
+            List[float]: Danh sách gợi ý tối ưu hóa dưới dạng float, ví dụ:
+                [cpu_threads, frequency, ram_allocation_mb, gpu_usage_percent, 
+                 disk_io_limit_mbps, network_bandwidth_limit_mbps, cache_limit_percent]
         """
         try:
             prompt = self.construct_prompt(state_data)
@@ -640,7 +662,7 @@ class AzureOpenAIClient(AzureBaseClient):
                     try:
                         suggestions.append(float(x.strip()))
                     except ValueError:
-                        self.logger.warning(f"Không parse được '{x.strip()}' thành float, bỏ qua.")
+                        self.logger.warning(f"Không thể chuyển '{x.strip()}' thành float, bỏ qua.")
             self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI: {suggestions}")
             return suggestions
         except Exception as e:
@@ -652,28 +674,63 @@ class AzureOpenAIClient(AzureBaseClient):
         Xây dựng prompt cho Azure OpenAI dựa trên dữ liệu trạng thái hệ thống.
 
         Args:
-            state_data (Dict[str, Any]): Dữ liệu trạng thái hệ thống.
+            state_data (Dict[str, Any]): Dữ liệu trạng thái hệ thống (PID -> metrics có thể là dict/list/float/None).
 
         Returns:
-            str: Prompt được xây dựng.
+            str: Prompt đã được tạo, mô tả chi tiết các thông số của từng PID.
         """
         prompt = "Dựa trên các thông số hệ thống sau đây, đề xuất các điều chỉnh tối ưu hóa tài nguyên:\n"
-        for pid, metrics in state_data.items():
-            if not isinstance(metrics, dict):
-                self.logger.warning(f"metrics cho PID {pid} không phải dict, bỏ qua.")
-                continue
+        for pid, raw_metrics in state_data.items():
+            # Chuẩn hoá metric (bắt buộc trả về dict) để tránh lỗi
+            metrics = self._normalize_metrics(pid, raw_metrics)
+
+            cpu_usage = metrics.get('cpu_usage_percent', 0)
+            mem_usage = metrics.get('memory_usage_mb', 0)
+            gpu_usage = metrics.get('gpu_usage_percent', 0)
+            disk_io   = metrics.get('disk_io_mbps', 0)
+            net_bw    = metrics.get('network_bandwidth_mbps', 0)
+            cache_lim = metrics.get('cache_limit_percent', 0)
 
             prompt += (
-                f"Tiến trình PID {pid}: CPU Usage: {metrics.get('cpu_usage_percent', 0)}%, "
-                f"RAM Usage: {metrics.get('memory_usage_mb', 0)}MB, "
-                f"GPU Usage: {metrics.get('gpu_usage_percent', 0)}%, "
-                f"Disk I/O: {metrics.get('disk_io_mbps', 0)}Mbps, "
-                f"Network Bandwidth: {metrics.get('network_bandwidth_mbps', 0)}Mbps, "
-                f"Cache Limit: {metrics.get('cache_limit_percent', 0)}%.\n"
+                f"Tiến trình PID {pid}: CPU Usage: {cpu_usage}%, "
+                f"RAM Usage: {mem_usage}MB, "
+                f"GPU Usage: {gpu_usage}%, "
+                f"Disk I/O: {disk_io}Mbps, "
+                f"Network Bandwidth: {net_bw}Mbps, "
+                f"Cache Limit: {cache_lim}%.\n"
             )
+
         prompt += (
             "Hãy trả về các hành động tối ưu hóa dưới dạng danh sách số, ví dụ: "
             "[cpu_threads, frequency, ram_allocation_mb, gpu_usage_percent, disk_io_limit_mbps, "
             "network_bandwidth_limit_mbps, cache_limit_percent]."
         )
         return prompt
+
+    def _normalize_metrics(self, pid: str, metrics: Any) -> Dict[str, Any]:
+        """
+        Chuẩn hoá dữ liệu metrics về dạng dict. 
+        Giúp ta tránh lỗi khi raw_metrics là list, float hoặc None.
+
+        Args:
+            pid (str): PID của tiến trình.
+            metrics (Any): Dữ liệu metrics, có thể là dict, list, float, hoặc None.
+
+        Returns:
+            Dict[str, Any]: Trả về dict thống nhất (có thể là rỗng nếu không hợp lệ).
+        """
+        if isinstance(metrics, dict):
+            # Là dict, sử dụng trực tiếp
+            return metrics
+        elif isinstance(metrics, list):
+            # Log cảnh báo và bọc list
+            self.logger.warning(f"PID {pid} => metrics là list, chuyển sang dict: {metrics}")
+            return {"list_values": metrics}
+        elif isinstance(metrics, (int, float)):
+            # Log cảnh báo và bọc giá trị số
+            self.logger.warning(f"PID {pid} => metrics là số ({metrics}), bọc vào dict.")
+            return {"value": metrics}
+        else:
+            # None hoặc kiểu không mong đợi
+            self.logger.error(f"PID {pid} => metrics không hợp lệ: {type(metrics)} | {metrics}")
+            return {}
