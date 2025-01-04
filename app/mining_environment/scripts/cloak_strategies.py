@@ -126,32 +126,63 @@ class CpuCloakStrategy(CloakStrategy):
 class GpuCloakStrategy(CloakStrategy):
     """
     Cloaking strategy for GPU.
-    Throttles GPU power limit.
+    Throttles GPU power limit, and optionally adjusts GPU clocks & usage.
     """
 
     def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_initialized: bool):
+        """
+        Args:
+            config (Dict[str, Any]): Configuration dictionary. 
+                Possible keys (bên cạnh throttle_percentage):
+                  - usage_threshold (int/float): Ngưỡng GPU usage (%) 
+                                                  mà tại đó mới kích hoạt throttling.
+                  - target_sm_clock (int): Xung nhịp SM (MHz) mong muốn.
+                  - target_mem_clock (int): Xung nhịp bộ nhớ (MHz) mong muốn.
+            logger (logging.Logger): Logger.
+            gpu_initialized (bool): Cờ cho biết NVML đã init hay chưa.
+        """
+        # Mức giảm power limit (phần trăm)
         self.throttle_percentage = config.get('throttle_percentage', 20)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
             logger.warning("Invalid throttle_percentage, defaulting to 20%.")
             self.throttle_percentage = 20
+
+        # Mở rộng: ngưỡng usage, nếu GPU usage < ngưỡng => bỏ qua
+        self.usage_threshold = config.get('usage_threshold', 80)
+        if not isinstance(self.usage_threshold, (int, float)) or not (0 <= self.usage_threshold <= 100):
+            logger.warning("Invalid usage_threshold, defaulting to 80%.")
+            self.usage_threshold = 80
+
+        # Mở rộng: thiết lập xung nhịp (nếu driver cho phép)
+        self.target_sm_clock = config.get('target_sm_clock', 1200)   # ví dụ 1200MHz
+        self.target_mem_clock = config.get('target_mem_clock', 800) # ví dụ 800MHz
 
         self.logger = logger
         self.gpu_initialized = gpu_initialized
 
         # Log thông tin khởi tạo
         self.logger.debug(
-            f"GpuCloakStrategy initialized with throttle_percentage={self.throttle_percentage}"
+            f"GpuCloakStrategy initialized with throttle_percentage={self.throttle_percentage}%, "
+            f"usage_threshold={self.usage_threshold}%, "
+            f"target_sm_clock={self.target_sm_clock}MHz, target_mem_clock={self.target_mem_clock}MHz."
         )
 
     def apply(self, process: Any) -> Dict[str, Any]:
         """
-        Apply GPU throttling to the given process.
+        Apply GPU throttling to the given process, potentially adjusting power limit
+        and GPU clocks, depending on usage_threshold.
 
         Args:
             process (Any): Process object with attributes 'pid' and 'name'.
 
         Returns:
-            Dict[str, Any]: Adjustments including GPU index and new power limit in W.
+            Dict[str, Any]: A dictionary of adjustments. E.g.:
+                {
+                    "gpu_index": int,
+                    "gpu_power_limit": int,  # in Watts
+                    "set_sm_clock": int,     # in MHz (optional)
+                    "set_mem_clock": int     # in MHz (optional)
+                }
         """
         if not self.gpu_initialized:
             self.logger.warning(
@@ -185,6 +216,26 @@ class GpuCloakStrategy(CloakStrategy):
                 # Lấy handle của GPU
                 handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
 
+                # Đọc GPU utilization
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                gpu_util = utilization.gpu  # % usage
+                mem_util = utilization.memory
+
+                self.logger.info(
+                    f"Current GPU usage for process {process.name} (PID: {process.pid}), "
+                    f"GPU index={gpu_index}: gpu={gpu_util}%, mem={mem_util}%"
+                )
+
+                # Nếu usage thấp hơn ngưỡng => chưa cần throttle
+                if gpu_util < self.usage_threshold:
+                    self.logger.info(
+                        f"GPU usage {gpu_util}% < usage_threshold={self.usage_threshold}%. "
+                        "Skip additional throttling."
+                    )
+                    return {}
+
+                # --- BẮT ĐẦU THROTTLE: Điều chỉnh power limit như cũ ---
+
                 # Lấy giới hạn power hiện tại và constraints
                 current_power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
                 min_limit_mw, max_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
@@ -194,7 +245,6 @@ class GpuCloakStrategy(CloakStrategy):
                 min_w = min_limit_mw / 1000
                 max_w = max_limit_mw / 1000
 
-                # Tính power limit mới theo throttle_percentage
                 desired_power_limit_w = current_power_limit_w * (1 - self.throttle_percentage / 100)
 
                 # Clamp power limit mới vào [min_w, max_w]
@@ -211,37 +261,61 @@ class GpuCloakStrategy(CloakStrategy):
                 else:
                     new_power_limit_w = desired_power_limit_w
 
-                # Làm tròn giá trị power limit (nếu cần)
+                # Làm tròn
                 new_power_limit_w = int(round(new_power_limit_w))
 
+                # --- MỞ RỘNG: Đặt xung nhịp GPU (SM, Memory) nếu driver cho phép ---
+                #   Tùy Tesla V100 driver, có thể cần root, hoặc GPU in P0 state, v.v.
+                try:
+                    pynvml.nvmlDeviceSetApplicationsClocks(
+                        handle, 
+                        self.target_mem_clock,  # MHz
+                        self.target_sm_clock    # MHz
+                    )
+                    self.logger.info(
+                        f"Set GPU clocks => SM={self.target_sm_clock}MHz, MEM={self.target_mem_clock}MHz "
+                        f"on GPU index={gpu_index} for PID={process.pid}"
+                    )
+                except pynvml.NVMLError as e:
+                    # Nếu driver/hardware không cho phép => log warning
+                    self.logger.warning(
+                        f"Failed to set GPU clocks for GPU index={gpu_index}, PID={process.pid}: {e}"
+                    )
+
+                # Tạo dict adjustments
                 adjustments = {
                     "gpu_index": gpu_index,
-                    "gpu_power_limit": new_power_limit_w  # Đơn vị W, đã nằm trong khoảng hợp lệ
+                    "gpu_power_limit": new_power_limit_w,  # in Watts
+                    # Bổ sung thêm 2 key thông báo xung
+                    "set_sm_clock": self.target_sm_clock,
+                    "set_mem_clock": self.target_mem_clock
                 }
 
                 self.logger.info(
-                    f"Prepared GPU throttling adjustments: GPU {gpu_index} power limit={new_power_limit_w}W "
-                    f"({self.throttle_percentage}% reduction) for process {process.name} (PID: {process.pid})."
+                    f"Prepared GPU throttling adjustments: GPU {gpu_index} => power limit={new_power_limit_w}W "
+                    f"({self.throttle_percentage}% reduction), SM clock={self.target_sm_clock}MHz, "
+                    f"Mem clock={self.target_mem_clock}MHz for process {process.name} (PID: {process.pid})."
                 )
                 return adjustments
+
             finally:
                 # Tắt NVML sau khi sử dụng
                 pynvml.nvmlShutdown()
 
         except pynvml.NVMLError as e:
             self.logger.error(
-                f"NVML error preparing GPU throttling for process {process.name} (PID: {process.pid}): {e}"
+                f"NVML error preparing GPU throttling for process {process.name} (PID={process.pid}): {e}"
             )
             raise
         except Exception as e:
             self.logger.error(
-                f"Unexpected error preparing GPU throttling for process {process.name} (PID: {process.pid}): {e}"
+                f"Unexpected error preparing GPU throttling for process {process.name} (PID={process.pid}): {e}"
             )
             raise
 
     def assign_gpu(self, pid: int, gpu_count: int) -> int:
         """
-        Assign a GPU to a process based on PID.
+        Assign a GPU to a process based on PID (default: pid % gpu_count).
 
         Args:
             pid (int): Process ID.
@@ -251,7 +325,6 @@ class GpuCloakStrategy(CloakStrategy):
             int: GPU index or -1 if assignment fails.
         """
         try:
-            # Gán GPU dựa trên PID modulo số lượng GPU
             return pid % gpu_count
         except Exception as e:
             self.logger.error(f"Error assigning GPU based on PID: {e}")
