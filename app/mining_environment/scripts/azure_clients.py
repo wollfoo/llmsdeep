@@ -32,9 +32,8 @@ from azure.core.credentials import AzureKeyCredential
 from azure.ai.anomalydetector.models import (
     TimeSeriesPoint,
     UnivariateDetectionOptions,
-    UnivariateEntireDetectionResult,
-    MultivariateDetectionOptions,
-    MultivariateEntireDetectionResult
+    UnivariateEntireDetectionResult
+    # Đã lược bỏ MultivariateDetectionOptions, MultivariateEntireDetectionResult
 )
 
 from openai import AzureOpenAI
@@ -413,6 +412,12 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             return None
 
 
+#
+# ===========================
+# AzureAnomalyDetectorClient
+# ===========================
+#
+
 class AzureAnomalyDetectorClient(AzureBaseClient):
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
         """
@@ -445,14 +450,33 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 
     def detect_anomalies(self, metric_data: Dict[str, Any]) -> Dict[str, List[str]]:
         """
-        Phát hiện bất thường trong dữ liệu metrics và trả về các PID cùng với các metrics có bất thường.
+        Phát hiện bất thường (đơn biến) trong dữ liệu metrics và trả về
+        các PID cùng với các metrics có bất thường.
 
         Args:
-            metric_data (Dict[str, Any]): Dữ liệu metrics cho từng tiến trình.
+            metric_data (Dict[str, Any]): Dữ liệu metrics cho từng tiến trình,
+                ví dụ:
+                {
+                    "1234": {
+                        "cpu_usage": [...],
+                        "gpu_usage": [...],
+                        "cache_usage": [...],
+                        "network_usage": [...]
+                    },
+                    "2345": {
+                        ...
+                    }
+                }
 
         Returns:
-            Dict[str, List[str]]: Dictionary với key là PID và value là danh sách các metrics có bất thường.
+            Dict[str, List[str]]:
+                {
+                    PID: [danh_sach_metric_bat_thuong],
+                    ...
+                }
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         anomalies = {}
         metrics_to_analyze = ['cpu_usage', 'gpu_usage', 'cache_usage', 'network_usage']
         min_data_points = 12
@@ -463,12 +487,12 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
             Phân tích một metric của một PID để phát hiện bất thường.
 
             Args:
-                pid (str): Mã tiến trình.
+                pid (str): Mã tiến trình (PID).
                 metric_name (str): Tên metric.
-                metric_values (List[float]): Danh sách giá trị metric theo thời gian.
+                metric_values (List[float]): Danh sách giá trị metric (theo thời gian).
 
             Returns:
-                Optional[str]: Tên metric nếu phát hiện bất thường, ngược lại None.
+                Optional[str]: Tên metric nếu phát hiện bất thường, None nếu không.
             """
             try:
                 if not isinstance(metric_values, list):
@@ -478,36 +502,46 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
                     self.logger.warning(f"Tiến trình PID {pid} có ít hơn {min_data_points} điểm dữ liệu cho {metric_name}, bỏ qua.")
                     return None
 
-                # Chuẩn bị series dữ liệu thời gian
+                # Tạo chuỗi dữ liệu (time series) dạng TimeSeriesPoint
                 series = []
                 current_time = datetime.utcnow()
+                total_data = len(metric_values)
+
                 for i, value in enumerate(metric_values):
                     if not isinstance(value, (int, float)):
-                        self.logger.warning(f"{metric_name}={value} cho PID {pid} không phải kiểu số, bỏ qua điểm dữ liệu.")
+                        self.logger.warning(f"{metric_name}={value} cho PID {pid} không phải kiểu số, bỏ qua.")
                         continue
-                    timestamp = current_time - timedelta(minutes=len(metric_values) - i)
+                    # Tính timestamp lùi dần theo chiều dài dữ liệu
+                    timestamp = current_time - timedelta(minutes=total_data - i)
                     series.append(TimeSeriesPoint(timestamp=timestamp.isoformat(), value=value))
 
+                # Tạo tùy chọn univariate detection
                 options = UnivariateDetectionOptions(
                     series=series,
                     granularity="minutely",
                     sensitivity=95
                 )
+
+                # Gọi API detect_univariate_entire_series
                 response: UnivariateEntireDetectionResult = self.client.detect_univariate_entire_series(options=options)
 
+                # Nếu có bất kỳ điểm nào is_anomaly=True
                 if any(response.is_anomaly):
                     self.logger.warning(f"Phát hiện bất thường trong PID {pid} cho {metric_name}.")
                     return metric_name
+
             except Exception as e:
                 self.logger.error(f"Lỗi khi phân tích PID {pid} cho {metric_name}: {e}")
             return None
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_pid_metric = {}
+
             for pid, metrics in metric_data.items():
                 if not isinstance(metrics, dict):
                     self.logger.warning(f"Metric data cho PID {pid} không phải dict, bỏ qua.")
                     continue
+
                 for metric_name in metrics_to_analyze:
                     metric_values = metrics.get(metric_name, [])
                     future = executor.submit(analyze_pid_metric, pid, metric_name, metric_values)
@@ -518,73 +552,12 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
                 try:
                     result = future.result()
                     if result:
+                        # Nếu phát hiện bất thường, lưu lại
                         if pid not in anomalies:
                             anomalies[pid] = []
                         anomalies[pid].append(result)
                 except Exception as e:
                     self.logger.error(f"Lỗi khi xử lý PID {pid} cho {metric_name}: {e}")
-
-        return anomalies
-
-    def detect_anomalies_multivariate(self, metric_data: Dict[str, Any]) -> Dict[str, str]:
-        """
-        Phát hiện bất thường đa biến trong dữ liệu metrics và trả về các PID có bất thường.
-
-        Args:
-            metric_data (Dict[str, Any]): Dữ liệu metrics cho từng tiến trình.
-
-        Returns:
-            Dict[str, str]: Dictionary với key là PID và value là thông tin bất thường.
-        """
-        anomalies = {}
-        metrics_to_analyze = ['cpu_usage', 'gpu_usage', 'cache_usage', 'network_usage']
-        min_data_points = 12
-
-        for pid, metrics in metric_data.items():
-            if not isinstance(metrics, dict):
-                self.logger.warning(f"Metric data cho PID {pid} không phải dict, bỏ qua.")
-                continue
-
-            metric_series = {}
-            valid_metrics = []
-
-            for metric_name in metrics_to_analyze:
-                metric_values = metrics.get(metric_name, [])
-                if not isinstance(metric_values, list):
-                    self.logger.warning(f"{metric_name} cho PID {pid} không phải list, bỏ qua.")
-                    continue
-                if len(metric_values) < min_data_points:
-                    self.logger.warning(f"Tiến trình PID {pid} có ít hơn {min_data_points} điểm dữ liệu cho {metric_name}, bỏ qua.")
-                    continue
-
-                series = []
-                current_time = datetime.utcnow()
-                for i, value in enumerate(metric_values):
-                    if not isinstance(value, (int, float)):
-                        self.logger.warning(f"{metric_name}={value} cho PID {pid} không phải kiểu số, bỏ qua điểm dữ liệu.")
-                        continue
-                    timestamp = current_time - timedelta(minutes=len(metric_values) - i)
-                    series.append(TimeSeriesPoint(timestamp=timestamp.isoformat(), value=value))
-                if series:
-                    metric_series[metric_name] = series
-                    valid_metrics.append(metric_name)
-
-            if not metric_series:
-                continue
-
-            try:
-                options = MultivariateDetectionOptions(
-                    series=metric_series,
-                    granularity="minutely",
-                    sensitivity=95
-                )
-                response: MultivariateEntireDetectionResult = self.client.detect_multivariate_entire_series(options=options)
-
-                if response.is_anomaly:
-                    self.logger.warning(f"Phát hiện bất thường đa biến trong PID {pid}.")
-                    anomalies[pid] = "Multivariate anomaly detected."
-            except Exception as e:
-                self.logger.error(f"Lỗi khi phân tích đa biến PID {pid}: {e}")
 
         return anomalies
 

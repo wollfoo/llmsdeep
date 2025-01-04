@@ -148,7 +148,7 @@ class SafeRestoreEvaluator:
 
             # 13) Kiểm tra bất thường qua Azure Anomaly Detector
             current_state = self.resource_manager.collect_metrics(process)
-            anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies_multivariate(current_state)
+            anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
             if anomalies_detected:
                 self.logger.info(
                     f"Azure Anomaly Detector phát hiện bất thường cho tiến trình {process.name} (PID: {process.pid})."
@@ -269,7 +269,7 @@ class AnomalyDetector(BaseManager):
         return priority
 
     def anomaly_detection(self):
-        detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 60)
+        detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 3600)
         cloak_activation_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
         last_detection_time = 0
 
@@ -296,8 +296,7 @@ class AnomalyDetector(BaseManager):
 
                         # 1) Phát hiện bất thường qua Azure Anomaly Detector
                         current_state = self.resource_manager.collect_metrics(process)
-                        anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies_multivariate(current_state)
-
+                        anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
                         if anomalies_detected:
                             self.logger.warning(
                                 f"Anomaly detected in process {process.name} (PID: {process.pid}) via Azure Anomaly Detector. "

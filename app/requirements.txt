@@ -17,6 +17,7 @@ torchaudio
 pynvml==11.4.1
 readerwriterlock
 openai
+pandas
 azure-identity
 azure-mgmt-resource
 azure-mgmt-resourcegraph
@@ -28,4 +29,3 @@ azure-monitor-query
 azure-mgmt-machinelearningservices
 azure-ai-ml
 azure-ai-anomalydetector
-openai
