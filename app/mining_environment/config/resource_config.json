@@ -100,12 +100,12 @@
     },
     
     "azure_anomaly_detector": {
-        "api_base": "https://eastus.api.cognitive.microsoft.com/",
+        "api_base": "https://eastus2.api.cognitive.microsoft.com/",
         "key_vault_url": "https://llmsskeyvault.vault.azure.net/"
     },
     
     "azure_openai": {
-        "api_base": "https://arm-openaiservice.openai.azure.com/",
+        "api_base": "https://interchangeczz.openai.azure.com/",
         "deployment_name": "gpt-4o",
         "api_version": "2024-08-01-preview"
     },
