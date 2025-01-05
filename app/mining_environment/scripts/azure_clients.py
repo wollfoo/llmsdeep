@@ -21,7 +21,6 @@ from azure.identity import ClientSecretCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.resourcegraph.models import QueryRequest
 
-
 from azure.identity import DefaultAzureCredential
 
 # Import để quản trị Log Analytics (mới thêm)
@@ -584,17 +583,6 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 # ===========================
 #
 
-import os
-import logging
-from typing import Dict, Any, List
-
-from openai import AzureOpenAI
-
-class AzureBaseClient:
-    def __init__(self, logger: logging.Logger):
-        self.logger = logger
-
-
 class AzureOpenAIClient(AzureBaseClient):
     """
     Lớp tích hợp với Azure OpenAI, cho phép lấy gợi ý tối ưu hoá tài nguyên
@@ -603,6 +591,7 @@ class AzureOpenAIClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
         super().__init__(logger)
+        
         self.endpoint = config.get("azure_openai", {}).get("api_base")
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.deployment_name = config.get("azure_openai", {}).get("deployment_name")
@@ -615,6 +604,9 @@ class AzureOpenAIClient(AzureBaseClient):
         if not self.endpoint:
             self.logger.error("Endpoint cho Azure OpenAI chưa được thiết lập trong config.")
             raise ValueError("Thiếu thông tin azure_openai.api_base.")
+        if not self.deployment_name:
+            self.logger.error("Deployment name cho Azure OpenAI chưa được thiết lập trong config.")
+            raise ValueError("Thiếu thông tin azure_openai.deployment_name.")
 
         self.initialize_openai()
 
@@ -633,125 +625,161 @@ class AzureOpenAIClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi cấu hình AzureOpenAI: {e}")
             raise e
 
-    def get_optimization_suggestions(self, state_data: Dict[str, Any]) -> List[float]:
+
+    def get_optimization_suggestions(
+        self,
+        server_config: Dict[str, Any],
+        optimization_goals: Dict[str, str],
+        state_data: Dict[str, Any]
+    ) -> List[float]:
         """
-        Gửi prompt lên Azure OpenAI để lấy gợi ý tối ưu tài nguyên.
-        Format output: [cpu_threads, frequency, ram_allocation_mb, gpu_usage_percent, net_bw_limit, cache_limit].
-        => frequency: Nếu OpenAI trả về GHz => convert sang MHz, nếu MHz => truyền thẳng.
+        Gửi prompt tới Azure OpenAI và nhận các gợi ý tối ưu hóa.
+
+        :param server_config: Thông tin cấu hình máy chủ (tĩnh).
+        :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
+        :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
+        :return: Danh sách 6 giá trị float đại diện cho cấu hình tối ưu.
         """
         try:
-            prompt = self.construct_prompt(state_data)
+            # Tạo prompt với cấu hình máy chủ và mục tiêu tối ưu hóa
+            prompt = self.construct_prompt(server_config, optimization_goals, state_data)
 
             # Log độ dài prompt
             prompt_len = len(prompt)
             self.logger.debug(f"Prompt length = {prompt_len} characters.")
 
+            # Định nghĩa các tin nhắn gửi tới mô hình
             messages = [
                 {
                     "role": "system",
                     "content": (
-                        "You are a system resource optimization expert. "
-                        "Output exactly one single line with 6 numeric values in CSV format. "
-                        "No explanation. If frequency is in GHz, just provide the numeric value (e.g. 2.5)."
+                        "You are an expert system resource optimizer. Based on the provided server configuration and optimization goals, "
+                        "please suggest an optimization plan to enhance system performance and resource utilization efficiently. "
+                        "Provide exactly one single line with 6 numerical values in CSV format representing the optimized configuration. "
+                        "Do not add any additional explanations. If the frequency is in GHz, only provide the numerical value (e.g., 2.5)."
                     )
                 },
                 {
                     "role": "user",
                     "content": (
                         f"{prompt}\n\n"
-                        "Please return EXACTLY 6 comma-separated floats:\n"
-                        "[cpu_threads, frequency (GHz or MHz?), ram_allocation_mb, gpu_usage_percent, "
-                        "network_bandwidth_limit_mbps, cache_limit_percent].\n"
-                        "No additional text, no new lines."
+                        "Please return EXACTLY 6 comma-separated floats in the following order:\n"
+                        "[cpu_threads, frequency (in GHz or MHz), ram_allocation_mb, gpu_usage_percent, network_bandwidth_limit_mbps, cache_limit_percent].\n"
+                        "Do not add any additional text or new lines."
                     )
                 }
             ]
 
-            # Tính độ dài tạm cho messages
+            # Log độ dài của từng tin nhắn
             user_msg_len = len(messages[1]["content"])
             system_msg_len = len(messages[0]["content"])
             self.logger.debug(f"System message length = {system_msg_len}, User message length = {user_msg_len}.")
 
+            # Gửi yêu cầu tới Azure OpenAI
             response = self.client.chat.completions.create(
-                model=self.deployment_name,
+                model=self.deployment_name,  # Sử dụng deployment_name làm model
                 messages=messages,
                 max_tokens=50,
                 temperature=0.0
             )
 
+            # Kiểm tra phản hồi có chứa choices hay không
+            if not response.choices:
+                self.logger.error("Phản hồi từ Azure OpenAI không chứa lựa chọn nào.")
+                return []
+
+            # Lấy và xử lý phản hồi
             suggestion_text = response.choices[0].message.content.strip()
 
-            # Log độ dài response
+            # Log độ dài phản hồi
             response_len = len(suggestion_text)
             self.logger.debug(f"Raw response length = {response_len} characters.")
 
-            # Xóa xuống dòng (nếu có)
+            # Xóa xuống dòng nếu có
             suggestion_text = suggestion_text.replace('\n', ' ')
 
+            # Chuyển đổi phản hồi thành danh sách float
             suggestions_raw = []
             for x in suggestion_text.split(','):
                 try:
                     suggestions_raw.append(float(x.strip()))
                 except ValueError:
-                    self.logger.warning(f"Không parse được '{x.strip()}' thành float, bỏ qua.")
+                    self.logger.warning(f"Không thể parse '{x.strip()}' thành float, bỏ qua.")
 
-            # Dừng ở 6 giá trị
+            # Giới hạn số lượng giá trị ở 6
             suggestions_raw = suggestions_raw[:6]
 
-            # Giả định format: [threads, freq, ram, gpu, net_bw, cache]
+            # Bổ sung giá trị 0.0 nếu thiếu
             if len(suggestions_raw) < 6:
                 self.logger.warning(f"Số lượng gợi ý nhận được ít hơn 6: {suggestions_raw}")
                 suggestions_raw += [0.0] * (6 - len(suggestions_raw))
 
-            # Bước parse frequency
-            freq = self._parse_frequency(suggestions_raw[1])
-            suggestions_raw[1] = freq
+            # Xử lý tần số
+            if len(suggestions_raw) >= 2:
+                suggestions_raw[1] = self._parse_frequency(suggestions_raw[1])
+            else:
+                self.logger.warning("Không đủ dữ liệu để xử lý tần số.")
+                suggestions_raw.append(0.0)  # Bổ sung giá trị mặc định
 
             self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI (đã parse freq): {suggestions_raw}")
             return suggestions_raw
 
         except Exception as e:
-            self.logger.error(f"Lỗi khi lấy gợi ý từ AzureOpenAI: {e}")
+            self.logger.error(f"Lỗi khi lấy gợi ý từ Azure OpenAI: {e}\n{traceback.format_exc()}")
             return []
+
+    def construct_prompt(
+        self,
+        server_config: Dict[str, Any],
+        optimization_goals: Dict[str, str],
+        state_data: Dict[str, Any]
+    ) -> str:
+        """
+        Xây dựng prompt dựa trên cấu hình máy chủ, mục tiêu tối ưu hóa và dữ liệu trạng thái hệ thống.
+
+        :param server_config: Thông tin cấu hình máy chủ (tĩnh).
+        :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
+        :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
+        :return: Chuỗi prompt đầy đủ.
+        """
+        prompt = f"Current Server: {server_config.get('server_type', 'Standard_NC12s_v3')} on Azure Cloud\n"
+        prompt += "Resource Limits:\n"
+        resource_limits = server_config.get('resource_limits', {})
+        prompt += f"- CPU Usage Limit: {resource_limits.get('cpu_usage_percent', 'N/A')}%\n"
+        prompt += f"- RAM Usage Limit: {resource_limits.get('ram_usage_percent', 'N/A')}%\n"
+        prompt += f"- GPU Usage Limit: {resource_limits.get('gpu_usage_percent', 'N/A')}%\n"
+        prompt += f"- Network Bandwidth Limit: {resource_limits.get('network_bandwidth_mbps', 'N/A')} Mbps\n"
+        prompt += f"- Storage Usage Limit: {resource_limits.get('storage_usage_percent', 'N/A')}%\n\n"
+
+        prompt += "Current System Parameters:\n"
+        for pid, metrics_info in state_data.items():
+            cpu = metrics_info.get('cpu_usage_percent', 0)
+            ram = metrics_info.get('memory_usage_mb', 0)
+            gpu = metrics_info.get('gpu_usage_percent', 0)
+            net_bw = metrics_info.get('network_bandwidth_mbps', 0)
+            cache = metrics_info.get('cache_limit_percent', 0)
+
+            prompt += (
+                f"PID {pid}: CPU={cpu}%, RAM={ram}MB, GPU={gpu}%, Net={net_bw}Mbps, Cache={cache}%.\n"
+            )
+        prompt += "\n"
+
+        prompt += "Optimization Goals:\n"
+        for key, description in optimization_goals.items():
+            prompt += f"- **{key}**: {description}\n"
+
+        return prompt
 
     def _parse_frequency(self, freq_val: float) -> float:
         """
-        Giả định:
-         - Nếu freq_val < 100 => coi như GHZ => convert sang MHz (freq_val*1000)
-         - Nếu freq_val >= 100 => coi như MHz => không đổi
+        Chuyển đổi tần số từ GHz sang MHz nếu cần thiết.
+
+        :param freq_val: Giá trị tần số.
+        :return: Giá trị tần số đã chuyển đổi.
         """
         if freq_val < 100:
             mhz_val = freq_val * 1000.0
-            self.logger.debug(f"Convert {freq_val} GHz => {mhz_val} MHz")
+            self.logger.debug(f"Converting {freq_val} GHz to {mhz_val} MHz")
             return mhz_val
         else:
             return freq_val
-
-    def construct_prompt(self, state_data: Dict[str, Any]) -> str:
-        prompt = "Based on these system parameters, propose an optimization plan:\n"
-        for pid, metrics_info in state_data.items():
-            m = self._normalize_metrics(pid, metrics_info)
-            cpu_usage = m.get('cpu_usage_percent', 0)
-            mem_usage = m.get('memory_usage_mb', 0)
-            gpu_usage = m.get('gpu_usage_percent', 0)
-            net_bw    = m.get('network_bandwidth_mbps', 0)
-            cache_lim = m.get('cache_limit_percent', 0)
-
-            prompt += (
-                f"PID {pid}: CPU={cpu_usage}%, RAM={mem_usage}MB, "
-                f"GPU={gpu_usage}%, Net={net_bw}Mbps, Cache={cache_lim}%.\n"
-            )
-        return prompt
-
-    def _normalize_metrics(self, pid: str, raw_data: Any) -> Dict[str, Any]:
-        if isinstance(raw_data, dict):
-            return raw_data
-        elif isinstance(raw_data, list):
-            self.logger.debug(f"PID {pid} => metrics là list => bọc vào dict: {raw_data}")
-            return {"list_values": raw_data}
-        elif isinstance(raw_data, (float, int)):
-            self.logger.debug(f"PID {pid} => metrics là số => bọc vào dict: {raw_data}")
-            return {"value": raw_data}
-        else:
-            self.logger.error(f"PID {pid} => metrics không hợp lệ: {type(raw_data)} | {raw_data}")
-            return {}

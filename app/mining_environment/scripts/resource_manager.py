@@ -684,7 +684,24 @@ class ResourceManager(BaseManager):
                 with self.mining_processes_lock.gen_rlock():
                     for proc in self.mining_processes:
                         current_state = self.collect_metrics(proc)
-                        openai_suggestions = self.azure_openai_client.get_optimization_suggestions(current_state)
+                        
+                        # Truy xuất server_config và optimization_goals từ config
+                        server_config = self.config.get("server_config", {})
+                        if not server_config:
+                            self.logger.error("Thiếu 'server_config' trong config.")
+                            continue
+
+                        optimization_goals = self.config.get("optimization_goals", {})
+                        if not optimization_goals:
+                            self.logger.error("Thiếu 'optimization_goals' trong config.")
+                            continue
+
+                        openai_suggestions = self.azure_openai_client.get_optimization_suggestions(
+                            server_config,
+                            optimization_goals,
+                            current_state
+                        )
+                        
                         if not openai_suggestions:
                             self.logger.warning(
                                 f"Không có gợi ý OpenAI cho {proc.name} (PID={proc.pid})."
@@ -913,18 +930,21 @@ class ResourceManager(BaseManager):
             net_bw_limit_mbps = float(action[next_idx + 1])
             cache_limit_percent = float(action[next_idx + 2])
 
+            # Điều chỉnh CPU Threads
             t1 = {
                 'function': 'adjust_cpu_threads',
                 'args': (process.pid, cpu_threads, process.name)
             }
             self.resource_adjustment_queue.put((3, next(self._counter), t1))
 
+            # Điều chỉnh RAM Allocation
             t2 = {
                 'function': 'adjust_ram_allocation',
                 'args': (process.pid, ram_alloc, process.name)
             }
             self.resource_adjustment_queue.put((3, next(self._counter), t2))
 
+            # Điều chỉnh GPU Usage
             if gpu_usage_percent:
                 t3 = {
                     'function': 'adjust_gpu_usage',
@@ -936,22 +956,33 @@ class ResourceManager(BaseManager):
                     f"Chưa có GPU usage => bỏ qua GPU cho PID={process.pid}"
                 )
 
+            # Điều chỉnh Disk I/O Limit
             t4 = {
                 'function': 'adjust_disk_io_limit',
                 'args': (process, disk_io_limit_mbps)
             }
             self.resource_adjustment_queue.put((3, next(self._counter), t4))
 
+            # Điều chỉnh Network Bandwidth Limit
             t5 = {
                 'function': 'adjust_network_bandwidth',
                 'args': (process, net_bw_limit_mbps)
             }
             self.resource_adjustment_queue.put((3, next(self._counter), t5))
 
-            self.shared_resource_manager.apply_cloak_strategy('cache', process)
+            # Điều chỉnh Cache Limit
+            t6 = {
+                'function': 'adjust_cache_limit',
+                'args': (process.pid, cache_limit_percent, process.name)
+            }
+            self.resource_adjustment_queue.put((3, next(self._counter), t6))
 
             self.logger.info(
                 f"Đã áp dụng các điều chỉnh tài nguyên từ OpenAI cho {process.name} (PID={process.pid})."
+            )
+        except IndexError as ie:
+            self.logger.error(
+                f"Thiếu phần tử trong 'action' khi áp dụng các điều chỉnh: {ie}\n{traceback.format_exc()}"
             )
         except Exception as e:
             self.logger.error(

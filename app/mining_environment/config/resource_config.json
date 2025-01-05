@@ -109,7 +109,29 @@
         "deployment_name": "gpt-4o",
         "api_version": "2024-08-01-preview"
     },
+
+    "server_config": {
+        "server_type": "Standard_NC12s_v3",
+        "os_name": "Ubuntu",
+        "os_version": "22.04 LTS",
+        "resource_limits": {
+            "cpu_usage_percent": 90.0,
+            "ram_usage_percent": 90.0,
+            "gpu_usage_percent": 90.0,
+            "network_bandwidth_mbps": 500.0,
+            "storage_usage_percent": 90.0
+        }
+    },
     
+    "optimization_goals": {
+        "cpu_threads": "Optimize to balance CPU load.",
+        "frequency": "Maximize performance while reducing energy consumption.",
+        "ram_allocation_mb": "Ensure sufficient RAM allocation without waste.",
+        "gpu_usage_percent": "Balance GPU usage to avoid bottlenecks.",
+        "network_bandwidth_limit_mbps": "Optimize network bandwidth to efficiently transmit data.",
+        "cache_limit_percent": "Efficiently allocate cache to improve data retrieval speed."
+    },
+
     "cloak_strategies": {
         "cpu": {
             "strategy_name": "cpu_cloaking",

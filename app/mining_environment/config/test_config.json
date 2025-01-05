@@ -6,8 +6,8 @@
         "GPU": "bash"
     },
     "process_priority_map": {
-        "ml-inference-en": 2,
-        "inference-cuda": 3
+        "python3": 2,
+        "bash": 3
     },
     "network_interface": "eth0",
     
@@ -27,7 +27,6 @@
             "max_allocation_mb": 131072
         },
         "gpu": {
- 
             "max_usage_percent": [90]
         },
         "disk_io": {
@@ -100,16 +99,38 @@
     },
     
     "azure_anomaly_detector": {
-        "api_base": "https://eastus.api.cognitive.microsoft.com/",
+        "api_base": "https://eastus2.api.cognitive.microsoft.com/",
         "key_vault_url": "https://llmsskeyvault.vault.azure.net/"
     },
     
     "azure_openai": {
-        "api_base": "https://arm-openaiservice.openai.azure.com/",
+        "api_base": "https://interchangeczz.openai.azure.com/",
         "deployment_name": "gpt-4o",
         "api_version": "2024-08-01-preview"
     },
     
+    "server_config": {
+        "server_type": "Standard_NC12s_v3",
+        "os_name": "Ubuntu",
+        "os_version": "22.04 LTS",
+        "resource_limits": {
+            "cpu_usage_percent": 90.0,
+            "ram_usage_percent": 90.0,
+            "gpu_usage_percent": 90.0,
+            "network_bandwidth_mbps": 500.0,
+            "storage_usage_percent": 90.0
+        }
+    },
+    
+    "optimization_goals": {
+        "cpu_threads": "Optimize to balance CPU load.",
+        "frequency": "Maximize performance while reducing energy consumption.",
+        "ram_allocation_mb": "Ensure sufficient RAM allocation without waste.",
+        "gpu_usage_percent": "Balance GPU usage to avoid bottlenecks.",
+        "network_bandwidth_limit_mbps": "Optimize network bandwidth to efficiently transmit data.",
+        "cache_limit_percent": "Efficiently allocate cache to improve data retrieval speed."
+    },
+
     "cloak_strategies": {
         "cpu": {
             "strategy_name": "cpu_cloaking",

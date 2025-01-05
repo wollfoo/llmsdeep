@@ -5,6 +5,7 @@ from mining_environment.scripts.resource_manager import ResourceManager
 from mining_environment.scripts.azure_clients import AzureOpenAIClient
 
 def main():
+    # Thiết lập logger
     logger = logging.getLogger("runtime_test")
     logger.setLevel(logging.DEBUG)
     ch = logging.StreamHandler()
@@ -42,6 +43,9 @@ def main():
 
     # 4) Thu thập metrics
     all_metrics = resource_manager.collect_all_metrics()
+    if all_metrics is None:
+        logger.error("collect_all_metrics() returned None.")
+        all_metrics = {}
     logger.info(f"Dữ liệu metrics thu thập:\n{all_metrics}")
 
     # 5) Khởi tạo AzureOpenAIClient (nếu có API key)
@@ -57,10 +61,27 @@ def main():
         return
 
     # 6) Gọi get_optimization_suggestions
-    suggestions = openai_client.get_optimization_suggestions(all_metrics)
-    logger.info("=== Kết quả gợi ý tối ưu từ AzureOpenAIClient ===")
-    logger.info(f"Số phần tử gợi ý: {len(suggestions)}")
-    logger.info(f"Danh sách gợi ý: {suggestions}")
+    try:
+        # Truy xuất server_config từ config
+        server_config = resource_manager_config.get("server_config", {})
+        if not server_config:
+            logger.error("Thiếu 'server_config' trong config.")
+            return
+
+        # Truy xuất optimization_goals từ config
+        optimization_goals = resource_manager_config.get("optimization_goals", {})
+        if not optimization_goals:
+            logger.error("Thiếu 'optimization_goals' trong config.")
+            return
+
+        # Gọi phương thức với đầy đủ đối số
+        suggestions = openai_client.get_optimization_suggestions(server_config, optimization_goals, all_metrics)
+        logger.info("=== Kết quả gợi ý tối ưu từ AzureOpenAIClient ===")
+        logger.info(f"Số phần tử gợi ý: {len(suggestions)}")
+        logger.info(f"Danh sách gợi ý: {suggestions}")
+    except Exception as e:
+        logger.error(f"Lỗi khi gọi get_optimization_suggestions: {e}")
+        return
 
     logger.info("=== KẾT THÚC KIỂM THỬ RUNTIME ===")
 
