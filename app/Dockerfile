@@ -43,7 +43,7 @@ RUN set -eux; \
         pciutils openssl lm-sensors powerstat stress-ng bash \
         htop locales iptables powertop tzdata \
         pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg locales \
-        libuv1 libudev1 libssl3; \
+        libuv1 libudev1 libssl3 cgroup-tools; \
     rm -rf /var/lib/apt/lists/*
     
 
