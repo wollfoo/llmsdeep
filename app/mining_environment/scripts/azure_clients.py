@@ -753,11 +753,22 @@ class AzureOpenAIClient(AzureBaseClient):
 
         prompt += "Current System Parameters:\n"
         for pid, metrics_info in state_data.items():
-            cpu = metrics_info.get('cpu_usage_percent', 0)
-            ram = metrics_info.get('memory_usage_mb', 0)
-            gpu = metrics_info.get('gpu_usage_percent', 0)
-            net_bw = metrics_info.get('network_bandwidth_mbps', 0)
-            cache = metrics_info.get('cache_limit_percent', 0)
+            if not isinstance(metrics_info, dict):
+                self.logger.error(
+                    f"Metrics_info cho PID {pid} không phải là dict. Dữ liệu nhận được: {metrics_info}"
+                )
+                # Gán các giá trị mặc định hoặc bỏ qua PID này
+                cpu = 0
+                ram = 0
+                gpu = 0
+                net_bw = 0
+                cache = 0
+            else:
+                cpu = metrics_info.get('cpu_usage_percent', 0)
+                ram = metrics_info.get('memory_usage_mb', 0)
+                gpu = metrics_info.get('gpu_usage_percent', 0)
+                net_bw = metrics_info.get('network_bandwidth_mbps', 0)
+                cache = metrics_info.get('cache_limit_percent', 0)
 
             prompt += (
                 f"PID {pid}: CPU={cpu}%, RAM={ram}MB, GPU={gpu}%, Net={net_bw}Mbps, Cache={cache}%.\n"

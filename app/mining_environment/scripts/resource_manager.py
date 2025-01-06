@@ -696,10 +696,17 @@ class ResourceManager(BaseManager):
                             self.logger.error("Thiếu 'optimization_goals' trong config.")
                             continue
 
+                        # Kiểm tra kiểu dữ liệu của current_state
+                        if not isinstance(current_state, dict):
+                            self.logger.error(
+                                f"current_state cho PID={proc.pid} không phải là dict. Dữ liệu nhận được: {current_state}"
+                            )
+                            continue
+
                         openai_suggestions = self.azure_openai_client.get_optimization_suggestions(
                             server_config,
                             optimization_goals,
-                            current_state
+                            {str(proc.pid): current_state}  # Đảm bảo định dạng đúng
                         )
                         
                         if not openai_suggestions:
@@ -731,15 +738,14 @@ class ResourceManager(BaseManager):
             else:
                 gpu_pct = 0
             disk_mbps = temperature_monitor.get_current_disk_io_limit(process.pid)
-
             net_bw = (self.config.get('resource_allocation', {})
-                             .get('network', {})
-                             .get('bandwidth_limit_mbps', 100))
+                            .get('network', {})
+                            .get('bandwidth_limit_mbps', 100))
             cache_l = (self.config.get('resource_allocation', {})
-                             .get('cache', {})
-                             .get('limit_percent', 50))
+                            .get('cache', {})
+                            .get('limit_percent', 50))
 
-            return {
+            metrics = {
                 'cpu_usage_percent': cpu_pct,
                 'memory_usage_mb': mem_mb,
                 'gpu_usage_percent': gpu_pct,
@@ -747,6 +753,11 @@ class ResourceManager(BaseManager):
                 'network_bandwidth_mbps': net_bw,
                 'cache_limit_percent': cache_l
             }
+
+            # Log các giá trị metrics thu được
+            self.logger.debug(f"Metrics for PID {process.pid}: {metrics}")
+
+            return metrics
         except Exception as e:
             self.logger.error(
                 f"Lỗi collect_metrics cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
@@ -763,6 +774,11 @@ class ResourceManager(BaseManager):
             with self.mining_processes_lock.gen_rlock():
                 for proc in self.mining_processes:
                     metrics = self.collect_metrics(proc)
+                    if not isinstance(metrics, dict):
+                        self.logger.error(
+                            f"Metrics cho PID={proc.pid} không phải là dict. Dữ liệu nhận được: {metrics}"
+                        )
+                        continue  # Bỏ qua PID này
                     metrics_data[str(proc.pid)] = metrics
             self.logger.debug(f"Collected metrics data: {metrics_data}")
         except Exception as e:
