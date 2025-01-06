@@ -5,9 +5,16 @@ import subprocess
 import psutil
 import pynvml
 import logging
+import traceback
+import time
 from retrying import retry
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type
+
+from threading import Semaphore, Thread
+from ratelimiter import RateLimiter
+
+
 
 class CloakStrategy(ABC):
     """
@@ -26,102 +33,303 @@ class CloakStrategy(ABC):
         """
         pass
 
+
 class CpuCloakStrategy(CloakStrategy):
     """
-    Cloaking strategy for CPU.
-    Throttles CPU frequency and reduces CPU threads if needed.
+    Chiến lược cloaking cho CPU:
+      - Giới hạn sử dụng CPU bằng cgroup-tools (quota, affinity).
+      - Giới hạn số luồng đồng thời (Semaphore).
+      - Giới hạn tần suất thực thi (RateLimiter).
+      - Tối ưu logic ứng dụng (caching) ở tầng ứng dụng.
     """
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+        # Các biến cấu hình
         self.throttle_percentage = config.get('throttle_percentage', 20)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
-            logger.warning("Invalid throttle_percentage, defaulting to 20%.")
+            logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
             self.throttle_percentage = 20
 
-        self.freq_adjustment = config.get('frequency_adjustment_mhz', 2000)
-        if not isinstance(self.freq_adjustment, int) or self.freq_adjustment <= 0:
-            logger.warning("Invalid frequency_adjustment_mhz, defaulting to 2000MHz.")
-            self.freq_adjustment = 2000
+        self.max_concurrent_threads = config.get('max_concurrent_threads', 4)
+        if not isinstance(self.max_concurrent_threads, int) or self.max_concurrent_threads <= 0:
+            logger.warning("Giá trị max_concurrent_threads không hợp lệ, mặc định 4.")
+            self.max_concurrent_threads = 4
+        self.thread_semaphore = Semaphore(self.max_concurrent_threads)
+
+        self.max_calls_per_second = config.get('max_calls_per_second', 5)
+        self.rate_limiter = RateLimiter(max_calls=self.max_calls_per_second, period=1)
+
+        self.cache_enabled = config.get('cache_enabled', True)
+        self.task_cache = {} if self.cache_enabled else None
 
         self.logger = logger
 
+        # Lưu tên cgroup để thuận tiện cleanup về sau
+        self.created_cgroups: List[str] = []
+
     def apply(self, process: Any) -> Dict[str, Any]:
         """
-        Apply CPU throttling to the given process.
-
-        Args:
-            process (Any): Process object with attributes 'pid' and 'name'.
-
-        Returns:
-            Dict[str, Any]: Adjustments including CPU frequency and throttle percentage.
+        Áp dụng throttling CPU (cgroup-tools) + throttling tầng ứng dụng cho tiến trình.
         """
-        if not hasattr(process, 'pid') or not hasattr(process, 'name') or not process.name:
-            self.logger.error("Process object is missing required attributes (pid, name).")
-            return {}
 
         try:
-            adjustments = {
-                'cpu_freq': self.freq_adjustment,
-                'throttle_percentage': self.throttle_percentage,
-            }
-            self.logger.info(
-                f"Prepared CPU throttling adjustments: freq={self.freq_adjustment}MHz "
-                f"({self.throttle_percentage}% reduction) for process {process.name} (PID: {process.pid})."
-            )
+            # Lấy PID
+            if isinstance(process, subprocess.Popen):
+                # Nếu là Popen, ta biết chắc process có thuộc tính .pid nhưng không có .name
+                pid = process.pid
+                try:
+                    # Lấy tên process từ psutil
+                    p = psutil.Process(pid)
+                    process_name = p.name()
+                except psutil.NoSuchProcess:
+                    process_name = "unknown"
+            else:
+                # Ngược lại, nếu bạn có class custom, hoặc process thực sự có .name
+                if not hasattr(process, 'pid'):
+                    self.logger.error("Process không có pid.")
+                    return {}
+                pid = process.pid
 
-            # Apply adjustments
-            self.apply_adjustments(process.pid, adjustments)
+                # Thử lấy thuộc tính name, nếu không có thì fallback sang psutil
+                process_name = getattr(process, 'name', None)
+                if not process_name:
+                    self.logger.warning(
+                        f"Process PID={pid} không có .name, đang thử lấy tên qua psutil..."
+                    )
+                    try:
+                        p = psutil.Process(pid)
+                        process_name = p.name()
+                    except psutil.NoSuchProcess:
+                        process_name = "unknown"
+                        self.logger.warning(
+                            f"Tiến trình PID={pid} không tồn tại. Sử dụng process_name='unknown'."
+                        )
+
+            # Thiết lập cgroups
+            self.setup_cgroups(pid)
+
+            adjustments = {
+                'cpu_quota_us': self.calculate_cpu_quota(),
+                'cpu_affinity': self.get_available_cpu_cores(),
+                'max_concurrent_threads': self.max_concurrent_threads,
+                'max_calls_per_second': self.max_calls_per_second,
+                'cache_enabled': self.cache_enabled
+            }
+
+            self.logger.info(
+                f"Áp dụng throttling CPU: quota={adjustments['cpu_quota_us']}us, "
+                f"affinity={adjustments['cpu_affinity']}, "
+                f"max_concurrent_threads={self.max_concurrent_threads}, "
+                f"max_calls_per_second={self.max_calls_per_second}, "
+                f"cache_enabled={self.cache_enabled} "
+                f"cho tiến trình {process_name} (PID: {pid})."
+            )
             return adjustments
 
         except Exception as e:
             self.logger.error(
-                f"Error preparing CPU throttling for process {getattr(process, 'name', 'unknown')} "
-                f"(PID: {getattr(process, 'pid', 'N/A')}): {e}"
+                f"Lỗi khi chuẩn bị throttling CPU cho tiến trình {getattr(process, 'name', 'unknown')} "
+                f"(PID: {getattr(process, 'pid', 'N/A')}): {e}\n{traceback.format_exc()}"
             )
             raise
 
-    def apply_adjustments(self, pid: int, adjustments: Dict[str, Any]):
+    def setup_cgroups(self, pid: int):
         """
-        Apply CPU frequency adjustments to the process.
-
-        Args:
-            pid (int): Process ID.
-            adjustments (Dict[str, Any]): Adjustments dictionary.
+        Tạo và cấu hình cgroup (cpu, cpuset), gán quota + affinity cho PID.
         """
         try:
-            cpu_freq = adjustments.get('cpu_freq')
-            throttle_percentage = adjustments.get('throttle_percentage')
+            cpu_cgroup = f"cpu_cloak_{pid}"
+            cpuset_cgroup = f"cpuset_cloak_{pid}"
 
-            self.logger.info(
-                f"Applying CPU frequency={cpu_freq}MHz and throttle_percentage={throttle_percentage}% "
-                f"to process with PID={pid}."
-            )
-            # Placeholder: Replace with actual system calls or API
+            # Tạo cgroup CPU
+            if self.create_cgroup(cpu_cgroup, controller='cpu'):
+                self.created_cgroups.append(f'cpu:/{cpu_cgroup}')
+
+            # Tạo cgroup CPUSET
+            if self.create_cgroup(cpuset_cgroup, controller='cpuset'):
+                self.created_cgroups.append(f'cpuset:/{cpuset_cgroup}')
+
+            # Thiết lập quota + affinity
+            cpu_quota_us = self.calculate_cpu_quota()
+            self.set_cpu_quota(cpu_cgroup, cpu_quota_us)
+
+            available_cores = self.get_available_cpu_cores()
+            self.set_cpu_affinity(cpuset_cgroup, available_cores)
+
+            # Gán PID
+            self.assign_process_to_cgroup(cpu_cgroup, pid, controller='cpu')
+            self.assign_process_to_cgroup(cpuset_cgroup, pid, controller='cpuset')
+
         except Exception as e:
-            self.logger.error(f"Error applying CPU adjustments to PID={pid}: {e}")
+            self.logger.error(f"Lỗi khi thiết lập cgroups cho PID {pid}: {e}")
+            raise
 
-    def set_cpu_affinity(self, pid: int, cores: List[int]):
+    def create_cgroup(self, cgroup_name: str, controller: str) -> bool:
         """
-        Set CPU affinity for the given process.
-
-        Args:
-            pid (int): Process ID.
-            cores (List[int]): List of CPU cores to assign the process to.
+        Tạo cgroup (nếu chưa tồn tại). Trả về True nếu tạo thành công hoặc đã tồn tại, False nếu lỗi.
         """
         try:
-            if not cores or not isinstance(cores, list):
-                self.logger.error("Invalid cores list for CPU affinity.")
-                return
+            # Kiểm tra cgroup
+            if controller == 'cpu':
+                check_cmd = ['cgget', '-n', '-r', 'cpu.cfs_quota_us', cgroup_name]
+            elif controller == 'cpuset':
+                check_cmd = ['cgget', '-n', '-r', 'cpuset.cpus', cgroup_name]
+            else:
+                self.logger.error(f"Controller không được hỗ trợ: {controller}")
+                return False
 
-            cores_str = ",".join(map(str, cores))
-            self.logger.info(f"Setting CPU affinity for PID={pid} to cores: {cores_str}")
+            result = subprocess.run(check_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                # Chưa tồn tại => tạo
+                subprocess.run(['cgcreate', '-g', f'{controller}:/'+cgroup_name], check=True)
+                self.logger.info(f"Đã tạo cgroup '{cgroup_name}' cho controller '{controller}'.")
+            else:
+                self.logger.debug(f"Cgroup '{cgroup_name}' (controller '{controller}') đã tồn tại.")
+            return True
 
-            # Use taskset to set CPU affinity
-            subprocess.run(['taskset', '-cp', cores_str, str(pid)], check=True)
-            self.logger.info(f"Successfully set CPU affinity for PID={pid} to cores: {cores_str}")
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Error setting CPU affinity with taskset for PID={pid}: {e}")
+            self.logger.error(f"Lỗi cgcreate/check cgroup '{cgroup_name}': {e.stderr}")
+            return False
         except Exception as e:
-            self.logger.error(f"Unexpected error in set_cpu_affinity for PID={pid}: {e}")
+            self.logger.error(f"Lỗi create_cgroup: {e}")
+            return False
+
+    def calculate_cpu_quota(self) -> int:
+        """Tính quota CPU dựa trên self.throttle_percentage."""
+        cpu_period_us = 100000  # 100ms
+        return int(cpu_period_us * (1 - self.throttle_percentage / 100))
+
+    def set_cpu_quota(self, cgroup_name: str, quota_us: int):
+        """Thiết lập quota cho cgroup CPU."""
+        try:
+            subprocess.run(['cgset', '-r', f'cpu.cfs_quota_us={quota_us}', cgroup_name], check=True)
+            self.logger.info(f"Đặt CPU quota={quota_us}us cho cgroup '{cgroup_name}'.")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi cgset CPU quota cho cgroup '{cgroup_name}': {e.stderr}")
+            raise
+
+    def get_available_cpu_cores(self) -> List[int]:
+        """Trả về danh sách core CPU (vd: [0,1,2,3])."""
+        try:
+            total_cores = psutil.cpu_count(logical=True)
+            return list(range(total_cores))
+        except Exception as e:
+            self.logger.error(f"Lỗi get_available_cpu_cores: {e}")
+            return []
+
+    def set_cpu_affinity(self, cgroup_name: str, cores: List[int]):
+        """Thiết lập danh sách core cho cpuset cgroup."""
+        try:
+            cores_str = ",".join(map(str, cores))
+            subprocess.run(['cgset', '-r', f'cpuset.cpus={cores_str}', cgroup_name], check=True)
+            self.logger.info(f"Đặt CPU affinity={cores_str} cho cgroup cpuset '{cgroup_name}'.")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi cgset cpuset cho '{cgroup_name}': {e.stderr}")
+            raise
+
+    def assign_process_to_cgroup(self, cgroup_name: str, pid: int, controller: str):
+        """Gán PID vào cgroup."""
+        try:
+            subprocess.run(['cgclassify', '-g', f'{controller}:/'+cgroup_name, str(pid)], check=True)
+            self.logger.info(f"Đã gán PID={pid} vào cgroup '{cgroup_name}' controller={controller}.")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi cgclassify gán PID {pid} cho cgroup '{cgroup_name}': {e.stderr}")
+            raise
+
+    # ----------------------------
+    # Thêm hàm cleanup cgroup
+    # ----------------------------
+    def cleanup_cgroups(self):
+        """
+        Xóa các cgroup đã tạo (nếu tồn tại).
+        Chỉ xóa những cgroup đã lưu trong self.created_cgroups.
+        """
+        for full_cgroup_path in self.created_cgroups:
+            # full_cgroup_path thường dạng 'cpu:/cpu_cloak_XXXX'
+            try:
+                # cgdelete: cgdelete -g cpu:/cpu_cloak_XXXX
+                subprocess.run(['cgdelete', '-g', full_cgroup_path], check=True)
+                self.logger.info(f"Đã xóa cgroup '{full_cgroup_path}'.")
+            except subprocess.CalledProcessError as e:
+                # Nếu cgroup không tồn tại => log warning
+                self.logger.warning(f"Không thể xóa cgroup '{full_cgroup_path}': {e.stderr}")
+            except Exception as ex:
+                self.logger.warning(f"Lỗi bất ngờ khi xóa cgroup '{full_cgroup_path}': {ex}")
+        # Xóa danh sách để tránh xóa lại
+        self.created_cgroups.clear()
+
+    # ----------------------------
+    # Rate limiting & logic caching
+    # ----------------------------
+    def acquire_thread_slot(self):
+        self.logger.debug("Đang cố gắng chiếm 1 slot luồng.")
+        self.thread_semaphore.acquire()
+        self.logger.debug("Đã chiếm slot luồng thành công.")
+
+    def release_thread_slot(self):
+        self.thread_semaphore.release()
+        self.logger.debug("Đã trả slot luồng.")
+
+    def throttled_task(self, task_id: int, task_func):
+        """
+        Thực thi một nhiệm vụ kèm rate limit, caching, và số luồng đồng thời.
+        """
+        try:
+            self.acquire_thread_slot()
+            self.logger.info(f"Task {task_id} bắt đầu.")
+
+            with self.rate_limiter:
+                if self.cache_enabled and task_id in self.task_cache:
+                    self.logger.info(f"Task {task_id} lấy từ cache.")
+                    result = self.task_cache[task_id]
+                else:
+                    result = task_func(task_id)
+                    if self.cache_enabled:
+                        self.task_cache[task_id] = result
+                        self.logger.info(f"Kết quả task {task_id} được cache.")
+
+            self.logger.info(f"Task {task_id} hoàn thành.")
+        except Exception as e:
+            self.logger.error(f"Lỗi task {task_id}: {e}")
+        finally:
+            self.release_thread_slot()
+
+    def run_tasks(self, tasks: List[int], task_func):
+        """
+        Chạy nhiều task với giới hạn luồng + rate limit.
+        """
+        threads = []
+        for tid in tasks:
+            t = Thread(target=self.throttled_task, args=(tid, task_func))
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+
+    def clear_cache(self):
+        """Xóa cache tác vụ."""
+        if self.cache_enabled:
+            self.task_cache.clear()
+            self.logger.info("Đã xóa cache tác vụ.")
+
+    def get_cached_task(self, task_id: int):
+        """Lấy kết quả tác vụ trong cache (nếu có)."""
+        if self.cache_enabled:
+            return self.task_cache.get(task_id, None)
+        return None
+
+    def optimize_task_execution(self, task_id: int, task_func):
+        """
+        Thực thi tối ưu (caching, ...).
+        """
+        if self.cache_enabled and task_id in self.task_cache:
+            self.logger.info(f"Task {task_id} lấy từ cache (optimize).")
+            return self.task_cache[task_id]
+        else:
+            result = task_func(task_id)
+            if self.cache_enabled:
+                self.task_cache[task_id] = result
+            return result
+
 
 class GpuCloakStrategy(CloakStrategy):
     """

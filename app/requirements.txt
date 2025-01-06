@@ -16,6 +16,7 @@ torchvision
 torchaudio
 pynvml==11.4.1
 readerwriterlock
+ratelimiter
 openai
 pandas
 azure-identity
