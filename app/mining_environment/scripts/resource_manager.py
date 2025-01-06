@@ -31,6 +31,7 @@ from .azure_clients import (
 
 from .auxiliary_modules import temperature_monitor
 from .auxiliary_modules.power_management import (
+    PowerManager,
     get_cpu_power,
     get_gpu_power,
     set_gpu_usage,
@@ -38,28 +39,27 @@ from .auxiliary_modules.power_management import (
 )
 
 
+
 def assign_process_resources(pid: int, resources: Dict[str, Any],
                              process_name: str, logger: logging.Logger):
-    """
-    Thay thế cho assign_process_to_cgroups, áp dụng điều chỉnh tài nguyên 
-    bằng taskset và các lệnh hệ thống khác (chưa đầy đủ do thiếu cgroup).
-    """
     try:
-        # Điều chỉnh CPU threads (taskset)
         if 'cpu_threads' in resources:
-            cpu_count = psutil.cpu_count(logical=True)
-            desired_threads = resources['cpu_threads']
-            if desired_threads > cpu_count or desired_threads <= 0:
-                logger.warning(
-                    f"Số luồng CPU yêu cầu ({desired_threads}) không hợp lệ. Bỏ qua."
-                )
-            else:
-                cores = ",".join(map(str, range(desired_threads)))
-                subprocess.run(['taskset', '-cp', cores, str(pid)], check=True)
-                logger.info(
-                    f"Đã áp dụng giới hạn {desired_threads} luồng CPU cho tiến trình "
-                    f"{process_name} (PID: {pid})."
-                )
+            cpu_limit = resources['cpu_threads']  # Ví dụ: giới hạn 50% CPU
+
+            # Tạo cgroup nếu chưa tồn tại
+            subprocess.run(['cgcreate', '-g', 'cpu:/limited_cpu'], check=False)
+            
+            # Thiết lập giới hạn CPU
+            quota = int(cpu_limit * 100000)  # cpu.cfs_period_us = 100000
+            subprocess.run(['cgset', '-r', f'cpu.cfs_quota_us={quota}', 'limited_cpu'], check=True)
+            
+            # Gán tiến trình vào cgroup
+            subprocess.run(['cgclassify', '-g', 'cpu:limited_cpu', str(pid)], check=True)
+            
+            logger.info(
+                f"Đã áp dụng giới hạn CPU {cpu_limit*100}% cho tiến trình "
+                f"{process_name} (PID: {pid})."
+            )
 
         if 'memory' in resources:
             logger.warning(
@@ -72,6 +72,10 @@ def assign_process_resources(pid: int, resources: Dict[str, Any],
         if 'disk_io_limit_mbps' in resources:
             logger.warning(
                 f"Chưa cấu hình cgroup, không thể giới hạn Disk I/O cho {process_name} (PID: {pid})."
+            )
+        if 'cache_limit_percent' in resources:
+            logger.warning(
+                f"Chưa cấu hình cgroup, không thể giới hạn Cache cho {process_name} (PID: {pid})."
             )
     except Exception as e:
         logger.error(
@@ -88,6 +92,7 @@ class SharedResourceManager:
         self.logger = logger
         self.original_resource_limits = {}
         self.gpu_manager = GPUManager()
+        self.power_manager = PowerManager()
 
     def is_gpu_initialized(self) -> bool:
         self.logger.debug(
@@ -100,14 +105,18 @@ class SharedResourceManager:
 
     def adjust_cpu_threads(self, pid: int, cpu_threads: int, process_name: str):
         try:
-            assign_process_resources(
-                pid,
-                {'cpu_threads': cpu_threads},
-                process_name,
-                self.logger
-            )
+            # Tạo cgroup nếu chưa tồn tại
+            subprocess.run(['cgcreate', '-g', 'cpu:/thread_limited'], check=False)
+            
+            # Thiết lập giới hạn CPU threads
+            quota = int((cpu_threads / psutil.cpu_count(logical=True)) * 100000)
+            subprocess.run(['cgset', '-r', f'cpu.cfs_quota_us={quota}', 'thread_limited'], check=True)
+            
+            # Gán tiến trình vào cgroup
+            subprocess.run(['cgclassify', '-g', 'cpu:thread_limited', str(pid)], check=True)
+            
             self.logger.info(
-                f"Điều chỉnh số luồng CPU = {cpu_threads} cho tiến trình {process_name} (PID: {pid})."
+                f"Đã giới hạn {cpu_threads} luồng CPU cho tiến trình {process_name} (PID: {pid})."
             )
         except Exception as e:
             self.logger.error(
@@ -123,26 +132,36 @@ class SharedResourceManager:
                 self.logger
             )
             self.logger.info(
-                f"Điều chỉnh RAM = {ram_allocation_mb}MB cho {process_name} (PID={pid})."
+                f"Điều chỉnh RAM = {ram_allocation_mb}MB cho tiến trình {process_name} (PID: {pid})."
             )
         except Exception as e:
             self.logger.error(
                 f"Lỗi adjust_ram_allocation cho {process_name} (PID={pid}): {e}\n{traceback.format_exc()}"
             )
 
-    def adjust_gpu_usage(self, process: MiningProcess, gpu_usage_percent: List[float]):
+    def get_gpu_count(self) -> int:
+        return self.power_manager.get_gpu_count()
+    
+    def get_gpu_usage_percentages(self) -> List[float]:
+        return self.power_manager.get_gpu_usage_percentages()
+    
+    def adjust_gpu_usage(self, process: MiningProcess, gpu_usage_percent: float):
         try:
-            if not isinstance(gpu_usage_percent, list):
-                gpu_usage_percent = []
+            # Lấy số lượng GPU hiện có
+            gpu_count = self.get_gpu_count()
+            if gpu_count == 0:
+                self.logger.warning(
+                    f"Không có GPU nào để điều chỉnh mức sử dụng cho {process.name} (PID: {process.pid})."
+                )
+                return
 
-            step = self.config["optimization_parameters"].get("gpu_power_adjustment_step", 10)
-            new_gpu_usage = [
-                min(max(g + step, 0), 100)
-                for g in gpu_usage_percent
-            ]
-            set_gpu_usage(process.pid, new_gpu_usage)
+            # Tạo danh sách phần trăm sử dụng GPU cho từng GPU
+            usage_list = [gpu_usage_percent] * gpu_count
+
+            # Gọi set_gpu_usage với danh sách phần trăm sử dụng thông qua instance PowerManager
+            self.power_manager.set_gpu_usage(usage_list, pid=process.pid)
             self.logger.info(
-                f"Điều chỉnh GPU usage={new_gpu_usage} cho {process.name} (PID={process.pid})."
+                f"Điều chỉnh GPU usage={gpu_usage_percent}% cho tất cả {gpu_count} GPU của {process.name} (PID: {process.pid})."
             )
         except Exception as e:
             self.logger.error(
@@ -153,7 +172,7 @@ class SharedResourceManager:
         try:
             current_limit = temperature_monitor.get_current_disk_io_limit(process.pid)
             step = self.config["optimization_parameters"].get("disk_io_limit_step_mbps", 1)
-            if (current_limit is not None) and isinstance(disk_io_limit_mbps, (int, float)):
+            if isinstance(disk_io_limit_mbps, (int, float)):
                 if current_limit > disk_io_limit_mbps:
                     new_limit = current_limit - step
                 else:
@@ -174,7 +193,7 @@ class SharedResourceManager:
                 )
             else:
                 self.logger.warning(
-                    f"current_limit hoặc disk_io_limit_mbps invalid cho {process.name} (PID={process.pid})."
+                    f"disk_io_limit_mbps invalid cho {process.name} (PID={process.pid})."
                 )
         except Exception as e:
             self.logger.error(
@@ -192,22 +211,28 @@ class SharedResourceManager:
                 f"Lỗi adjust_network_bandwidth cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
 
-    def adjust_cpu_frequency(self, pid: int, frequency: int, process_name: str):
+    def adjust_cpu_frequency(self, pid: int, frequency: float, process_name: str):
         try:
-            assign_process_resources(
-                pid,
-                {'cpu_freq': frequency},
-                process_name,
-                self.logger
-            )
+            cpu_limit = frequency / self.get_max_cpu_frequency()  # Tính tỷ lệ CPU cần giới hạn
+            
+            # Tạo hoặc sử dụng cgroup đã có
+            subprocess.run(['cgcreate', '-g', 'cpu:/frequency_limited'], check=False)
+            
+            # Thiết lập giới hạn CPU
+            quota = int(cpu_limit * 100000)
+            subprocess.run(['cgset', '-r', f'cpu.cfs_quota_us={quota}', 'frequency_limited'], check=True)
+            
+            # Gán tiến trình vào cgroup
+            subprocess.run(['cgclassify', '-g', 'cpu:frequency_limited', str(pid)], check=True)
+            
             self.logger.info(
-                f"Set CPU freq={frequency}MHz cho {process_name} (PID={pid})."
+                f"Đã giới hạn CPU frequency thành {frequency}MHz cho tiến trình {process_name} (PID: {pid})."
             )
         except Exception as e:
             self.logger.error(
                 f"Lỗi adjust_cpu_frequency cho {process_name} (PID={pid}): {e}\n{traceback.format_exc()}"
             )
-
+   
     def adjust_gpu_power_limit(self, pid: int, power_limit: int, process_name: str, unit: str = 'W') -> bool:
         self.logger.debug(f"Adjusting GPU power limit for PID={pid}, power_limit={power_limit}, unit={unit}")
         try:
@@ -233,7 +258,7 @@ class SharedResourceManager:
 
             pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit_mw)
             self.logger.info(
-                f"Set GPU power limit={power_limit}{unit} cho {process_name} (PID={pid})."
+                f"Set GPU power limit={power_limit}{unit} cho {process_name} (PID: {pid})."
             )
             return True
         except pynvml.NVMLError as e:
@@ -248,7 +273,10 @@ class SharedResourceManager:
                 f"Lỗi không xác định khi set GPU power limit cho {process_name} (PID={pid}): {e}."
             )
         finally:
-            pynvml.nvmlShutdown()
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
 
         return False
 
@@ -274,6 +302,74 @@ class SharedResourceManager:
             self.logger.error(
                 f"Lỗi drop_caches: {e}\n{traceback.format_exc()}"
             )
+
+    def adjust_cache_limit(self, pid: int, cache_limit_percent: float, process_name: str):
+        """
+        Điều chỉnh giới hạn cache cho tiến trình.
+
+        :param pid: PID của tiến trình.
+        :param cache_limit_percent: Giới hạn cache theo phần trăm.
+        :param process_name: Tên của tiến trình.
+        """
+        try:
+            # Giả sử sử dụng cgroups để giới hạn cache (cần thiết lập cgroups phù hợp trước)
+            # Đây chỉ là một ví dụ, bạn cần điều chỉnh phù hợp với hệ thống của mình
+            # Ví dụ: giới hạn cache bằng cách ghi vào file cgroup
+            cgroup_path = f"/sys/fs/cgroup/cache/{pid}"
+            if not Path(cgroup_path).exists():
+                self.logger.warning(f"Cgroup cho PID={pid} không tồn tại. Bỏ qua điều chỉnh cache.")
+                return
+
+            # Giả sử 'cache.max' là file cấu hình để giới hạn cache
+            cache_limit_bytes = int(cache_limit_percent / 100 * self.get_total_cache())
+            with open(f"{cgroup_path}/cache.max", 'w') as f:
+                f.write(str(cache_limit_bytes))
+            
+            self.logger.info(
+                f"Đã điều chỉnh giới hạn cache thành {cache_limit_percent}% ({cache_limit_bytes} bytes) cho tiến trình {process_name} (PID: {pid})."
+            )
+        except FileNotFoundError:
+            self.logger.error(f"Không tìm thấy cgroup cache cho PID={pid}.")
+        except PermissionError:
+            self.logger.error(f"Không đủ quyền để điều chỉnh cache cho PID={pid}.")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi adjust_cache_limit cho {process_name} (PID={pid}): {e}\n{traceback.format_exc()}"
+            )
+
+    def get_total_cache(self) -> int:
+        """
+        Lấy tổng lượng cache hiện có trên hệ thống.
+        (Bạn cần định nghĩa cách lấy giá trị này phù hợp với hệ thống của mình)
+        """
+        # Ví dụ: giả sử tổng cache là 8GB
+        return 8 * 1024 * 1024 * 1024  # 8GB in bytes
+
+    def get_process_cache_usage(self, pid: int) -> float:
+        """
+        Lấy usage cache của tiến trình.
+
+        :param pid: PID của tiến trình.
+        :return: Cache usage phần trăm.
+        """
+        try:
+            # Cách lấy cache usage có thể khác nhau tùy vào hệ điều hành
+            # Dưới đây là một ví dụ giả định sử dụng /proc/[pid]/status (chỉ dành cho Linux)
+            with open(f"/proc/{pid}/status", 'r') as f:
+                for line in f:
+                    if line.startswith("VmCache:"):
+                        cache_kb = int(line.split()[1])
+                        total_mem_kb = psutil.virtual_memory().total / 1024
+                        cache_percent = (cache_kb / total_mem_kb) * 100
+                        return cache_percent
+            self.logger.warning(f"Không tìm thấy VmCache cho PID={pid}.")
+            return 0.0
+        except FileNotFoundError:
+            self.logger.error(f"Không tìm thấy tiến trình với PID={pid} khi lấy cache.")
+            return 0.0
+        except Exception as e:
+            self.logger.error(f"Lỗi get_process_cache_usage cho PID={pid}: {e}\n{traceback.format_exc()}")
+            return 0.0
 
     def apply_network_cloaking(self, interface: str, bandwidth_limit: float, process: MiningProcess):
         try:
@@ -372,6 +468,8 @@ class SharedResourceManager:
                 self.adjust_disk_io_priority(pid, orig_limits['ionice_class'], name)
             if 'network_bandwidth_limit_mbps' in orig_limits:
                 self.adjust_network_bandwidth(process, orig_limits['network_bandwidth_limit_mbps'])
+            if 'cache_limit_percent' in orig_limits:
+                self.adjust_cache_limit(pid, orig_limits['cache_limit_percent'], name)
 
             del self.original_resource_limits[pid]
             self.logger.info(
@@ -399,7 +497,7 @@ class SharedResourceManager:
         try:
             for key, val in adjustments.items():
                 if key == 'cpu_freq':
-                    self.adjust_cpu_frequency(process.pid, int(val), process.name)
+                    self.adjust_cpu_frequency(process.pid, float(val), process.name)
                 elif key == 'gpu_power_limit':
                     self.adjust_gpu_power_limit(process.pid, int(val), process.name)
                 elif key == 'network_bandwidth_limit_mbps':
@@ -410,12 +508,15 @@ class SharedResourceManager:
                     self.adjust_cpu_threads(process.pid, int(val), process.name)
                 elif key == 'ram_allocation_mb':
                     self.adjust_ram_allocation(process.pid, int(val), process.name)
+                elif key == 'cache_limit_percent':
+                    self.adjust_cache_limit(process.pid, float(val), process.name)
                 elif key == 'drop_caches':
                     self.drop_caches()
         except Exception as e:
             self.logger.error(
                 f"Lỗi execute_adjustments cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
+
 
 class ResourceManager(BaseManager):
     _instance = None
@@ -608,25 +709,21 @@ class ResourceManager(BaseManager):
     def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
         try:
             cpu_temp = temperature_monitor.get_cpu_temperature(process.pid)
-            gpu_temp = 0
-            if self.shared_resource_manager.is_gpu_initialized():
-                g_vals = temperature_monitor.get_gpu_temperature(process.pid)
-                if isinstance(g_vals, list) and g_vals:
-                    gpu_temp = max(g_vals)
+            gpu_temp = temperature_monitor.get_gpu_temperature(process.pid)
 
-            if (cpu_temp and cpu_temp > cpu_max_temp) or (gpu_temp and gpu_temp > gpu_max_temp):
-                adjustments = {}
-                if cpu_temp and cpu_temp > cpu_max_temp:
-                    self.logger.warning(
-                        f"Nhiệt độ CPU {cpu_temp}°C > {cpu_max_temp}°C (PID={process.pid})."
-                    )
-                    adjustments['cpu_cloak'] = True
-                if gpu_temp and gpu_temp > gpu_max_temp:
-                    self.logger.warning(
-                        f"Nhiệt độ GPU {gpu_temp}°C > {gpu_max_temp}°C (PID={process.pid})."
-                    )
-                    adjustments['gpu_cloak'] = True
+            adjustments = {}
+            if cpu_temp > cpu_max_temp:
+                self.logger.warning(
+                    f"Nhiệt độ CPU {cpu_temp}°C > {cpu_max_temp}°C (PID={process.pid})."
+                )
+                adjustments['cpu_cloak'] = True
+            if gpu_temp > gpu_max_temp:
+                self.logger.warning(
+                    f"Nhiệt độ GPU {gpu_temp}°C > {gpu_max_temp}°C (PID={process.pid})."
+                )
+                adjustments['gpu_cloak'] = True
 
+            if adjustments:
                 task = {
                     'type': 'monitoring',
                     'process': process,
@@ -641,33 +738,40 @@ class ResourceManager(BaseManager):
     def check_power_and_enqueue(self, process: MiningProcess, cpu_max_power: int, gpu_max_power: int):
         try:
             c_power = get_cpu_power(process.pid)
-            g_power = 0
-            if self.shared_resource_manager.is_gpu_initialized():
-                g_vals = get_gpu_power(process.pid)
-                if isinstance(g_vals, list) and g_vals:
-                    g_power = max(g_vals)
+            g_power = get_gpu_power(process.pid) if self.shared_resource_manager.is_gpu_initialized() else 0.0
 
-            if (c_power and c_power > cpu_max_power) or (g_power and g_power > gpu_max_power):
-                adj = {}
-                if c_power and c_power > cpu_max_power:
+            adjustments = {}
+            if c_power > cpu_max_power:
+                self.logger.warning(
+                    f"CPU power={c_power}W > {cpu_max_power}W (PID={process.pid})."
+                )
+                adjustments['cpu_cloak'] = True
+
+            # Kiểm tra nếu g_power là list
+            if isinstance(g_power, list):
+                total_g_power = sum(g_power)
+                self.logger.debug(f"Total GPU power for PID={process.pid}: {total_g_power}W")
+                if total_g_power > gpu_max_power:
                     self.logger.warning(
-                        f"CPU power={c_power}W > {cpu_max_power}W (PID={process.pid})."
+                        f"Tổng GPU power={total_g_power}W > {gpu_max_power}W (PID={process.pid})."
                     )
-                    adj['cpu_cloak'] = True
-                if g_power and g_power > gpu_max_power:
+                    adjustments['gpu_cloak'] = True
+            else:
+                if g_power > gpu_max_power:
                     self.logger.warning(
                         f"GPU power={g_power}W > {gpu_max_power}W (PID={process.pid})."
                     )
-                    adj['gpu_cloak'] = True
+                    adjustments['gpu_cloak'] = True
 
-                t = {
+            if adjustments:
+                task = {
                     'type': 'monitoring',
                     'process': process,
-                    'adjustments': adj
+                    'adjustments': adjustments
                 }
                 priority = 2
                 count_val = next(self._counter)
-                self.resource_adjustment_queue.put((priority, count_val, t))
+                self.resource_adjustment_queue.put((priority, count_val, task))
         except Exception as e:
             self.logger.error(f"check_power_and_enqueue error: {e}\n{traceback.format_exc()}")
 
@@ -703,6 +807,14 @@ class ResourceManager(BaseManager):
                             )
                             continue
 
+                        # Đảm bảo rằng current_state không chứa giá trị không hợp lệ
+                        invalid_metrics = [k for k, v in current_state.items() if not isinstance(v, (int, float))]
+                        if invalid_metrics:
+                            self.logger.error(
+                                f"Metrics cho PID={proc.pid} chứa giá trị không hợp lệ: {invalid_metrics}. Dữ liệu: {current_state}"
+                            )
+                            continue
+
                         openai_suggestions = self.azure_openai_client.get_optimization_suggestions(
                             server_config,
                             optimization_goals,
@@ -733,30 +845,33 @@ class ResourceManager(BaseManager):
             p_obj = psutil.Process(process.pid)
             cpu_pct = p_obj.cpu_percent(interval=1)
             mem_mb = p_obj.memory_info().rss / (1024**2)
-            if self.shared_resource_manager.is_gpu_initialized():
-                gpu_pct = temperature_monitor.get_current_gpu_usage(process.pid)
-            else:
-                gpu_pct = 0
+            gpu_pct = temperature_monitor.get_gpu_temperature(process.pid) if self.shared_resource_manager.is_gpu_initialized() else 0.0
             disk_mbps = temperature_monitor.get_current_disk_io_limit(process.pid)
-            net_bw = (self.config.get('resource_allocation', {})
-                            .get('network', {})
-                            .get('bandwidth_limit_mbps', 100))
-            cache_l = (self.config.get('resource_allocation', {})
-                            .get('cache', {})
-                            .get('limit_percent', 50))
+            net_bw = float(self.config.get('resource_allocation', {})
+                                    .get('network', {})
+                                    .get('bandwidth_limit_mbps', 100.0))  # Đảm bảo là float
+            
+            # Lấy metrics cache từ shared_resource_manager
+            cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid)
 
             metrics = {
-                'cpu_usage_percent': cpu_pct,
-                'memory_usage_mb': mem_mb,
-                'gpu_usage_percent': gpu_pct,
-                'disk_io_mbps': disk_mbps,
+                'cpu_usage_percent': float(cpu_pct),
+                'memory_usage_mb': float(mem_mb),
+                'gpu_usage_percent': float(gpu_pct),
+                'disk_io_mbps': float(disk_mbps),
                 'network_bandwidth_mbps': net_bw,
-                'cache_limit_percent': cache_l
+                'cache_limit_percent': float(cache_l)
             }
 
-            # Log các giá trị metrics thu được
-            self.logger.debug(f"Metrics for PID {process.pid}: {metrics}")
+            # Kiểm tra từng giá trị metrics để đảm bảo tính hợp lệ
+            invalid_metrics = [k for k, v in metrics.items() if not isinstance(v, (int, float))]
+            if invalid_metrics:
+                self.logger.error(
+                    f"Metrics cho PID={process.pid} chứa giá trị không hợp lệ: {invalid_metrics}. Dữ liệu: {metrics}"
+                )
+                return {}  # Bỏ qua PID này
 
+            self.logger.debug(f"Metrics for PID {process.pid}: {metrics}")
             return metrics
         except Exception as e:
             self.logger.error(
@@ -777,6 +892,13 @@ class ResourceManager(BaseManager):
                     if not isinstance(metrics, dict):
                         self.logger.error(
                             f"Metrics cho PID={proc.pid} không phải là dict. Dữ liệu nhận được: {metrics}"
+                        )
+                        continue  # Bỏ qua PID này
+                    # Kiểm tra từng giá trị trong metrics
+                    invalid_metrics = [k for k, v in metrics.items() if not isinstance(v, (int, float))]
+                    if invalid_metrics:
+                        self.logger.error(
+                            f"Metrics cho PID={proc.pid} chứa giá trị không hợp lệ: {invalid_metrics}. Dữ liệu: {metrics}"
                         )
                         continue  # Bỏ qua PID này
                     metrics_data[str(proc.pid)] = metrics
@@ -923,28 +1045,23 @@ class ResourceManager(BaseManager):
 
     def apply_recommended_action(self, action: List[Any], process: MiningProcess):
         try:
+            # Kiểm tra độ dài của danh sách action để đảm bảo có đủ tham số
+            expected_length = 7  # [cpu_threads, frequency_mhz, ram_alloc, gpu_usage_percent, disk_io_limit_mbps, network_bandwidth_limit_mbps, cache_limit_percent]
+            if len(action) < expected_length:
+                self.logger.warning(
+                    f"Action list có độ dài không đủ ({len(action)}), mong đợi {expected_length}. Bổ sung các giá trị thiếu bằng 0.0."
+                )
+                # Bổ sung các giá trị thiếu bằng 0.0 hoặc giá trị mặc định
+                action += [0.0] * (expected_length - len(action))
+            
+            # Trích xuất các giá trị từ danh sách action
             cpu_threads = int(action[0])
-            ram_alloc = int(action[1])
-
-            gpu_config = (self.config.get("resource_allocation", {})
-                                  .get("gpu", {})
-                                  .get("max_usage_percent", []))
-
-            gpu_usage_percent = []
-            if isinstance(gpu_config, list):
-                length_needed = len(gpu_config)
-                gpu_usage_percent = list(action[2:2 + length_needed])
-                next_idx = 2 + length_needed
-            elif isinstance(gpu_config, (int, float)):
-                gpu_usage_percent = [float(action[2])]
-                next_idx = 3
-            else:
-                self.logger.warning("max_usage_percent không phải list/int/float => bỏ qua GPU")
-                next_idx = 2
-
-            disk_io_limit_mbps = float(action[next_idx])
-            net_bw_limit_mbps = float(action[next_idx + 1])
-            cache_limit_percent = float(action[next_idx + 2])
+            frequency = float(action[1])
+            ram_alloc = int(action[2])
+            gpu_usage_percent = float(action[3])
+            disk_io_limit_mbps = float(action[4])
+            net_bw_limit_mbps = float(action[5])
+            cache_limit_percent = float(action[6])
 
             # Điều chỉnh CPU Threads
             t1 = {
@@ -953,45 +1070,52 @@ class ResourceManager(BaseManager):
             }
             self.resource_adjustment_queue.put((3, next(self._counter), t1))
 
-            # Điều chỉnh RAM Allocation
+            # Điều chỉnh Frequency
             t2 = {
-                'function': 'adjust_ram_allocation',
-                'args': (process.pid, ram_alloc, process.name)
+                'function': 'adjust_cpu_frequency',
+                'args': (process.pid, frequency, process.name)
             }
             self.resource_adjustment_queue.put((3, next(self._counter), t2))
 
+            # Điều chỉnh RAM Allocation
+            t3 = {
+                'function': 'adjust_ram_allocation',
+                'args': (process.pid, ram_alloc, process.name)
+            }
+            self.resource_adjustment_queue.put((3, next(self._counter), t3))
+
             # Điều chỉnh GPU Usage
-            if gpu_usage_percent:
-                t3 = {
+            if gpu_usage_percent > 0.0:
+                t4 = {
                     'function': 'adjust_gpu_usage',
                     'args': (process, gpu_usage_percent)
                 }
-                self.resource_adjustment_queue.put((3, next(self._counter), t3))
+                self.resource_adjustment_queue.put((3, next(self._counter), t4))
             else:
                 self.logger.warning(
                     f"Chưa có GPU usage => bỏ qua GPU cho PID={process.pid}"
                 )
 
             # Điều chỉnh Disk I/O Limit
-            t4 = {
+            t5 = {
                 'function': 'adjust_disk_io_limit',
                 'args': (process, disk_io_limit_mbps)
             }
-            self.resource_adjustment_queue.put((3, next(self._counter), t4))
+            self.resource_adjustment_queue.put((3, next(self._counter), t5))
 
             # Điều chỉnh Network Bandwidth Limit
-            t5 = {
+            t6 = {
                 'function': 'adjust_network_bandwidth',
                 'args': (process, net_bw_limit_mbps)
             }
-            self.resource_adjustment_queue.put((3, next(self._counter), t5))
+            self.resource_adjustment_queue.put((3, next(self._counter), t6))
 
             # Điều chỉnh Cache Limit
-            t6 = {
+            t7 = {
                 'function': 'adjust_cache_limit',
                 'args': (process.pid, cache_limit_percent, process.name)
             }
-            self.resource_adjustment_queue.put((3, next(self._counter), t6))
+            self.resource_adjustment_queue.put((3, next(self._counter), t7))
 
             self.logger.info(
                 f"Đã áp dụng các điều chỉnh tài nguyên từ OpenAI cho {process.name} (PID={process.pid})."
@@ -999,6 +1123,10 @@ class ResourceManager(BaseManager):
         except IndexError as ie:
             self.logger.error(
                 f"Thiếu phần tử trong 'action' khi áp dụng các điều chỉnh: {ie}\n{traceback.format_exc()}"
+            )
+        except ValueError as ve:
+            self.logger.error(
+                f"Giá trị trong 'action' không hợp lệ: {ve}\n{traceback.format_exc()}"
             )
         except Exception as e:
             self.logger.error(
@@ -1039,39 +1167,42 @@ class ResourceManager(BaseManager):
             )
 
     def allocate_resources_with_priority(self):
-        """
-        Phân bổ tài nguyên (CPU threads) theo priority.
-        """
         try:
             with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
-                flt_procs = []
-                for p in self.mining_processes:
-                    if not isinstance(p.priority, int):
-                        self.logger.warning(f"Priority {p.priority} invalid, gán=1.")
-                        p.priority = 1
-                    flt_procs.append(p)
-
-                s_procs = sorted(flt_procs, key=lambda x: x.priority, reverse=True)
+                sorted_procs = sorted(
+                    self.mining_processes,
+                    key=lambda x: x.priority,
+                    reverse=True
+                )
                 
                 total_cores = psutil.cpu_count(logical=True)
                 allocated = 0
-
-                for p in s_procs:
+                
+                for proc in sorted_procs:
                     if allocated >= total_cores:
                         self.logger.warning(
-                            f"Không còn CPU core cho {p.name} (PID: {p.pid})."
+                            f"Không còn CPU core cho {proc.name} (PID: {proc.pid})."
                         )
                         continue
-
-                    avb = total_cores - allocated
-                    needed = min(p.priority, avb)
                     
-                    adjustment_task = {
-                        'function': 'adjust_cpu_threads',
-                        'args': (p.pid, needed, p.name)
-                    }
-                    self.resource_adjustment_queue.put((3, next(self._counter), adjustment_task))
-                    allocated += needed
+                    # Giới hạn CPU sử dụng bằng cgroup
+                    cpu_limit = min(proc.priority, total_cores - allocated) / total_cores
+                    quota = int(cpu_limit * 100000)
+                    
+                    subprocess.run(['cgcreate', '-g', 'cpu:/priority_cpu'], check=False)
+                    subprocess.run(['cgset', '-r', f'cpu.cfs_quota_us={quota}', 'priority_cpu'], check=True)
+                    subprocess.run(['cgclassify', '-g', 'cpu:priority_cpu', str(proc.pid)], check=True)
+                    
+                    self.resource_adjustment_queue.put((
+                        3, 
+                        next(self._counter),
+                        {
+                            'function': 'adjust_cpu_limit',
+                            'args': (proc.pid, cpu_limit, proc.name)
+                        }
+                    ))
+                    
+                    allocated += proc.priority
         except Exception as e:
             self.logger.error(
                 f"Lỗi allocate_resources_with_priority: {e}\n{traceback.format_exc()}"

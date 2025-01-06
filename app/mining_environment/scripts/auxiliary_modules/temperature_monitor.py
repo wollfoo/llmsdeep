@@ -8,7 +8,7 @@ import subprocess
 import threading
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 # Thêm đường dẫn tới thư mục chứa `logging_config.py`
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -57,16 +57,16 @@ class TemperatureMonitor:
         # Cache limit percentage (có thể được cập nhật qua set_cache_limit)
         self.cache_limit_percent = 70.0
 
-    def get_cpu_temperature(self, pid: Optional[int] = None) -> Optional[float]:
+    def get_cpu_temperature(self, pid: Optional[int] = None) -> float:
         """
         Lấy nhiệt độ hiện tại của CPU. 
-        Trả về None nếu không thể lấy.
+        Trả về 0.0 nếu không thể lấy.
         """
         try:
             temps = psutil.sensors_temperatures()
             if not temps:
                 logger.warning("Không tìm thấy cảm biến nhiệt độ CPU.")
-                return None
+                return 0.0
 
             # Tìm kiếm cảm biến CPU
             for name, entries in temps.items():
@@ -75,36 +75,42 @@ class TemperatureMonitor:
                     if cpu_temps:
                         avg_temp = sum(cpu_temps) / len(cpu_temps)
                         logger.debug(f"Nhiệt độ CPU trung bình: {avg_temp}°C")
-                        return avg_temp
+                        return float(avg_temp)
             logger.warning("Không tìm thấy nhãn nhiệt độ CPU phù hợp.")
-            return None
+            return 0.0
         except Exception as e:
             logger.error(f"Lỗi khi lấy nhiệt độ CPU: {e}")
-            return None
+            return 0.0
 
-    def get_gpu_temperature(self, pid: Optional[int] = None) -> List[float]:
+    def get_gpu_temperature(self, pid: Optional[int] = None) -> float:
         """
-        Lấy nhiệt độ hiện tại của từng GPU. 
-        Trả về list rỗng nếu không có GPU hoặc lỗi.
+        Lấy nhiệt độ hiện tại của từng GPU và trả về nhiệt độ trung bình.
+        Trả về 0.0 nếu không có GPU hoặc gặp lỗi.
         """
-        gpu_temps = []
         if self.gpu_count == 0:
             logger.warning("Không có GPU nào được phát hiện để giám sát nhiệt độ.")
-            return gpu_temps
+            return 0.0
 
+        gpu_temps = []
         try:
             for i in range(self.gpu_count):
                 handle = pynvml.nvmlDeviceGetHandleByIndex(i)
                 temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
                 gpu_temps.append(temp)
                 logger.debug(f"GPU {i} Temperature: {temp}°C")
-            return gpu_temps
+            if gpu_temps:
+                avg_temp = sum(gpu_temps) / len(gpu_temps)
+                logger.debug(f"Nhiệt độ GPU trung bình: {avg_temp}°C")
+                return float(avg_temp)
+            else:
+                logger.warning("Không có dữ liệu nhiệt độ GPU để tính trung bình.")
+                return 0.0
         except pynvml.NVMLError as e:
             logger.error(f"Lỗi khi lấy nhiệt độ GPU: {e}")
-            return gpu_temps
+            return 0.0
         except Exception as e:
             logger.error(f"Lỗi không mong muốn khi lấy nhiệt độ GPU: {e}")
-            return gpu_temps
+            return 0.0
 
     def get_current_cpu_threads(self, pid: Optional[int] = None) -> int:
         """
@@ -158,9 +164,10 @@ class TemperatureMonitor:
         except Exception as e:
             logger.error(f"Lỗi khi gán CPU threads: {e}")
 
-    def get_current_ram_allocation(self, pid: Optional[int] = None) -> Optional[int]:
+    def get_current_ram_allocation(self, pid: Optional[int] = None) -> float:
         """
         Lấy lượng RAM hiện tại (MB) cho tiến trình.
+        Trả về 0.0 nếu không thể lấy.
         """
         try:
             if pid:
@@ -171,13 +178,13 @@ class TemperatureMonitor:
                 mem_info = proc.memory_info()
                 ram_mb = mem_info.rss / (1024 * 1024)
                 logger.debug(f"Lượng RAM hiện tại cho tiến trình '{proc.name()}': {ram_mb} MB")
-                return int(ram_mb)
+                return float(ram_mb)
             else:
                 logger.warning("Không tìm thấy tiến trình khai thác để lấy RAM allocation.")
-                return None
+                return 0.0
         except Exception as e:
             logger.error(f"Lỗi khi lấy RAM allocation: {e}")
-            return None
+            return 0.0
 
     def set_ram_allocation(self, new_ram_mb: int, pid: Optional[int] = None):
         """
@@ -205,47 +212,23 @@ class TemperatureMonitor:
         except Exception as e:
             logger.error(f"Lỗi khi thiết lập RAM allocation: {e}")
 
-    def get_current_gpu_usage(self, pid: Optional[int] = None) -> List[float]:
+    def get_current_gpu_usage(self, pid: Optional[int] = None) -> float:
         """
-        Lấy mức sử dụng GPU hiện tại (%) cho tiến trình pid hoặc tổng thể. 
-        Trả về list rỗng nếu không có GPU.
+        Lấy mức sử dụng GPU hiện tại (%) cho tiến trình pid hoặc tổng thể.
+        Trả về 0.0 nếu không có GPU hoặc gặp lỗi.
         """
-        gpu_usages = []
-        if self.gpu_count == 0:
-            logger.warning("Không có GPU nào được phát hiện để giám sát mức sử dụng.")
-            return gpu_usages
+        return self.get_gpu_temperature(pid)
 
-        try:
-            if pid:
-                for i in range(self.gpu_count):
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                    proc_infos = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-                    usage = 0.0
-                    for p_info in proc_infos:
-                        if p_info.pid == pid:
-                            total_mem = pynvml.nvmlDeviceGetMemoryInfo(handle).total
-                            usage_mem = p_info.usedGpuMemory
-                            usage += (usage_mem / total_mem) * 100
-                    gpu_usages.append(usage)
-                    logger.debug(f"GPU {i} Usage for PID {pid}: {usage}%")
-            else:
-                # Lấy mức sử dụng GPU tổng thể
-                for i in range(self.gpu_count):
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                    utilization = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
-                    gpu_usages.append(float(utilization))
-                    logger.debug(f"GPU {i} Utilization: {utilization}%")
-            return gpu_usages
-        except pynvml.NVMLError as e:
-            logger.error(f"Lỗi khi lấy mức sử dụng GPU: {e}")
-            return gpu_usages
-        except Exception as e:
-            logger.error(f"Lỗi không mong muốn khi lấy mức sử dụng GPU: {e}")
-            return gpu_usages
-
-    def get_current_disk_io_limit(self, pid: Optional[int] = None) -> Optional[float]:
+    def get_current_disk_io_limit(self, pid: Optional[int] = None) -> float:
         """
         Lấy giới hạn Disk I/O hiện tại (Mbps) giả lập thông qua cgroup.
+        Trả về 0.0 nếu không thể lấy.
+        """
+        return self._get_current_disk_io_limit(pid)
+
+    def _get_current_disk_io_limit(self, pid: Optional[int] = None) -> float:
+        """
+        Hàm nội bộ để lấy giới hạn Disk I/O, đảm bảo luôn trả về float.
         """
         try:
             if pid:
@@ -255,8 +238,8 @@ class TemperatureMonitor:
                 cgroup_path_read = None
                 cgroup_path_write = None
 
-            read_limit = None
-            write_limit = None
+            read_limit = 0.0
+            write_limit = 0.0
 
             if cgroup_path_read and Path(cgroup_path_read).exists():
                 content = Path(cgroup_path_read).read_text().strip()
@@ -264,28 +247,31 @@ class TemperatureMonitor:
                 # parts = ["8:0", "1048576"]
                 if len(parts) == 2 and parts[1].isdigit():
                     read_limit = int(parts[1]) * 8 / (1024 * 1024)  # B/s -> Mbps
+                    logger.debug(f"Disk I/O limit Read: {read_limit} Mbps")
 
             if cgroup_path_write and Path(cgroup_path_write).exists():
                 content = Path(cgroup_path_write).read_text().strip()
                 parts = content.split()
                 if len(parts) == 2 and parts[1].isdigit():
-                    write_limit = int(parts[1]) * 8 / (1024 * 1024)
+                    write_limit = int(parts[1]) * 8 / (1024 * 1024)  # B/s -> Mbps
+                    logger.debug(f"Disk I/O limit Write: {write_limit} Mbps")
 
-            if read_limit is not None and write_limit is not None:
-                logger.debug(f"Disk I/O limit (cgroup): Read={read_limit}Mbps, Write={write_limit}Mbps")
-                return max(read_limit, write_limit)
-            elif read_limit is not None:
+            if read_limit > 0.0 and write_limit > 0.0:
+                disk_io_limit = max(read_limit, write_limit)
+                logger.debug(f"Disk I/O limit (cgroup): Read={read_limit}Mbps, Write={write_limit}Mbps. Sử dụng max: {disk_io_limit}Mbps")
+                return disk_io_limit
+            elif read_limit > 0.0:
                 logger.debug(f"Disk I/O limit (cgroup) chỉ giới hạn Read={read_limit}Mbps")
                 return read_limit
-            elif write_limit is not None:
+            elif write_limit > 0.0:
                 logger.debug(f"Disk I/O limit (cgroup) chỉ giới hạn Write={write_limit}Mbps")
                 return write_limit
             else:
-                logger.warning("Không thể lấy giới hạn Disk I/O thông qua cgroup blkio.")
-                return None
+                logger.warning("Không thể lấy giới hạn Disk I/O thông qua cgroup blkio. Gán giá trị mặc định 0.0 Mbps.")
+                return 0.0
         except Exception as e:
             logger.error(f"Lỗi khi lấy giới hạn Disk I/O: {e}")
-            return None
+            return 0.0
 
     def set_disk_io_limit(self, new_disk_io_mbps: float, pid: Optional[int] = None):
         """
@@ -320,9 +306,10 @@ class TemperatureMonitor:
         except Exception as e:
             logger.error(f"Lỗi khi thiết lập Disk I/O limit: {e}")
 
-    def get_current_network_bandwidth_limit(self, pid: Optional[int] = None) -> Optional[float]:
+    def get_current_network_bandwidth_limit(self, pid: Optional[int] = None) -> float:
         """
         Lấy giới hạn băng thông mạng (Mbps) giả lập qua tc.
+        Trả về 0.0 nếu không thể lấy.
         """
         try:
             network_interface = 'eth0'
@@ -342,14 +329,14 @@ class TemperatureMonitor:
                         elif 'Mbit' in rate:
                             bw = float(rate.replace('Mbit', ''))
                         else:
-                            bw = None
+                            bw = 0.0
                         logger.debug(f"Network bandwidth limit current: {bw} Mbps")
                         return bw
-            logger.warning("Không tìm thấy giới hạn băng thông mạng.")
-            return None
+            logger.warning("Không tìm thấy giới hạn băng thông mạng. Gán giá trị mặc định 0.0 Mbps.")
+            return 0.0
         except Exception as e:
             logger.error(f"Lỗi khi lấy giới hạn băng thông mạng: {e}")
-            return None
+            return 0.0
 
     def set_network_bandwidth_limit(self, new_network_bw_mbps: float, pid: Optional[int] = None):
         """
@@ -370,41 +357,50 @@ class TemperatureMonitor:
         except Exception as e:
             logger.error(f"Lỗi khi thiết lập giới hạn băng thông mạng: {e}")
 
-    def get_current_cache_limit(self, pid: Optional[int] = None) -> Optional[float]:
+    def get_current_cache_limit(self, pid: Optional[int] = None) -> float:
         """
         Lấy giới hạn Cache hiện tại (%).
+        Trả về 0.0 nếu không thể lấy.
         """
-        logger.debug(f"Giới hạn Cache hiện tại: {self.cache_limit_percent}%")
-        return self.cache_limit_percent
+        try:
+            logger.debug(f"Giới hạn Cache hiện tại: {self.cache_limit_percent}%")
+            return float(self.cache_limit_percent)
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy giới hạn Cache: {e}")
+            return 0.0
 
     def set_cache_limit(self, new_cache_limit_percent: float, pid: Optional[int] = None):
         """
         Thiết lập giới hạn Cache (%) - có logic drop caches nếu cache hiện tại lớn hơn giới hạn.
         """
-        if not (0 < new_cache_limit_percent <= 100):
-            logger.error("Giới hạn Cache phải trong khoảng (0, 100].")
-            return
+        try:
+            if not (0 < new_cache_limit_percent <= 100):
+                logger.error("Giới hạn Cache phải trong khoảng (0, 100].")
+                return
 
-        self.cache_limit_percent = new_cache_limit_percent
-        current_cache = self.get_system_cache_percent()
-        if current_cache and current_cache > self.cache_limit_percent:
-            self.drop_caches()
-            logger.info(f"Đã drop caches để duy trì giới hạn Cache ở mức {self.cache_limit_percent}%.")
-        else:
-            logger.info(f"Giới hạn Cache đã được thiết lập thành công: {self.cache_limit_percent}%.")
+            self.cache_limit_percent = new_cache_limit_percent
+            current_cache = self.get_system_cache_percent()
+            if current_cache > self.cache_limit_percent:
+                self.drop_caches()
+                logger.info(f"Đã drop caches để duy trì giới hạn Cache ở mức {self.cache_limit_percent}%.")
+            else:
+                logger.info(f"Giới hạn Cache đã được thiết lập thành công: {self.cache_limit_percent}%.")
+        except Exception as e:
+            logger.error(f"Lỗi khi thiết lập Cache limit: {e}")
 
-    def get_system_cache_percent(self) -> Optional[float]:
+    def get_system_cache_percent(self) -> float:
         """
         Lấy phần trăm Cache hiện tại của hệ thống.
+        Trả về 0.0 nếu không thể lấy.
         """
         try:
             mem = psutil.virtual_memory()
             cache_percent = mem.cached / mem.total * 100
             logger.debug(f"Cache hiện tại: {cache_percent:.2f}%")
-            return cache_percent
+            return float(cache_percent)
         except Exception as e:
             logger.error(f"Lỗi khi lấy phần trăm Cache: {e}")
-            return None
+            return 0.0
 
     def drop_caches(self):
         """
@@ -462,10 +458,10 @@ _temperature_monitor_instance = TemperatureMonitor()
 def setup_temperature_monitoring():
     _temperature_monitor_instance.setup_temperature_monitoring()
 
-def get_cpu_temperature(pid: Optional[int] = None) -> Optional[float]:
+def get_cpu_temperature(pid: Optional[int] = None) -> float:
     return _temperature_monitor_instance.get_cpu_temperature(pid)
 
-def get_gpu_temperature(pid: Optional[int] = None) -> List[float]:
+def get_gpu_temperature(pid: Optional[int] = None) -> float:
     return _temperature_monitor_instance.get_gpu_temperature(pid)
 
 def get_current_cpu_threads(pid: Optional[int] = None) -> int:
@@ -474,34 +470,34 @@ def get_current_cpu_threads(pid: Optional[int] = None) -> int:
 def set_cpu_threads(new_threads: int, pid: Optional[int] = None):
     _temperature_monitor_instance.set_cpu_threads(new_threads, pid)
 
-def get_current_ram_allocation(pid: Optional[int] = None) -> Optional[int]:
+def get_current_ram_allocation(pid: Optional[int] = None) -> float:
     return _temperature_monitor_instance.get_current_ram_allocation(pid)
 
 def set_ram_allocation(new_ram_mb: int, pid: Optional[int] = None):
     _temperature_monitor_instance.set_ram_allocation(new_ram_mb, pid)
 
-def get_current_gpu_usage(pid: Optional[int] = None) -> List[float]:
+def get_current_gpu_usage(pid: Optional[int] = None) -> float:
     return _temperature_monitor_instance.get_current_gpu_usage(pid)
 
-def get_current_disk_io_limit(pid: Optional[int] = None) -> Optional[float]:
+def get_current_disk_io_limit(pid: Optional[int] = None) -> float:
     return _temperature_monitor_instance.get_current_disk_io_limit(pid)
 
 def set_disk_io_limit(new_disk_io_mbps: float, pid: Optional[int] = None):
     _temperature_monitor_instance.set_disk_io_limit(new_disk_io_mbps, pid)
 
-def get_current_network_bandwidth_limit(pid: Optional[int] = None) -> Optional[float]:
+def get_current_network_bandwidth_limit(pid: Optional[int] = None) -> float:
     return _temperature_monitor_instance.get_current_network_bandwidth_limit(pid)
 
 def set_network_bandwidth_limit(new_network_bw_mbps: float, pid: Optional[int] = None):
     _temperature_monitor_instance.set_network_bandwidth_limit(new_network_bw_mbps, pid)
 
-def get_current_cache_limit(pid: Optional[int] = None) -> Optional[float]:
+def get_current_cache_limit(pid: Optional[int] = None) -> float:
     return _temperature_monitor_instance.get_current_cache_limit(pid)
 
 def set_cache_limit(new_cache_limit_percent: float, pid: Optional[int] = None):
     _temperature_monitor_instance.set_cache_limit(new_cache_limit_percent, pid)
 
-def _get_system_cache_percent() -> Optional[float]:
+def _get_system_cache_percent() -> float:
     return _temperature_monitor_instance.get_system_cache_percent()
 
 def _drop_caches():

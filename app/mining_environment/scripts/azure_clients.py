@@ -637,7 +637,7 @@ class AzureOpenAIClient(AzureBaseClient):
         :param server_config: Thông tin cấu hình máy chủ (tĩnh).
         :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
         :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
-        :return: Danh sách 6 giá trị float đại diện cho cấu hình tối ưu.
+        :return: Danh sách 7 giá trị float đại diện cho cấu hình tối ưu.
         """
         try:
             # Xác thực định dạng của state_data
@@ -645,7 +645,7 @@ class AzureOpenAIClient(AzureBaseClient):
                 self.logger.error(
                     f"state_data không phải là dict. Dữ liệu nhận được: {state_data}"
                 )
-                return [0.0] * 6  # Trả về giá trị mặc định
+                return [0.0] * 7  # Trả về giá trị mặc định
 
             # Tạo prompt với cấu hình máy chủ và mục tiêu tối ưu hóa
             prompt = self.construct_prompt(server_config, optimization_goals, state_data)
@@ -661,16 +661,16 @@ class AzureOpenAIClient(AzureBaseClient):
                     "content": (
                         "You are an expert system resource optimizer. Based on the provided server configuration and optimization goals, "
                         "please suggest an optimization plan to enhance system performance and resource utilization efficiently. "
-                        "Provide exactly one single line with 6 numerical values in CSV format representing the optimized configuration. "
-                        "Do not add any additional explanations. If the frequency is in GHz, only provide the numerical value (e.g., 2.5)."
+                        "Provide exactly one single line with 7 numerical values in CSV format representing the optimized configuration. "
+                        "Do not add any additional explanations."
                     )
                 },
                 {
                     "role": "user",
                     "content": (
                         f"{prompt}\n\n"
-                        "Please return EXACTLY 6 comma-separated floats in the following order:\n"
-                        "[cpu_threads, frequency (in GHz or MHz), ram_allocation_mb, gpu_usage_percent, network_bandwidth_limit_mbps, cache_limit_percent].\n"
+                        "Please return EXACTLY 7 comma-separated floats in the following order:\n"
+                        "[cpu_threads, frequency_mhz, ram_allocation_mb, gpu_usage_percent, disk_io_limit_mbps, network_bandwidth_limit_mbps, cache_limit_percent].\n"
                         "Do not add any additional text or new lines."
                     )
                 }
@@ -685,14 +685,14 @@ class AzureOpenAIClient(AzureBaseClient):
             response = self.client.chat.completions.create(
                 model=self.deployment_name,  # Sử dụng deployment_name làm model
                 messages=messages,
-                max_tokens=50,
+                max_tokens=70,  # Tăng max_tokens để đảm bảo nhận đủ 7 giá trị
                 temperature=0.0
             )
 
             # Kiểm tra phản hồi có chứa choices hay không
             if not response.choices:
                 self.logger.error("Phản hồi từ Azure OpenAI không chứa lựa chọn nào.")
-                return [0.0] * 6  # Trả về giá trị mặc định
+                return [0.0] * 7  # Trả về giá trị mặc định
 
             # Lấy và xử lý phản hồi
             suggestion_text = response.choices[0].message.content.strip()
@@ -713,32 +713,32 @@ class AzureOpenAIClient(AzureBaseClient):
                     self.logger.warning(f"Không thể parse '{x.strip()}' thành float, gán giá trị 0.0.")
                     suggestions_raw.append(0.0)  # Gán giá trị mặc định nếu không thể parse
 
-            # Giới hạn số lượng giá trị ở 6
-            if len(suggestions_raw) > 6:
-                self.logger.warning(f"Nhận được nhiều hơn 6 giá trị: {suggestions_raw}. Giới hạn chỉ lấy 6 giá trị đầu.")
-                suggestions_raw = suggestions_raw[:6]
-            elif len(suggestions_raw) < 6:
-                self.logger.warning(f"Số lượng gợi ý nhận được ít hơn 6: {suggestions_raw}. Bổ sung giá trị 0.0.")
-                suggestions_raw += [0.0] * (6 - len(suggestions_raw))
+            # Giới hạn số lượng giá trị ở 7
+            if len(suggestions_raw) > 7:
+                self.logger.warning(f"Nhận được nhiều hơn 7 giá trị: {suggestions_raw}. Giới hạn chỉ lấy 7 giá trị đầu.")
+                suggestions_raw = suggestions_raw[:7]
+            elif len(suggestions_raw) < 7:
+                self.logger.warning(f"Số lượng gợi ý nhận được ít hơn 7: {suggestions_raw}. Bổ sung giá trị 0.0.")
+                suggestions_raw += [0.0] * (7 - len(suggestions_raw))
 
-            # Xử lý tần số
+            # Xử lý tần số (frequency_mhz)
             if len(suggestions_raw) >= 2:
                 suggestions_raw[1] = self._parse_frequency(suggestions_raw[1])
             else:
                 self.logger.warning("Không đủ dữ liệu để xử lý tần số. Gán giá trị 0.0.")
                 suggestions_raw.append(0.0)  # Bổ sung giá trị mặc định
 
-            # Đảm bảo danh sách luôn có 6 giá trị
-            suggestions_raw = suggestions_raw[:6]
-            if len(suggestions_raw) < 6:
-                suggestions_raw += [0.0] * (6 - len(suggestions_raw))
+            # Đảm bảo danh sách luôn có 7 giá trị
+            suggestions_raw = suggestions_raw[:7]
+            if len(suggestions_raw) < 7:
+                suggestions_raw += [0.0] * (7 - len(suggestions_raw))
 
             self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI (đã parse freq): {suggestions_raw}")
             return suggestions_raw
 
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy gợi ý từ Azure OpenAI: {e}\n{traceback.format_exc()}")
-            return [0.0] * 6  # Trả về giá trị mặc định trong trường hợp lỗi
+            return [0.0] * 7  # Trả về giá trị mặc định trong trường hợp lỗi
 
     def construct_prompt(
         self,

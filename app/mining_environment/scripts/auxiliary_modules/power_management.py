@@ -58,6 +58,50 @@ class PowerManager:
         self.cpu_base_power_watts = 10.0   # Công suất cơ bản khi CPU idle (W)
         self.cpu_max_power_watts = 150.0  # Công suất tối đa khi CPU full load (W)
 
+    def get_gpu_count(self) -> int:
+        """
+        Lấy số lượng GPU hiện có trên hệ thống.
+
+        Returns:
+            int: Số lượng GPU.
+        """
+        try:
+            count = pynvml.nvmlDeviceGetCount()
+            logger.debug(f"Đã lấy số lượng GPU: {count}")
+            return count
+        except pynvml.NVMLError as e:
+            logger.error(f"Lỗi khi lấy số lượng GPU: {e}")
+            return 0
+        except Exception as e:
+            logger.error(f"Lỗi không mong muốn khi lấy số lượng GPU: {e}")
+            return 0
+
+    def get_gpu_usage_percentages(self) -> List[float]:
+        """
+        Lấy danh sách phần trăm sử dụng của tất cả GPU trên hệ thống.
+
+        Returns:
+            List[float]: Danh sách phần trăm sử dụng GPU cho từng GPU.
+        """
+        usage_percentages = []
+        if self.gpu_count == 0:
+            logger.warning("Không có GPU nào được phát hiện để giám sát công suất.")
+            return usage_percentages
+
+        try:
+            for i in range(self.gpu_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                usage_percentages.append(utilization.gpu)
+                logger.debug(f"GPU {i}: {utilization.gpu}% sử dụng")
+            return usage_percentages
+        except pynvml.NVMLError as e:
+            logger.error(f"Lỗi khi lấy phần trăm sử dụng GPU: {e}")
+            return usage_percentages
+        except Exception as e:
+            logger.error(f"Lỗi không mong muốn khi lấy phần trăm sử dụng GPU: {e}")
+            return usage_percentages
+
     def get_cpu_power(self, pid: Optional[int] = None) -> float:
         """
         Ước tính công suất tiêu thụ hiện tại của CPU dựa trên tải CPU.
@@ -123,7 +167,21 @@ class PowerManager:
             new_freq = max(new_freq, min_freq)
 
             for cpu in range(psutil.cpu_count(logical=True)):
-                subprocess.run(['cpufreq-set', '-c', str(cpu), '-f', f"{int(new_freq)}MHz"], check=True)
+                # Đặt governor thành 'userspace' trước khi thiết lập tần số
+                result = subprocess.run(['cpufreq-set', '-c', str(cpu), '-g', 'userspace'],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if result.returncode != 0:
+                    logger.error(f"Lỗi khi đặt governor cho CPU {cpu}: {result.stderr.strip()}")
+                    continue  # Tiếp tục với CPU tiếp theo
+
+                logger.info(f"Đặt governor của CPU {cpu} thành 'userspace'.")
+
+                # Thiết lập tần số CPU
+                result = subprocess.run(['cpufreq-set', '-c', str(cpu), '-f', f"{int(new_freq)}MHz"],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if result.returncode != 0:
+                    logger.error(f"Lỗi khi thiết lập tần số CPU {cpu}: {result.stderr.strip()}")
+                    continue  # Tiếp tục với CPU tiếp theo
 
             logger.info(f"Đã giảm tần số CPU xuống {int(new_freq)}MHz ({reduction_percentage}% giảm).")
         except subprocess.CalledProcessError as e:
@@ -169,14 +227,28 @@ class PowerManager:
 
         Args:
             usage_percentages (List[float]): % sử dụng cho từng GPU.
+            pid (Optional[int]): PID của tiến trình (không sử dụng trong ví dụ này).
         """
         if self.gpu_count == 0:
             logger.warning("Không có GPU nào để điều chỉnh mức sử dụng.")
             return
 
-        if not isinstance(usage_percentages, list) or len(usage_percentages) != self.gpu_count:
-            logger.error("Số lượng phần trăm sử dụng không khớp với số lượng GPU.")
+        if not isinstance(usage_percentages, list):
+            logger.error(f"usage_percentages không phải là list. Đã nhận: {type(usage_percentages)}")
             return
+
+        if len(usage_percentages) != self.gpu_count:
+            logger.error(f"Số lượng phần trăm sử dụng ({len(usage_percentages)}) không khớp với số lượng GPU ({self.gpu_count}).")
+            # Tự động điều chỉnh danh sách
+            if len(usage_percentages) < self.gpu_count:
+                # Bổ sung các phần trăm sử dụng cho GPU còn thiếu
+                additional = [0.0] * (self.gpu_count - len(usage_percentages))
+                usage_percentages.extend(additional)
+                logger.info(f"Bổ sung các phần trăm sử dụng GPU còn thiếu: {additional}")
+            else:
+                # Cắt bớt các phần trăm sử dụng thừa
+                usage_percentages = usage_percentages[:self.gpu_count]
+                logger.info(f"Cắt bớt các phần trăm sử dụng GPU thừa. Danh sách mới: {usage_percentages}")
 
         try:
             for i, usage in enumerate(usage_percentages):
@@ -189,6 +261,13 @@ class PowerManager:
                 desired_power = int(max_power * (usage / 100.0))
 
                 constraints = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+                logger.debug(f"constraints for GPU {i}: {constraints}")
+
+                # Kiểm tra kiểu dữ liệu của constraints
+                if not hasattr(constraints, 'minPowerLimit') or not hasattr(constraints, 'maxPowerLimit'):
+                    logger.error(f"constraints không có thuộc tính 'minPowerLimit' hoặc 'maxPowerLimit': {constraints}")
+                    continue
+
                 min_power_limit = constraints.minPowerLimit
                 max_power_limit = constraints.maxPowerLimit
 
