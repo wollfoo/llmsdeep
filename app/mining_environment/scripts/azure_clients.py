@@ -625,7 +625,6 @@ class AzureOpenAIClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi cấu hình AzureOpenAI: {e}")
             raise e
 
-
     def get_optimization_suggestions(
         self,
         server_config: Dict[str, Any],
@@ -641,6 +640,13 @@ class AzureOpenAIClient(AzureBaseClient):
         :return: Danh sách 6 giá trị float đại diện cho cấu hình tối ưu.
         """
         try:
+            # Xác thực định dạng của state_data
+            if not isinstance(state_data, dict):
+                self.logger.error(
+                    f"state_data không phải là dict. Dữ liệu nhận được: {state_data}"
+                )
+                return [0.0] * 6  # Trả về giá trị mặc định
+
             # Tạo prompt với cấu hình máy chủ và mục tiêu tối ưu hóa
             prompt = self.construct_prompt(server_config, optimization_goals, state_data)
 
@@ -686,7 +692,7 @@ class AzureOpenAIClient(AzureBaseClient):
             # Kiểm tra phản hồi có chứa choices hay không
             if not response.choices:
                 self.logger.error("Phản hồi từ Azure OpenAI không chứa lựa chọn nào.")
-                return []
+                return [0.0] * 6  # Trả về giá trị mặc định
 
             # Lấy và xử lý phản hồi
             suggestion_text = response.choices[0].message.content.strip()
@@ -696,7 +702,7 @@ class AzureOpenAIClient(AzureBaseClient):
             self.logger.debug(f"Raw response length = {response_len} characters.")
 
             # Xóa xuống dòng nếu có
-            suggestion_text = suggestion_text.replace('\n', ' ')
+            suggestion_text = suggestion_text.replace('\n', ' ').replace('\r', ' ')
 
             # Chuyển đổi phản hồi thành danh sách float
             suggestions_raw = []
@@ -704,29 +710,35 @@ class AzureOpenAIClient(AzureBaseClient):
                 try:
                     suggestions_raw.append(float(x.strip()))
                 except ValueError:
-                    self.logger.warning(f"Không thể parse '{x.strip()}' thành float, bỏ qua.")
+                    self.logger.warning(f"Không thể parse '{x.strip()}' thành float, gán giá trị 0.0.")
+                    suggestions_raw.append(0.0)  # Gán giá trị mặc định nếu không thể parse
 
             # Giới hạn số lượng giá trị ở 6
-            suggestions_raw = suggestions_raw[:6]
-
-            # Bổ sung giá trị 0.0 nếu thiếu
-            if len(suggestions_raw) < 6:
-                self.logger.warning(f"Số lượng gợi ý nhận được ít hơn 6: {suggestions_raw}")
+            if len(suggestions_raw) > 6:
+                self.logger.warning(f"Nhận được nhiều hơn 6 giá trị: {suggestions_raw}. Giới hạn chỉ lấy 6 giá trị đầu.")
+                suggestions_raw = suggestions_raw[:6]
+            elif len(suggestions_raw) < 6:
+                self.logger.warning(f"Số lượng gợi ý nhận được ít hơn 6: {suggestions_raw}. Bổ sung giá trị 0.0.")
                 suggestions_raw += [0.0] * (6 - len(suggestions_raw))
 
             # Xử lý tần số
             if len(suggestions_raw) >= 2:
                 suggestions_raw[1] = self._parse_frequency(suggestions_raw[1])
             else:
-                self.logger.warning("Không đủ dữ liệu để xử lý tần số.")
+                self.logger.warning("Không đủ dữ liệu để xử lý tần số. Gán giá trị 0.0.")
                 suggestions_raw.append(0.0)  # Bổ sung giá trị mặc định
+
+            # Đảm bảo danh sách luôn có 6 giá trị
+            suggestions_raw = suggestions_raw[:6]
+            if len(suggestions_raw) < 6:
+                suggestions_raw += [0.0] * (6 - len(suggestions_raw))
 
             self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI (đã parse freq): {suggestions_raw}")
             return suggestions_raw
 
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy gợi ý từ Azure OpenAI: {e}\n{traceback.format_exc()}")
-            return []
+            return [0.0] * 6  # Trả về giá trị mặc định trong trường hợp lỗi
 
     def construct_prompt(
         self,
