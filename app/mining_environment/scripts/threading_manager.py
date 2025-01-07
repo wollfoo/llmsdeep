@@ -1,3 +1,6 @@
+#threading_manager.py
+
+
 import os
 import sys
 import json
@@ -7,7 +10,6 @@ from queue import PriorityQueue, Full
 from ratelimiter import RateLimiter
 import psutil
 import time
-
 
 class ThreadingManager:
     """
@@ -88,7 +90,6 @@ class ThreadingManager:
         """
         self.logger.info("Dừng ThreadingManager...")
         self.stop_event.set()
-
         self.cpu_worker_thread.join()
         self.gpu_worker_thread.join()
         self.monitor_and_adjust_thread.join()

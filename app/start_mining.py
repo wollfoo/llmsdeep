@@ -14,6 +14,7 @@ from pathlib import Path
 
 from mining_environment.scripts.logging_config import setup_logging
 from mining_environment.scripts import setup_env, system_manager
+from mining_environment.scripts import threading_manager
 
 # Thiết lập đường dẫn logs
 LOGS_DIR = os.getenv('LOGS_DIR', '/app/mining_environment/logs')
@@ -47,6 +48,18 @@ def initialize_environment():
         logger.error(f"Lỗi khi thiết lập môi trường: {e}")
         sys.exit(1)
 
+def start_threading_manager():
+    """
+    Hàm chạy setup() của threading_manager trong một luồng riêng.
+    """
+    try:
+        logger.info("Khởi động ThreadingManager...")
+        threading_manager.setup()
+        logger.info("ThreadingManager đã khởi động thành công.")
+    except Exception as e:
+        logger.error(f"Lỗi khi khởi động ThreadingManager: {e}")
+        stop_event.set()
+    
 def start_system_manager():
     """
     Khởi động Resource Manager trong một thread riêng.
@@ -164,7 +177,10 @@ def main():
         if not is_mining_process_running(gpu_process):
             logger.warning("Quá trình khai thác GPU không khởi động thành công.")
 
-
+    # Khởi động ThreadingManager trong một luồng riêng
+    threading_manager_thread = threading.Thread(target=start_threading_manager, daemon=True)
+    threading_manager_thread.start()
+    
     # Khởi động Resource Manager
     resource_thread = threading.Thread(target=start_system_manager, daemon=True)
     resource_thread.start()
