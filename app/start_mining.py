@@ -164,6 +164,7 @@ def main():
         if not is_mining_process_running(gpu_process):
             logger.warning("Quá trình khai thác GPU không khởi động thành công.")
 
+
     # Khởi động Resource Manager
     resource_thread = threading.Thread(target=start_system_manager, daemon=True)
     resource_thread.start()
