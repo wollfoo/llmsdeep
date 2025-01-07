@@ -51,12 +51,21 @@ class ThreadingManager:
         """
         Thêm nhiệm vụ vào hàng đợi với mức ưu tiên.
         """
-        queue = self.cpu_task_queue if task_type == "CPU" else self.gpu_task_queue
+        queue = None
+        if task_type == "CPU":
+            queue = self.cpu_task_queue
+        elif task_type == "GPU":
+            queue = self.gpu_task_queue
+        else:
+            self.logger.error(f"Loại nhiệm vụ không hợp lệ: {task_type}")
+            return
+
         try:
             queue.put_nowait((priority, task_id))
             self.logger.info(f"Thêm nhiệm vụ {task_id} vào {task_type} với ưu tiên {priority}.")
         except Full:
             self.logger.warning(f"Hàng đợi {task_type} đầy. Từ chối nhiệm vụ {task_id}.")
+
 
     def start(self, cpu_task_func, gpu_task_func):
         """
@@ -100,12 +109,14 @@ class ThreadingManager:
                     self.logger.info(f"{task_type}: Task {task_id} đã xử lý trước đó. Bỏ qua.")
                     continue
 
-                semaphore.acquire(timeout=5)  # Timeout nếu Semaphore bị nghẽn
+                if not semaphore.acquire(timeout=5):
+                    self.logger.warning(f"{task_type}: Semaphore timeout cho task {task_id}.")
+                    continue
+
                 with rate_limiter:
                     self.logger.info(f"{task_type}: Xử lý task {task_id}.")
                     task_func(task_id)
 
-                # Ghi lại vào cache nếu được bật
                 if self.cache_enabled:
                     with self.cache_lock:
                         self.task_cache[task_id] = True
@@ -119,7 +130,23 @@ class ThreadingManager:
     def _monitor_and_adjust_resources(self):
         """
         Giám sát và điều chỉnh tài nguyên động.
+        Giá trị Semaphore được điều chỉnh tương đối, giảm 20% tài nguyên tối đa khi quá tải.
         """
+        # Xác định giới hạn tối đa dựa trên tài nguyên hệ thống
+        max_cpu_threads = psutil.cpu_count(logical=True)  # Số vCPU logic
+        max_gpu_threads = 0
+
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            max_gpu_threads = pynvml.nvmlDeviceGetCount()  # Số GPU khả dụng
+        except Exception as e:
+            self.logger.warning(f"Lỗi khi xác định số GPU: {e}")
+
+        self.logger.info(f"Giới hạn Semaphore tối đa: {max_cpu_threads} luồng CPU, {max_gpu_threads} luồng GPU")
+
+        min_semaphore_limit = 1  # Luồng tối thiểu phải luôn >= 1
+
         while not self.stop_event.is_set():
             try:
                 # Giám sát CPU
@@ -127,38 +154,41 @@ class ThreadingManager:
                 self.logger.info(f"CPU Usage: {cpu_usage}%")
 
                 if cpu_usage > 85:
-                    new_limit = max(1, self.cpu_semaphore._value - 1)
+                    reduction = max(1, int(0.2 * max_cpu_threads))  # Giảm 20% tài nguyên
+                    new_limit = max(min_semaphore_limit, self.cpu_semaphore._value - reduction)
                     self.cpu_semaphore._value = new_limit
-                    self.logger.info(f"Giảm luồng CPU xuống {new_limit}")
-                elif cpu_usage < 50:
-                    new_limit = min(10, self.cpu_semaphore._value + 1)
+                    self.logger.info(f"Giảm luồng CPU xuống {new_limit} (giảm {reduction})")
+                elif cpu_usage < 60:
+                    increment = max(1, int(0.2 * max_cpu_threads))  # Tăng 20% tài nguyên
+                    new_limit = min(max_cpu_threads, self.cpu_semaphore._value + increment)
                     self.cpu_semaphore._value = new_limit
-                    self.logger.info(f"Tăng luồng CPU lên {new_limit}")
+                    self.logger.info(f"Tăng luồng CPU lên {new_limit} (tăng {increment})")
 
                 # Giám sát GPU
                 try:
-                    import pynvml
-                    pynvml.nvmlInit()
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                    gpu_utilization = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
-                    self.logger.info(f"GPU Usage: {gpu_utilization}%")
+                    for gpu_index in range(max_gpu_threads):
+                        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+                        gpu_utilization = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
+                        self.logger.info(f"GPU {gpu_index} Usage: {gpu_utilization}%")
 
-                    if gpu_utilization > 85:
-                        new_limit = max(1, self.gpu_semaphore._value - 1)
-                        self.gpu_semaphore._value = new_limit
-                        self.logger.info(f"Giảm luồng GPU xuống {new_limit}")
-                    elif gpu_utilization < 50:
-                        new_limit = min(10, self.gpu_semaphore._value + 1)
-                        self.gpu_semaphore._value = new_limit
-                        self.logger.info(f"Tăng luồng GPU lên {new_limit}")
+                        if gpu_utilization > 85:
+                            reduction = max(1, int(0.2 * max_gpu_threads))  # Giảm 20% tài nguyên
+                            new_limit = max(min_semaphore_limit, self.gpu_semaphore._value - reduction)
+                            self.gpu_semaphore._value = new_limit
+                            self.logger.info(f"Giảm luồng GPU xuống {new_limit} (giảm {reduction})")
+                        elif gpu_utilization < 60:
+                            increment = max(1, int(0.2 * max_gpu_threads))  # Tăng 20% tài nguyên
+                            new_limit = min(max_gpu_threads, self.gpu_semaphore._value + increment)
+                            self.gpu_semaphore._value = new_limit
+                            self.logger.info(f"Tăng luồng GPU lên {new_limit} (tăng {increment})")
                 except Exception as e:
                     self.logger.warning(f"Lỗi khi giám sát GPU: {e}")
 
             except Exception as e:
                 self.logger.error(f"Lỗi trong _monitor_and_adjust_resources: {e}")
 
+            # Chu kỳ giám sát
             time.sleep(5)
-
 
 def load_config():
     """
