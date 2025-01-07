@@ -338,6 +338,7 @@ class AnomalyDetector(BaseManager):
 
             sleep(1)  # Nghỉ ngắn để tránh vòng lặp quá sát
 
+
     def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
         try:
             proc = psutil.Process(process.pid)

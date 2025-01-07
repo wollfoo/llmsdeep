@@ -49,13 +49,13 @@ class CpuCloakStrategy(CloakStrategy):
             logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
             self.throttle_percentage = 20
 
-        self.max_concurrent_threads = config.get('max_concurrent_threads', 4)
+        self.max_concurrent_threads = config.get('max_concurrent_threads', 5)
         if not isinstance(self.max_concurrent_threads, int) or self.max_concurrent_threads <= 0:
             logger.warning("Giá trị max_concurrent_threads không hợp lệ, mặc định 4.")
-            self.max_concurrent_threads = 4
+            self.max_concurrent_threads = 5
         self.thread_semaphore = Semaphore(self.max_concurrent_threads)
 
-        self.max_calls_per_second = config.get('max_calls_per_second', 5)
+        self.max_calls_per_second = config.get('max_calls_per_second', 10)
         self.rate_limiter = RateLimiter(max_calls=self.max_calls_per_second, period=1)
 
         self.cache_enabled = config.get('cache_enabled', True)
@@ -210,9 +210,16 @@ class CpuCloakStrategy(CloakStrategy):
             return False
 
     def calculate_cpu_quota(self) -> int:
-        """Tính quota CPU dựa trên self.throttle_percentage."""
+        """Tính quota CPU dựa trên self.throttle_percentage và số core logic."""
         cpu_period_us = 100000  # 100ms
-        return int(cpu_period_us * (1 - self.throttle_percentage / 100))
+        total_cores = psutil.cpu_count(logical=True)  # Tổng số core logic
+        target_usage_cores = total_cores * (1 - self.throttle_percentage / 100)
+
+        # Đảm bảo không vượt quá giới hạn logic core
+        max_quota = cpu_period_us * total_cores
+        calculated_quota = int(cpu_period_us * target_usage_cores)
+
+        return min(calculated_quota, max_quota)
 
     def set_cpu_quota(self, cgroup_name: str, quota_us: int):
         """Thiết lập quota cho cgroup CPU."""
