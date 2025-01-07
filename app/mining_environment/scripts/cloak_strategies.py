@@ -155,12 +155,28 @@ class CpuCloakStrategy(CloakStrategy):
             available_cores = self.get_available_cpu_cores()
             self.set_cpu_affinity(cpuset_cgroup, available_cores)
 
+            # Thiết lập cpuset.mems
+            self.set_cpu_mems(cpuset_cgroup, [0])  # Giả sử hệ thống có một memory node
+
             # Gán PID
             self.assign_process_to_cgroup(cpu_cgroup, pid, controller='cpu')
             self.assign_process_to_cgroup(cpuset_cgroup, pid, controller='cpuset')
 
         except Exception as e:
             self.logger.error(f"Lỗi khi thiết lập cgroups cho PID {pid}: {e}")
+            raise
+
+    def set_cpu_mems(self, cgroup_name: str, mems: List[int]):
+        """Thiết lập danh sách memory nodes cho cpuset cgroup."""
+        try:
+            mems_str = ",".join(map(str, mems))
+            subprocess.run(['cgset', '-r', f'cpuset.mems={mems_str}', cgroup_name], check=True)
+            self.logger.info(f"Đặt cpuset.mems={mems_str} cho cgroup cpuset '{cgroup_name}'.")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi cgset cpuset.mems cho '{cgroup_name}': {e.stderr}")
+            raise
+        except Exception as e:
+            self.logger.error(f"Lỗi set_cpu_mems: {e}")
             raise
 
     def create_cgroup(self, cgroup_name: str, controller: str) -> bool:
