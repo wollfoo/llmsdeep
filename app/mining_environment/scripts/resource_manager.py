@@ -471,6 +471,14 @@ class SharedResourceManager:
             if 'cache_limit_percent' in orig_limits:
                 self.adjust_cache_limit(pid, orig_limits['cache_limit_percent'], name)
 
+            # Xóa cgroups liên quan đến cloaking
+            cgroup_cpu = f"cpu_cloak_{pid}"
+            cgroup_cpuset = f"cpuset_cloak_{pid}"
+            subprocess.run(['cgdelete', '-g', f'cpu:/{cgroup_cpu}'], check=True)
+            subprocess.run(['cgdelete', '-g', f'cpuset:/{cgroup_cpuset}'], check=True)
+            self.logger.info(f"Đã xóa cgroups liên quan đến cloaking cho {name} (PID={pid}).")
+
+            # Xóa trạng thái ban đầu
             del self.original_resource_limits[pid]
             self.logger.info(
                 f"Khôi phục xong tài nguyên cho {name} (PID={pid})."
