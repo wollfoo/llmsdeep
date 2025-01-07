@@ -163,12 +163,25 @@ class ThreadingManager:
 def load_config():
     """
     Tải cấu hình từ tệp JSON.
+    Trả về cấu hình dưới dạng dictionary.
     """
-    config_dir = os.getenv("CONFIG_DIR", "/app/mining_environment/config")
-    config_path = os.path.join(config_dir, "resource_config.json")
-    with open(config_path, "r") as f:
-        return json.load(f)
+    try:
+        # Lấy đường dẫn từ biến môi trường hoặc dùng giá trị mặc định
+        config_dir = os.getenv("CONFIG_DIR", "/app/mining_environment/config")
+        config_path = os.path.join(config_dir, "threading_config.json")
 
+        # Kiểm tra xem tệp có tồn tại không
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Không tìm thấy tệp cấu hình tại: {config_path}")
+
+        # Đọc và tải nội dung tệp JSON
+        with open(config_path, "r") as f:
+            return json.load(f)
+
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Lỗi: {e}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Lỗi định dạng JSON trong tệp cấu hình: {e}")
 
 def setup():
     """
@@ -177,35 +190,60 @@ def setup():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("ThreadingManager")
 
-    config = load_config()
-
-    threading_manager = ThreadingManager(
-        max_cpu_threads=5,
-        max_gpu_threads=2,
-        cpu_rate_limit=25,
-        gpu_rate_limit=20,
-        cache_enabled=True,
-        logger=logger
-    )
-
-    def cpu_task(task_id):
-        logger.info(f"CPU Task {task_id} đang chạy.")
-        time.sleep(1)
-
-    def gpu_task(task_id):
-        logger.info(f"GPU Task {task_id} đang chạy.")
-        time.sleep(2)
-
-    for i in range(10):
-        threading_manager.add_task(priority=10 - i, task_id=i, task_type="CPU")
-        threading_manager.add_task(priority=10 - i, task_id=i, task_type="GPU")
-
     try:
-        threading_manager.start(cpu_task, gpu_task)
-        time.sleep(30)
-    finally:
-        threading_manager.stop()
+        # Tải cấu hình từ file config
+        config = load_config()
 
+        # Lấy tên tiến trình CPU và GPU từ cấu hình
+        cpu_process_name = config["processes"]["CPU"]
+        gpu_process_name = config["processes"]["GPU"]
+        logger.info(f"Tiến trình CPU: {cpu_process_name}")
+        logger.info(f"Tiến trình GPU: {gpu_process_name}")
+
+        # Lấy cấu hình cho ThreadingManager từ config
+        max_cpu_threads = config["max_cpu_threads"]
+        max_gpu_threads = config["max_gpu_threads"]
+        cpu_rate_limit = config["cpu_rate_limit"]
+        gpu_rate_limit = config["gpu_rate_limit"]
+        cache_enabled = config["cache_enabled"]
+
+        # Khởi tạo ThreadingManager
+        threading_manager = ThreadingManager(
+            max_cpu_threads=max_cpu_threads,
+            max_gpu_threads=max_gpu_threads,
+            cpu_rate_limit=cpu_rate_limit,
+            gpu_rate_limit=gpu_rate_limit,
+            cache_enabled=cache_enabled,
+            logger=logger
+        )
+
+        # Định nghĩa các tác vụ CPU và GPU
+        def cpu_task(task_id):
+            logger.info(f"[{cpu_process_name}] Đang xử lý nhiệm vụ CPU {task_id}")
+            time.sleep(1)
+
+        def gpu_task(task_id):
+            logger.info(f"[{gpu_process_name}] Đang xử lý nhiệm vụ GPU {task_id}")
+            time.sleep(2)
+
+        # Thêm nhiệm vụ vào hàng đợi
+        for i in range(10):
+            threading_manager.add_task(priority=10 - i, task_id=i, task_type="CPU")
+            threading_manager.add_task(priority=10 - i, task_id=i, task_type="GPU")
+
+        # Chạy ThreadingManager
+        try:
+            threading_manager.start(cpu_task, gpu_task)
+            time.sleep(30)  # Chạy trong 30 giây
+        finally:
+            threading_manager.stop()
+
+    except FileNotFoundError:
+        logger.error("Không tìm thấy tệp cấu hình. Vui lòng kiểm tra đường dẫn.")
+    except KeyError as e:
+        logger.error(f"Thiếu trường cấu hình quan trọng: {e}")
+    except json.JSONDecodeError:
+        logger.error("Tệp cấu hình không hợp lệ. Vui lòng kiểm tra định dạng JSON.")
 
 if __name__ == "__main__":
     setup()
