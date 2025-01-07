@@ -182,8 +182,8 @@ def main():
     threading_manager_thread.start()
     
     # Khởi động Resource Manager
-    resource_thread = threading.Thread(target=start_system_manager, daemon=True)
-    resource_thread.start()
+    # resource_thread = threading.Thread(target=start_system_manager, daemon=True)
+    # resource_thread.start()
 
     # Vòng lặp chính
     try:
