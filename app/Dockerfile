@@ -8,6 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8
 
+
 # Thêm các biến môi trường Azure và các khóa API
 ARG AZURE_SUBSCRIPTION_ID
 ARG AZURE_CLIENT_ID
