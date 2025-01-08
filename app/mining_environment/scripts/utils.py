@@ -119,6 +119,31 @@ class GPUManager:
             return 0.0
 
 
+    @retry(pynvml.NVMLError, tries=3, delay=2, backoff=2)
+    def set_gpu_power_limit(self, gpu_index: int, power_limit_w: int) -> bool:
+        """
+        Đặt power limit cho GPU cụ thể.
+
+        Args:
+            gpu_index (int): Chỉ số GPU.
+            power_limit_w (int): Power limit mới (W).
+
+        Returns:
+            bool: True nếu thành công, False nếu thất bại.
+        """
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+            power_limit_mw = power_limit_w * 1000
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit_mw)
+            self.logger.info(f"Đặt power limit GPU {gpu_index} thành {power_limit_w}W.")
+            return True
+        except pynvml.NVMLError as e:
+            self.logger.error(f"Lỗi khi đặt power limit GPU {gpu_index}: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Lỗi bất ngờ khi đặt power limit GPU {gpu_index}: {e}")
+            return False
+
 class MiningProcess:
     """
     Đại diện cho một tiến trình khai thác với các chỉ số sử dụng tài nguyên.

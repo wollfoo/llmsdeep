@@ -10,6 +10,7 @@ from typing import Dict, Any
 from .resource_manager import ResourceManager
 from .anomaly_detector import AnomalyDetector
 from .logging_config import setup_logging
+from .utils import GPUManager  # Import GPUManager
 
 # Định nghĩa các thư mục cấu hình và logs
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
@@ -22,7 +23,6 @@ anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.
 
 # Global instance of SystemManager (the main orchestrator)
 _system_manager_instance = None
-
 
 class SystemManager:
     """
@@ -41,6 +41,13 @@ class SystemManager:
         self.system_logger = system_logger
         self.resource_logger = resource_logger
         self.anomaly_logger = anomaly_logger
+
+        # Khởi tạo GPUManager trước khi khởi tạo các module khác
+        self.gpu_manager = GPUManager()
+        if self.gpu_manager.gpu_initialized:
+            self.system_logger.info(f"Đã phát hiện {self.gpu_manager.gpu_count} GPU trên hệ thống.")
+        else:
+            self.system_logger.warning("Không phát hiện GPU trên hệ thống hoặc NVML không thể khởi tạo.")
 
         # Khởi tạo ResourceManager và AnomalyDetector với logger tương ứng
         self.resource_manager = ResourceManager(config, resource_logger)

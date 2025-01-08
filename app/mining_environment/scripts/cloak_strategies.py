@@ -8,6 +8,8 @@ import logging
 import traceback
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
+from .utils import GPUManager
+
 
 class CloakStrategy(ABC):
     """
@@ -253,16 +255,14 @@ class GpuCloakStrategy(CloakStrategy):
         self.target_mem_clock = config.get('target_mem_clock', 800) # MHz
 
         self.logger = logger
-        self.gpu_initialized = gpu_initialized
+        self.gpu_manager = GPUManager()
+        self.gpu_initialized = self.gpu_manager.gpu_initialized
 
-        # Khởi tạo NVML nếu GPU đã được khởi tạo
+        # Không cần khởi tạo NVML tại đây
         if self.gpu_initialized:
-            try:
-                pynvml.nvmlInit()
-                atexit.register(pynvml.nvmlShutdown)
-            except pynvml.NVMLError as e:
-                self.logger.error(f"Khởi tạo NVML thất bại: {e}")
-                self.gpu_initialized = False
+            self.logger.info("GPUManager đã được khởi tạo thành công. Sẵn sàng áp dụng cloaking GPU.")
+        else:
+            self.logger.warning("GPUManager chưa được khởi tạo. Các chức năng cloaking GPU sẽ bị vô hiệu hóa.")
 
     def apply(self, process: Any, cgroups: Dict[str, str]) -> None:
         """
@@ -274,14 +274,14 @@ class GpuCloakStrategy(CloakStrategy):
         """
         if not self.gpu_initialized:
             self.logger.warning(
-                f"GPU chưa được khởi tạo. Không thể áp dụng cloaking GPU cho tiến trình "
+                f"GPUManager chưa được khởi tạo. Không thể áp dụng cloaking GPU cho tiến trình "
                 f"{getattr(process, 'name', 'unknown')} (PID: {getattr(process, 'pid', 'N/A')})."
             )
             return
 
         try:
             pid, process_name = self.get_process_info(process)
-            gpu_count = pynvml.nvmlDeviceGetCount()
+            gpu_count = self.gpu_manager.gpu_count
 
             if gpu_count == 0:
                 self.logger.warning("Không tìm thấy GPU nào trên hệ thống.")
@@ -326,11 +326,16 @@ class GpuCloakStrategy(CloakStrategy):
             desired_power_limit_w = max(min_w, min(desired_power_limit_w, max_w))
             desired_power_limit_w = int(round(desired_power_limit_w))
 
-            # Đặt power limit mới
-            pynvml.nvmlDeviceSetPowerManagementLimit(handle, desired_power_limit_w * 1000)
-            self.logger.info(
-                f"Đặt power limit GPU là {desired_power_limit_w}W cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
-            )
+            # Đặt power limit mới thông qua GPUManager
+            success = self.gpu_manager.set_gpu_power_limit(gpu_index, desired_power_limit_w)
+            if success:
+                self.logger.info(
+                    f"Đặt power limit GPU là {desired_power_limit_w}W cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
+                )
+            else:
+                self.logger.error(
+                    f"Không thể đặt power limit GPU cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
+                )
 
             # Tùy chọn: Đặt xung nhịp GPU (SM và Memory)
             try:

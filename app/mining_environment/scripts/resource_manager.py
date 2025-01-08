@@ -5,7 +5,7 @@ import logging
 import subprocess
 import psutil
 import pynvml
-import traceback 
+import traceback
 from time import sleep, time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +14,7 @@ from threading import Event, Thread, Lock
 from typing import List, Any, Dict, Optional
 from readerwriterlock import rwlock
 from itertools import count
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import các module phụ trợ từ dự án
 from .base_manager import BaseManager
@@ -114,7 +115,7 @@ class SharedResourceManager:
         """
         Đóng NVML khi không cần thiết.
         """
-        self.gpu_manager.shutdown_nvml()
+        self.gpu_manager.shutdown_nvml()  # Sử dụng GPUManager để shutdown NVML
 
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess, cgroups: Dict[str, str]):
         """
@@ -215,9 +216,13 @@ class SharedResourceManager:
             bool: True nếu điều chỉnh thành công, ngược lại False.
         """
         self.logger.debug(f"Adjusting GPU power limit for PID={pid}, power_limit={power_limit}, unit={unit}")
+        if not self.gpu_manager.gpu_initialized:
+            self.logger.error("GPUManager chưa được khởi tạo. Không thể điều chỉnh GPU power limit.")
+            return False
+
         try:
-            pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            gpu_index = 0  # Giả sử sử dụng GPU đầu tiên. Có thể mở rộng để chọn GPU dựa trên PID hoặc logic khác.
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
 
             if unit.lower() == 'mw':
                 power_limit_mw = power_limit
@@ -252,11 +257,6 @@ class SharedResourceManager:
             self.logger.error(
                 f"Lỗi không xác định khi set GPU power limit cho {process_name} (PID={pid}): {e}."
             )
-        finally:
-            try:
-                pynvml.nvmlShutdown()
-            except Exception:
-                pass
 
         return False
 
@@ -393,8 +393,29 @@ class SharedResourceManager:
             interface (str): Tên giao diện mạng.
             bandwidth_limit (float): Giới hạn băng thông (Mbps).
         """
-        """Placeholder cho tc/iptables."""
-        pass
+        try:
+            # Sử dụng `tc` để giới hạn băng thông mạng
+            # Giả sử `tc` đã được cài đặt và cấu hình đúng cách trên hệ thống
+            # Reset các qdisc hiện tại
+            subprocess.run(['tc', 'qdisc', 'del', 'dev', interface, 'root'], check=False, stderr=subprocess.DEVNULL)
+            # Thiết lập limit băng thông
+            subprocess.run([
+                'tc', 'qdisc', 'add', 'dev', interface, 'root', 'handle', '1:0',
+                'htb', 'default', '30'
+            ], check=True)
+            subprocess.run([
+                'tc', 'class', 'add', 'dev', interface, 'parent', '1:0',
+                'classid', '1:1', 'htb', 'rate', f'{bandwidth_limit}Mbps'
+            ], check=True)
+            self.logger.info(
+                f"Đã cấu hình giới hạn băng thông mạng cho giao diện {interface} thành {bandwidth_limit} Mbps."
+            )
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi cấu hình network interface {interface} với tc: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi configure_network_interface cho {interface}: {e}\n{traceback.format_exc()}"
+            )
 
     # Bỏ hàm throttle_cpu_based_on_load hoàn toàn
 
@@ -435,9 +456,21 @@ class ResourceManager(BaseManager):
         self.initialize_azure_clients()
         self.discover_azure_resources()
 
-        # Khởi tạo các thread
-        self.initialize_threads()
+        # Khởi tạo SharedResourceManager
         self.shared_resource_manager = SharedResourceManager(config, logger)
+
+        # Sử dụng ThreadPoolExecutor để quản lý các thread
+        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.initialize_tasks()
+
+    def initialize_tasks(self):
+        """
+        Khởi tạo các tác vụ bằng ThreadPoolExecutor.
+        """
+        # Submit các thread vào executor
+        self.monitor_future = self.executor.submit(self.monitor_and_adjust)
+        self.cloaking_future = self.executor.submit(self.process_cloaking_requests)
+        self.adjustment_future = self.executor.submit(self.process_resource_adjustments)
 
     def start(self):
         """
@@ -445,7 +478,6 @@ class ResourceManager(BaseManager):
         """
         self.logger.info("Bắt đầu ResourceManager...")
         self.discover_mining_processes()
-        self.start_threads()
         self.logger.info("ResourceManager đã khởi động xong.")
 
     def stop(self):
@@ -454,49 +486,10 @@ class ResourceManager(BaseManager):
         """
         self.logger.info("Dừng ResourceManager...")
         self.stop_event.set()
-        self.join_threads()
+        self.executor.shutdown(wait=True)
         self.shared_resource_manager.shutdown_nvml()
         self.shutdown_power_management()  # Gọi hàm shutdown_power_management
         self.logger.info("ResourceManager đã dừng.")
-
-    def initialize_threads(self):
-        """
-        Khởi tạo các thread cho ResourceManager.
-        """
-        self.monitor_thread = Thread(
-            target=self.monitor_and_adjust, name="MonitorThread", daemon=True
-        )
-        self.cloaking_thread = Thread(
-            target=self.process_cloaking_requests, name="CloakingThread", daemon=True
-        )
-        # Bỏ optimization_thread vì các phần liên quan đến OpenAI đã được loại bỏ
-        # self.optimization_thread = Thread(
-        #     target=self.optimize_resources, name="OptimizationThread", daemon=True
-        # )
-        # Bỏ resource_adjustment_thread vì các điều chỉnh giờ đây được thực hiện trực tiếp bởi các chiến lược cloaking
-        # self.resource_adjustment_thread = Thread(
-        #     target=self.resource_adjustment_handler, name="ResourceAdjustmentThread", daemon=True
-        # )
-
-    def start_threads(self):
-        """
-        Bắt đầu các thread đã khởi tạo.
-        """
-        self.monitor_thread.start()
-        self.cloaking_thread.start()
-        # Bỏ optimization_thread và resource_adjustment_thread
-        # self.optimization_thread.start()
-        # self.resource_adjustment_thread.start()
-
-    def join_threads(self):
-        """
-        Chờ các thread kết thúc.
-        """
-        self.monitor_thread.join()
-        self.cloaking_thread.join()
-        # Bỏ optimization_thread và resource_adjustment_thread
-        # self.optimization_thread.join()
-        # self.resource_adjustment_thread.join()
 
     def initialize_azure_clients(self):
         """
@@ -544,7 +537,11 @@ class ResourceManager(BaseManager):
             cpu_name = self.config['processes'].get('CPU', '').lower()
             gpu_name = self.config['processes'].get('GPU', '').lower()
 
-            with self.mining_processes_lock.gen_wlock():
+            with self.mining_processes_lock.gen_wlock(timeout=5) as resource_lock_acquired:
+                if not resource_lock_acquired:
+                    self.logger.error("Timeout khi acquire mining_processes_lock trong discover_mining_processes.")
+                    return
+
                 self.mining_processes.clear()
                 for proc in psutil.process_iter(['pid', 'name']):
                     pname = proc.info['name'].lower()
@@ -646,12 +643,12 @@ class ResourceManager(BaseManager):
             gpu_temp = temperature_monitor.get_gpu_temperature(process.pid)
 
             adjustments = {}
-            if cpu_temp > cpu_max_temp:
+            if cpu_temp is not None and cpu_temp > cpu_max_temp:
                 self.logger.warning(
                     f"Nhiệt độ CPU {cpu_temp}°C > {cpu_max_temp}°C (PID={process.pid})."
                 )
                 adjustments['cpu_cloak'] = True
-            if gpu_temp > gpu_max_temp:
+            if gpu_temp is not None and gpu_temp > gpu_max_temp:
                 self.logger.warning(
                     f"Nhiệt độ GPU {gpu_temp}°C > {gpu_max_temp}°C (PID={process.pid})."
                 )
@@ -722,48 +719,59 @@ class ResourceManager(BaseManager):
         Phân bổ tài nguyên cho các tiến trình khai thác theo thứ tự ưu tiên.
         """
         try:
-            with self.resource_lock.gen_wlock(), self.mining_processes_lock.gen_rlock():
-                # Sắp xếp các tiến trình theo độ ưu tiên giảm dần
-                sorted_procs = sorted(
-                    self.mining_processes,
-                    key=lambda x: x.priority,
-                    reverse=True
-                )
-                
-                total_cores = psutil.cpu_count(logical=True)
-                allocated = 0
-                
-                for proc in sorted_procs:
-                    if allocated >= total_cores:
-                        self.logger.warning(
-                            f"Không còn CPU core cho {proc.name} (PID: {proc.pid})."
-                        )
-                        continue
+            # Acquire locks theo thứ tự: resource_lock trước, mining_processes_lock sau
+            with self.resource_lock.gen_wlock(timeout=5) as resource_lock_acquired:
+                if not resource_lock_acquired:
+                    self.logger.error("Timeout khi acquire resource_lock trong allocate_resources_with_priority.")
+                    return
+
+                with self.mining_processes_lock.gen_rlock(timeout=5) as mining_lock_acquired:
+                    if not mining_lock_acquired:
+                        self.logger.error("Timeout khi acquire mining_processes_lock trong allocate_resources_with_priority.")
+                        return
+
+                    # Sắp xếp các tiến trình theo độ ưu tiên giảm dần
+                    sorted_procs = sorted(
+                        self.mining_processes,
+                        key=lambda x: x.priority,
+                        reverse=True
+                    )
                     
-                    # Giới hạn CPU sử dụng bằng cgroup
-                    cpu_limit = min(proc.priority, total_cores - allocated) / total_cores
-                    quota = int(cpu_limit * 100000)
+                    total_cores = psutil.cpu_count(logical=True)
+                    allocated = 0
                     
-                    # Tạo cgroup 'priority_cpu' nếu chưa tồn tại
-                    subprocess.run(['cgcreate', '-g', 'cpu:/priority_cpu'], check=False)
-                    # Thiết lập quota CPU cho cgroup
-                    subprocess.run(['cgset', '-r', f'cpu.cfs_quota_us={quota}', 'priority_cpu'], check=True)
-                    # Gán tiến trình vào cgroup 'priority_cpu'
-                    subprocess.run(['cgclassify', '-g', 'cpu:priority_cpu', str(proc.pid)], check=True)
-                    
-                    # Enqueue cloaking strategy
-                    task = {
-                        'type': 'cloaking',
-                        'process': proc,
-                        'strategies': ['cpu']
-                    }
-                    self.resource_adjustment_queue.put((
-                        3, 
-                        next(self._counter),
-                        task
-                    ))
-                    
-                    allocated += proc.priority
+                    for proc in sorted_procs:
+                        if allocated >= total_cores:
+                            self.logger.warning(
+                                f"Không còn CPU core cho {proc.name} (PID: {proc.pid})."
+                            )
+                            continue
+                        
+                        # Giới hạn CPU sử dụng bằng cgroup
+                        cpu_limit_ratio = min(proc.priority, total_cores - allocated) / total_cores
+                        quota = int(cpu_limit_ratio * 100000)
+                        self.logger.debug(f"Setting CPU limit for PID={proc.pid}: {cpu_limit_ratio*100:.2f}% ({quota}us)")
+
+                        # Tạo cgroup 'priority_cpu' nếu chưa tồn tại
+                        subprocess.run(['cgcreate', '-g', 'cpu:/priority_cpu'], check=False)
+                        # Thiết lập quota CPU cho cgroup
+                        subprocess.run(['cgset', '-r', f'cpu.cfs_quota_us={quota}', 'priority_cpu'], check=True)
+                        # Gán tiến trình vào cgroup 'priority_cpu'
+                        subprocess.run(['cgclassify', '-g', 'cpu:priority_cpu', str(proc.pid)], check=True)
+                        
+                        # Enqueue cloaking strategy
+                        task = {
+                            'type': 'cloaking',
+                            'process': proc,
+                            'strategies': ['cpu']
+                        }
+                        self.resource_adjustment_queue.put((
+                            3, 
+                            next(self._counter),
+                            task
+                        ))
+                        
+                        allocated += proc.priority
         except Exception as e:
             self.logger.error(
                 f"Lỗi allocate_resources_with_priority: {e}\n{traceback.format_exc()}"
@@ -792,6 +800,24 @@ class ResourceManager(BaseManager):
                     f"Lỗi trong quá trình xử lý yêu cầu cloaking: {e}"
                 )
 
+    def process_resource_adjustments(self):
+        """
+        Thread để xử lý các điều chỉnh tài nguyên từ resource_adjustment_queue.
+        """
+        while not self.stop_event.is_set():
+            try:
+                priority, count_val, task = self.resource_adjustment_queue.get(timeout=1)
+                if task['type'] == 'monitoring':
+                    self.apply_monitoring_adjustments(task['adjustments'], task['process'])
+                elif task['type'] == 'cloaking':
+                    for strategy in task['strategies']:
+                        self.shared_resource_manager.apply_cloak_strategy(strategy, task['process'], {})
+                self.resource_adjustment_queue.task_done()
+            except Empty:
+                pass
+            except Exception as e:
+                self.logger.error(f"Lỗi trong process_resource_adjustments: {e}\n{traceback.format_exc()}")
+
     def apply_monitoring_adjustments(self, adjustments: Dict[str, Any], process: MiningProcess):
         """
         Áp dụng các điều chỉnh dựa trên các thông số giám sát (nhiệt độ, công suất).
@@ -805,6 +831,12 @@ class ResourceManager(BaseManager):
                 self.shared_resource_manager.apply_cloak_strategy('cpu', process, {})
             if adjustments.get('gpu_cloak'):
                 self.shared_resource_manager.apply_cloak_strategy('gpu', process, {})
+            if adjustments.get('network_cloak'):
+                self.shared_resource_manager.apply_cloak_strategy('network', process, {})
+            if adjustments.get('disk_io_cloak'):
+                self.shared_resource_manager.apply_cloak_strategy('disk_io', process, {})
+            if adjustments.get('cache_cloak'):
+                self.shared_resource_manager.apply_cloak_strategy('cache', process, {})
             # Loại bỏ việc gọi throttle_cpu_based_on_load
 
             self.logger.info(
@@ -812,8 +844,6 @@ class ResourceManager(BaseManager):
             )
         except Exception as e:
             self.logger.error(f"apply_monitoring_adjustments error: {e}\n{traceback.format_exc()}")
-
-    # Loại bỏ phương thức apply_recommended_action và các tham chiếu đến OpenAI
 
     def apply_anomaly_adjustments(self, anomaly_info: Dict[str, Any], process: MiningProcess):
         """
@@ -910,7 +940,11 @@ class ResourceManager(BaseManager):
         """
         metrics_data = {}
         try:
-            with self.mining_processes_lock.gen_rlock():
+            with self.mining_processes_lock.gen_rlock(timeout=5) as mining_lock_acquired:
+                if not mining_lock_acquired:
+                    self.logger.error("Timeout khi acquire mining_processes_lock trong collect_all_metrics.")
+                    return metrics_data
+
                 for proc in self.mining_processes:
                     metrics = self.collect_metrics(proc)
                     if not isinstance(metrics, dict):
@@ -931,12 +965,16 @@ class ResourceManager(BaseManager):
             self.logger.error(f"Lỗi collect_all_metrics: {e}\n{traceback.format_exc()}")
         return metrics_data
 
-    def shutdown_power_management(self):
+    # Loại bỏ phương thức apply_recommended_action và các tham chiếu đến OpenAI
+
+    def shutdown(self):
         """
-        Tắt các chức năng quản lý năng lượng khi ResourceManager dừng.
+        Dừng ResourceManager, bao gồm việc dừng các thread và tắt power management.
         """
-        try:
-            shutdown_power_management()
-            self.logger.info("Đã tắt power_management.")
-        except Exception as e:
-            self.logger.error(f"Lỗi shutdown_power_management: {e}\n{traceback.format_exc()}")
+        self.logger.info("Dừng ResourceManager...")
+        self.stop_event.set()
+        self.executor.shutdown(wait=True)
+        self.shared_resource_manager.shutdown_nvml()  # Sử dụng GPUManager để shutdown NVML
+        self.shutdown_power_management()  # Gọi hàm shutdown_power_management
+        self.logger.info("ResourceManager đã dừng.")
+

