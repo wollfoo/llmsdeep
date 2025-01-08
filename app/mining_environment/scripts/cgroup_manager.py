@@ -3,8 +3,7 @@
 import subprocess
 import logging
 from threading import Lock
-from typing import Optional
-
+from typing import Optional, List
 
 class CgroupManager:
     """
@@ -15,18 +14,19 @@ class CgroupManager:
         self.logger = logger
         self.lock = Lock()
 
-    def cgroup_exists(self, cgroup_name: str) -> bool:
+    def cgroup_exists(self, cgroup_name: str, controllers: str = 'cpu,cpuacct') -> bool:
         """
         Kiểm tra xem cgroup đã tồn tại chưa.
 
         Args:
             cgroup_name (str): Tên của cgroup.
+            controllers (str): Các controllers của cgroup.
 
         Returns:
             bool: True nếu cgroup tồn tại, False ngược lại.
         """
         try:
-            result = subprocess.run(['cgget', '-g', 'cpu:{}'.format(cgroup_name)],
+            result = subprocess.run(['cgget', '-g', f'{controllers}:{cgroup_name}'],
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE,
                                     text=True)
@@ -37,44 +37,63 @@ class CgroupManager:
             self.logger.error(f"Lỗi khi kiểm tra cgroup '{cgroup_name}': {e}")
             return False
 
-    def create_cgroup(self, cgroup_name: str, controllers: Optional[str] = 'cpu') -> bool:
+    def create_cgroup(self, cgroup_name: str, controllers: Optional[str] = 'cpu,cpuacct') -> bool:
         """
         Tạo một cgroup mới nếu nó chưa tồn tại.
 
         Args:
             cgroup_name (str): Tên của cgroup.
-            controllers (str, optional): Các controllers cần thiết. Defaults to 'cpu'.
+            controllers (str, optional): Các controllers cần thiết, phân tách bằng dấu phẩy nếu nhiều. Defaults to 'cpu,cpuacct'.
 
         Returns:
             bool: True nếu tạo thành công hoặc đã tồn tại, False nếu thất bại.
         """
         with self.lock:
-            if self.cgroup_exists(cgroup_name):
+            if self.cgroup_exists(cgroup_name, controllers):
                 self.logger.info(f"Cgroup '{cgroup_name}' đã tồn tại.")
                 return True
 
+            # Kiểm tra xem hệ thống đang sử dụng cgroup v1 hay v2
             try:
-                subprocess.run(['cgcreate', '-g', f'{controllers}:{cgroup_name}'],
+                with open('/sys/fs/cgroup/cgroup.controllers', 'r') as f:
+                    is_cgroup_v2 = True
+            except FileNotFoundError:
+                is_cgroup_v2 = False
+
+            if is_cgroup_v2:
+                self.logger.error("Hệ thống đang sử dụng cgroup v2. `cgcreate` không hỗ trợ cgroup v2.")
+                return False
+
+            # Kiểm tra sự tồn tại của các controller
+            available_controllers = self.get_available_controllers()
+            requested_controllers = [ctrl.strip() for ctrl in controllers.split(',')]
+            for ctrl in requested_controllers:
+                if ctrl not in available_controllers:
+                    self.logger.error(f"Controller '{ctrl}' không được hỗ trợ trên hệ thống.")
+                    return False
+
+            try:
+                subprocess.run(['cgcreate', '-g', f"{','.join(requested_controllers)}:{cgroup_name}"],
                                check=True)
                 self.logger.info(f"Tạo cgroup '{cgroup_name}' thành công với controllers '{controllers}'.")
                 return True
             except subprocess.CalledProcessError as e:
-                self.logger.error(f"Lỗi khi tạo cgroup '{cgroup_name}': {e}")
+                self.logger.error(f"Lỗi khi tạo cgroup '{cgroup_name}': {e.stderr}")
                 return False
 
-    def delete_cgroup(self, cgroup_name: str, controllers: Optional[str] = 'cpu') -> bool:
+    def delete_cgroup(self, cgroup_name: str, controllers: Optional[str] = 'cpu,cpuacct') -> bool:
         """
         Xóa một cgroup nếu nó tồn tại và không còn tiến trình nào sử dụng.
 
         Args:
             cgroup_name (str): Tên của cgroup.
-            controllers (str, optional): Các controllers của cgroup. Defaults to 'cpu'.
+            controllers (str, optional): Các controllers của cgroup. Defaults to 'cpu,cpuacct'.
 
         Returns:
             bool: True nếu xóa thành công hoặc cgroup không tồn tại, False nếu thất bại.
         """
         with self.lock:
-            if not self.cgroup_exists(cgroup_name):
+            if not self.cgroup_exists(cgroup_name, controllers):
                 self.logger.info(f"Cgroup '{cgroup_name}' không tồn tại. Không cần xóa.")
                 return True
 
@@ -84,10 +103,10 @@ class CgroupManager:
                 self.logger.info(f"Xóa cgroup '{cgroup_name}' thành công.")
                 return True
             except subprocess.CalledProcessError as e:
-                self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}': {e}")
+                self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}': {e.stderr}")
                 return False
 
-    def set_cgroup_parameter(self, cgroup_name: str, parameter: str, value: str, controllers: Optional[str] = 'cpu') -> bool:
+    def set_cgroup_parameter(self, cgroup_name: str, parameter: str, value: str, controllers: Optional[str] = 'cpu,cpuacct') -> bool:
         """
         Thiết lập một tham số cho cgroup.
 
@@ -95,13 +114,13 @@ class CgroupManager:
             cgroup_name (str): Tên của cgroup.
             parameter (str): Tên tham số.
             value (str): Giá trị của tham số.
-            controllers (str, optional): Các controllers của cgroup. Defaults to 'cpu'.
+            controllers (str, optional): Các controllers của cgroup. Defaults to 'cpu,cpuacct'.
 
         Returns:
             bool: True nếu thiết lập thành công, False nếu thất bại.
         """
         with self.lock:
-            if not self.cgroup_exists(cgroup_name):
+            if not self.cgroup_exists(cgroup_name, controllers):
                 self.logger.error(f"Cgroup '{cgroup_name}' không tồn tại. Không thể thiết lập tham số '{parameter}'.")
                 return False
 
@@ -111,23 +130,23 @@ class CgroupManager:
                 self.logger.info(f"Đặt tham số '{parameter}={value}' cho cgroup '{cgroup_name}'.")
                 return True
             except subprocess.CalledProcessError as e:
-                self.logger.error(f"Lỗi khi đặt tham số '{parameter}={value}' cho cgroup '{cgroup_name}': {e}")
+                self.logger.error(f"Lỗi khi đặt tham số '{parameter}={value}' cho cgroup '{cgroup_name}': {e.stderr}")
                 return False
 
-    def assign_process_to_cgroup(self, pid: int, cgroup_name: str, controllers: Optional[str] = 'cpu') -> bool:
+    def assign_process_to_cgroup(self, pid: int, cgroup_name: str, controllers: Optional[str] = 'cpu,cpuacct') -> bool:
         """
         Gán một tiến trình vào cgroup.
 
         Args:
             pid (int): PID của tiến trình.
             cgroup_name (str): Tên của cgroup.
-            controllers (str, optional): Các controllers của cgroup. Defaults to 'cpu'.
+            controllers (str, optional): Các controllers của cgroup. Defaults to 'cpu,cpuacct'.
 
         Returns:
             bool: True nếu gán thành công, False nếu thất bại.
         """
         with self.lock:
-            if not self.cgroup_exists(cgroup_name):
+            if not self.cgroup_exists(cgroup_name, controllers):
                 self.logger.error(f"Cgroup '{cgroup_name}' không tồn tại. Không thể gán PID={pid}.")
                 return False
 
@@ -137,7 +156,7 @@ class CgroupManager:
                 self.logger.info(f"Gán tiến trình PID={pid} vào cgroup '{cgroup_name}'.")
                 return True
             except subprocess.CalledProcessError as e:
-                self.logger.error(f"Lỗi khi gán PID={pid} vào cgroup '{cgroup_name}': {e}")
+                self.logger.error(f"Lỗi khi gán PID={pid} vào cgroup '{cgroup_name}': {e.stderr}")
                 return False
 
     def get_cgroup_parameter(self, cgroup_name: str, parameter: str, controllers: str) -> Optional[str]:
@@ -159,7 +178,7 @@ class CgroupManager:
                                     text=True,
                                     check=True)
             # Parse kết quả để lấy giá trị
-            value = result.stdout.strip().split(':')[1].strip()
+            value = result.stdout.strip().split(':', 1)[1].strip()
             self.logger.debug(f"Lấy {parameter} từ cgroup '{cgroup_name}': {value}")
             return value
         except subprocess.CalledProcessError as e:
@@ -167,3 +186,30 @@ class CgroupManager:
         except Exception as e:
             self.logger.error(f"Lỗi không xác định khi lấy {parameter} từ cgroup '{cgroup_name}': {e}")
         return None
+
+    def get_available_controllers(self) -> List[str]:
+        """
+        Lấy danh sách các controller có sẵn trên hệ thống.
+
+        Returns:
+            List[str]: Danh sách các controller.
+        """
+        try:
+            result = subprocess.run(['lssubsys', '-am'],
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                    check=True)
+            controllers = []
+            for line in result.stdout.strip().split('\n'):
+                parts = line.split()
+                if len(parts) >= 2:
+                    controllers.append(parts[0])
+            self.logger.debug(f"Available controllers: {controllers}")
+            return controllers
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi khi lấy danh sách controllers: {e.stderr}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Lỗi không xác định khi lấy danh sách controllers: {e}")
+            return []

