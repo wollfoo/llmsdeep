@@ -139,3 +139,31 @@ class CgroupManager:
             except subprocess.CalledProcessError as e:
                 self.logger.error(f"Lỗi khi gán PID={pid} vào cgroup '{cgroup_name}': {e}")
                 return False
+
+    def get_cgroup_parameter(self, cgroup_name: str, parameter: str, controllers: str) -> Optional[str]:
+        """
+        Lấy giá trị của một tham số trong cgroup.
+
+        Args:
+            cgroup_name (str): Tên của cgroup.
+            parameter (str): Tên tham số.
+            controllers (str): Controllers của cgroup.
+
+        Returns:
+            Optional[str]: Giá trị của tham số hoặc None nếu lỗi.
+        """
+        try:
+            result = subprocess.run(['cgget', '-r', parameter, f'{controllers}:{cgroup_name}'],
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                    check=True)
+            # Parse kết quả để lấy giá trị
+            value = result.stdout.strip().split(':')[1].strip()
+            self.logger.debug(f"Lấy {parameter} từ cgroup '{cgroup_name}': {value}")
+            return value
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi khi lấy {parameter} từ cgroup '{cgroup_name}': {e.stderr}")
+        except Exception as e:
+            self.logger.error(f"Lỗi không xác định khi lấy {parameter} từ cgroup '{cgroup_name}': {e}")
+        return None

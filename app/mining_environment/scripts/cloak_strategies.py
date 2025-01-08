@@ -9,6 +9,7 @@ import traceback
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
 from .utils import GPUManager
+from .cgroup_manager import CgroupManager  # Import CgroupManager
 
 
 class CloakStrategy(ABC):
@@ -34,7 +35,7 @@ class CpuCloakStrategy(CloakStrategy):
       - Đặt affinity cho các thread vào các core CPU cụ thể.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cgroup_manager: CgroupManager):
         # Lấy cấu hình throttle_percentage với giá trị mặc định là 20%
         self.throttle_percentage = config.get('throttle_percentage', 20)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
@@ -48,6 +49,7 @@ class CpuCloakStrategy(CloakStrategy):
             self.cpu_shares = 1024
 
         self.logger = logger
+        self.cgroup_manager = cgroup_manager
 
     def apply(self, process: Any, cgroups: Dict[str, str]) -> None:
         """
@@ -68,11 +70,19 @@ class CpuCloakStrategy(CloakStrategy):
             # Tính toán quota CPU
             cpu_quota_us = self.calculate_cpu_quota()
 
-            # Thiết lập quota CPU bằng cách sử dụng cgroups
-            subprocess.run(['cgset', '-r', f'cpu.cfs_quota_us={cpu_quota_us}', cpu_cgroup], check=True)
-            self.logger.info(
-                f"Đặt CPU quota là {cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
+            # Thiết lập quota CPU bằng cách sử dụng CgroupManager
+            success = self.cgroup_manager.set_cgroup_parameter(
+                cpu_cgroup, 'cpu.cfs_quota_us', str(cpu_quota_us), controllers='cpu'
             )
+            if success:
+                self.logger.info(
+                    f"Đặt CPU quota là {cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
+                )
+            else:
+                self.logger.error(
+                    f"Không thể đặt CPU quota là {cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
+                )
+                return
 
             # Tối ưu hóa việc sử dụng cache bằng cách đặt độ ưu tiên tiến trình
             self.optimize_cache(pid)
@@ -237,7 +247,7 @@ class GpuCloakStrategy(CloakStrategy):
       - Tùy chọn điều chỉnh xung nhịp GPU.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_initialized: bool):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_initialized: bool, cgroup_manager: CgroupManager):
         # Lấy cấu hình throttle_percentage với giá trị mặc định là 20%
         self.throttle_percentage = config.get('throttle_percentage', 20)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
@@ -256,7 +266,8 @@ class GpuCloakStrategy(CloakStrategy):
 
         self.logger = logger
         self.gpu_manager = GPUManager()
-        self.gpu_initialized = self.gpu_manager.gpu_initialized
+        self.gpu_initialized = gpu_initialized
+        self.cgroup_manager = cgroup_manager
 
         # Không cần khởi tạo NVML tại đây
         if self.gpu_initialized:
@@ -349,6 +360,17 @@ class GpuCloakStrategy(CloakStrategy):
                     f"Không thể đặt xung nhịp GPU cho GPU {gpu_index} trên tiến trình {process_name} (PID: {pid}): {e}"
                 )
 
+            # Gán tiến trình vào cgroup GPU nếu cần (ví dụ)
+            gpu_cgroup = cgroups.get('gpu')
+            if gpu_cgroup:
+                success = self.cgroup_manager.assign_process_to_cgroup(pid, gpu_cgroup, controllers='gpu')
+                if success:
+                    self.logger.info(f"Gán tiến trình PID={pid} vào cgroup '{gpu_cgroup}' cho GPU.")
+                else:
+                    self.logger.error(f"Không thể gán tiến trình PID={pid} vào cgroup '{gpu_cgroup}' cho GPU.")
+            else:
+                self.logger.warning(f"Không có cgroup GPU được cung cấp cho tiến trình {process_name} (PID: {pid}).")
+
         except Exception as e:
             self.logger.error(
                 f"Lỗi khi áp dụng cloaking GPU cho tiến trình {getattr(process, 'name', 'unknown')} "
@@ -417,12 +439,13 @@ class NetworkCloakStrategy(CloakStrategy):
       - Giảm băng thông mạng cho tiến trình.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cgroup_manager: CgroupManager):
         # Lấy cấu hình bandwidth_reduction_mbps với giá trị mặc định là 10Mbps
         self.bandwidth_reduction_mbps = config.get('bandwidth_reduction_mbps', 10)
         # Lấy cấu hình network_interface hoặc tự động xác định
         self.network_interface = config.get('network_interface')
         self.logger = logger
+        self.cgroup_manager = cgroup_manager
 
         if not self.network_interface:
             self.network_interface = self.get_primary_network_interface()
@@ -467,10 +490,6 @@ class NetworkCloakStrategy(CloakStrategy):
 
             pid = process.pid
             process_name = getattr(process, 'name', 'unknown')
-
-            # Placeholder: Thực hiện giới hạn băng thông bằng cách sử dụng `tc` hoặc các công cụ tương tự
-            # Ví dụ sử dụng `tc` để giới hạn băng thông
-            # Lưu ý: Cần quyền root
 
             # Định nghĩa fwmark cho tiến trình cụ thể
             mark = pid % 32768  # fwmark phải < 65536
@@ -588,7 +607,7 @@ class CacheCloakStrategy(CloakStrategy):
       - Giảm sử dụng cache bằng cách drop caches.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cgroup_manager: CgroupManager):
         # Lấy cấu hình cache_limit_percent với giá trị mặc định là 50%
         self.cache_limit_percent = config.get('cache_limit_percent', 50)
         if not (0 <= self.cache_limit_percent <= 100):
@@ -597,6 +616,7 @@ class CacheCloakStrategy(CloakStrategy):
             )
             self.cache_limit_percent = 50
         self.logger = logger
+        self.cgroup_manager = cgroup_manager
 
     def apply(self, process: Any, cgroups: Dict[str, str]) -> None:
         """
@@ -621,6 +641,24 @@ class CacheCloakStrategy(CloakStrategy):
                 f.write('3\n')
             self.logger.info(f"Đã drop caches để giảm sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
 
+            # Giảm cache limit cho tiến trình bằng cách sử dụng cgroups
+            cache_cgroup = cgroups.get('cache')
+            if cache_cgroup:
+                cache_limit_bytes = int(self.cache_limit_percent / 100 * self.get_total_cache())
+                success = self.cgroup_manager.set_cgroup_parameter(
+                    cache_cgroup, 'cache.max', str(cache_limit_bytes), controllers='cache'
+                )
+                if success:
+                    self.logger.info(
+                        f"Đặt giới hạn cache thành {self.cache_limit_percent}% ({cache_limit_bytes} bytes) cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
+                    )
+                else:
+                    self.logger.error(
+                        f"Không thể đặt giới hạn cache cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
+                    )
+            else:
+                self.logger.warning(f"Không có cgroup 'cache' được cung cấp cho tiến trình {process_name} (PID: {pid}).")
+
             adjustments = {
                 'drop_caches': True,
                 'cache_limit_percent': self.cache_limit_percent
@@ -643,6 +681,54 @@ class CacheCloakStrategy(CloakStrategy):
             )
             raise
 
+    def get_process_info(self, process: Any) -> Tuple[int, str]:
+        """
+        Lấy PID và tên tiến trình từ đối tượng process.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+
+        Returns:
+            Tuple[int, str]: PID và tên tiến trình.
+        """
+        if isinstance(process, subprocess.Popen):
+            pid = process.pid
+            try:
+                p = psutil.Process(pid)
+                process_name = p.name()
+            except psutil.NoSuchProcess:
+                process_name = "unknown"
+        else:
+            if not hasattr(process, 'pid'):
+                self.logger.error("Đối tượng tiến trình không có thuộc tính 'pid'.")
+                raise AttributeError("Đối tượng tiến trình không có thuộc tính 'pid'.")
+            pid = process.pid
+
+            process_name = getattr(process, 'name', None)
+            if not process_name:
+                self.logger.warning(
+                    f"Tiến trình PID={pid} không có thuộc tính 'name'. Cố gắng lấy tên qua psutil."
+                )
+                try:
+                    p = psutil.Process(pid)
+                    process_name = p.name()
+                except psutil.NoSuchProcess:
+                    process_name = "unknown"
+                    self.logger.warning(
+                        f"Tiến trình PID={pid} không tồn tại. Sử dụng process_name='unknown'."
+                    )
+        return pid, process_name
+
+    def get_total_cache(self) -> int:
+        """
+        Lấy tổng lượng cache hiện có trên hệ thống.
+
+        Returns:
+            int: Tổng cache tính bằng bytes.
+        """
+        # Ví dụ: giả sử tổng cache là 8GB
+        return 8 * 1024 * 1024 * 1024  # 8GB in bytes
+
 class CloakStrategyFactory:
     """
     Factory để tạo các instance của các chiến lược cloaking.
@@ -657,7 +743,7 @@ class CloakStrategyFactory:
 
     @staticmethod
     def create_strategy(strategy_name: str, config: Dict[str, Any],
-                        logger: logging.Logger, gpu_initialized: bool = False
+                        logger: logging.Logger, cgroup_manager: CgroupManager, gpu_initialized: bool = False
     ) -> Optional[CloakStrategy]:
         """
         Tạo một instance của chiến lược cloaking dựa trên tên chiến lược.
@@ -666,6 +752,7 @@ class CloakStrategyFactory:
             strategy_name (str): Tên của chiến lược (ví dụ: 'cpu', 'gpu').
             config (Dict[str, Any]): Cấu hình cho chiến lược.
             logger (logging.Logger): Logger cho chiến lược.
+            cgroup_manager (CgroupManager): Instance của CgroupManager để thao tác với cgroup.
             gpu_initialized (bool): Trạng thái khởi tạo GPU (sử dụng cho các chiến lược GPU).
 
         Returns:
@@ -677,8 +764,12 @@ class CloakStrategyFactory:
             try:
                 if strategy_name.lower() == 'gpu':
                     logger.debug(f"Tạo GPU CloakStrategy: gpu_initialized={gpu_initialized}")
-                    return strategy_class(config, logger, gpu_initialized)
-                return strategy_class(config, logger)
+                    return strategy_class(config, logger, gpu_initialized, cgroup_manager)
+                elif strategy_name.lower() in {'cpu', 'cache'}:
+                    return strategy_class(config, logger, cgroup_manager)
+                else:
+                    # Các chiến lược không cần CgroupManager
+                    return strategy_class(config, logger)
             except Exception as e:
                 logger.error(f"Lỗi khi tạo chiến lược '{strategy_name}': {e}")
                 raise

