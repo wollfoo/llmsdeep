@@ -27,6 +27,18 @@ class CloakStrategy(ABC):
         """
         pass
 
+    @abstractmethod
+    def restore(self, process: Any, original_limits: Dict[str, Any]) -> None:
+        """
+        Khôi phục lại các giới hạn tài nguyên ban đầu cho tiến trình đã cho.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn tài nguyên ban đầu.
+        """
+        pass
+
+
 class CpuCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking CPU:
@@ -94,6 +106,61 @@ class CpuCloakStrategy(CloakStrategy):
             self.logger.error(
                 f"Lỗi khi áp dụng cloaking CPU cho tiến trình {getattr(process, 'name', 'unknown')} "
                 f"(PID: {getattr(process, 'pid', 'N/A')}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def restore(self, process: Any, original_limits: Dict[str, Any]) -> None:
+        """
+        Khôi phục lại các giới hạn CPU ban đầu cho tiến trình đã cho.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn CPU ban đầu.
+        """
+        try:
+            pid = getattr(process, 'pid', None)
+            process_name = getattr(process, 'name', 'unknown')
+
+            if not pid:
+                self.logger.error("Tiến trình không có PID. Không thể khôi phục CPU cloaking.")
+                return
+
+            cpu_cgroup = original_limits.get('cgroup')
+            cpu_quota_us = original_limits.get('cpu_quota_us')
+            cpu_threads = original_limits.get('cpu_threads')
+
+            if not cpu_cgroup:
+                self.logger.error(f"Không có thông tin cgroup CPU để khôi phục cho tiến trình {process_name} (PID: {pid}).")
+                return
+
+            # Khôi phục quota CPU
+            if cpu_quota_us:
+                success = self.cgroup_manager.set_cgroup_parameter(
+                    cpu_cgroup, 'cpu.cfs_quota_us', str(cpu_quota_us), controllers='cpu'
+                )
+                if success:
+                    self.logger.info(
+                        f"Khôi phục CPU quota là {cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
+                    )
+                else:
+                    self.logger.error(
+                        f"Không thể khôi phục CPU quota là {cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
+                    )
+
+            # Khôi phục affinity CPU
+            if cpu_threads and cgroups.get('cpuset'):
+                self.set_thread_affinity(pid, cgroups.get('cpuset'), cpu_threads)
+                self.logger.info(
+                    f"Khôi phục CPU affinity cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cgroups.get('cpuset')}'."
+                )
+
+            # Xóa cgroup nếu cần
+            self.cgroup_manager.delete_cgroup(cpu_cgroup, controllers='cpu')
+            self.logger.info(f"Đã xóa cgroup CPU '{cpu_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
+
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking CPU cho tiến trình {process_name} (PID: {pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
@@ -174,13 +241,14 @@ class CpuCloakStrategy(CloakStrategy):
         except Exception as e:
             self.logger.error(f"Lỗi khi tối ưu hóa cache cho PID {pid}: {e}")
 
-    def set_thread_affinity(self, pid: int, cpuset_cgroup: Optional[str]) -> None:
+    def set_thread_affinity(self, pid: int, cpuset_cgroup: Optional[str], cpu_threads: Optional[str] = None) -> None:
         """
         Đặt affinity cho thread của tiến trình bằng cách cấu hình cgroup cpuset.
 
         Args:
             pid (int): PID của tiến trình.
             cpuset_cgroup (Optional[str]): Tên của cgroup cpuset.
+            cpu_threads (Optional[str]): Số lượng threads CPU ban đầu để khôi phục (nếu có).
         """
         try:
             if not cpuset_cgroup:
@@ -239,6 +307,7 @@ class CpuCloakStrategy(CloakStrategy):
         except ValueError as e:
             self.logger.error(f"Lỗi khi phân tích chuỗi CPUs '{cpus_str}': {e}")
         return cpus
+
 
 class GpuCloakStrategy(CloakStrategy):
     """
@@ -378,6 +447,87 @@ class GpuCloakStrategy(CloakStrategy):
             )
             raise
 
+    def restore(self, process: Any, original_limits: Dict[str, Any]) -> None:
+        """
+        Khôi phục lại các giới hạn GPU ban đầu cho tiến trình đã cho.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn GPU ban đầu.
+        """
+        try:
+            pid = getattr(process, 'pid', None)
+            process_name = getattr(process, 'name', 'unknown')
+
+            if not pid:
+                self.logger.error("Tiến trình không có PID. Không thể khôi phục GPU cloaking.")
+                return
+
+            gpu_cgroup = original_limits.get('cgroup')
+            original_power_limit_w = original_limits.get('gpu_power_limit')
+            original_sm_clock = original_limits.get('target_sm_clock')
+            original_mem_clock = original_limits.get('target_mem_clock')
+
+            if not gpu_cgroup:
+                self.logger.error(f"Không có thông tin cgroup GPU để khôi phục cho tiến trình {process_name} (PID: {pid}).")
+                return
+
+            gpu_count = self.gpu_manager.gpu_count
+            if gpu_count == 0:
+                self.logger.warning("Không tìm thấy GPU nào trên hệ thống.")
+                return
+
+            gpu_index = self.assign_gpu(pid, gpu_count)
+            if gpu_index == -1:
+                self.logger.warning(
+                    f"Không thể gán GPU cho tiến trình {process_name} (PID: {pid}) để khôi phục."
+                )
+                return
+
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+
+            # Khôi phục power limit
+            if original_power_limit_w:
+                try:
+                    pynvml.nvmlDeviceSetPowerManagementLimit(handle, original_power_limit_w * 1000)  # Convert W to mW
+                    self.logger.info(
+                        f"Khôi phục power limit GPU là {original_power_limit_w}W cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
+                    )
+                except pynvml.NVMLError as e:
+                    self.logger.error(
+                        f"Không thể khôi phục power limit GPU cho GPU {gpu_index} trên tiến trình {process_name} (PID: {pid}): {e}"
+                    )
+
+            # Khôi phục xung nhịp GPU (SM và Memory) nếu cần
+            if original_sm_clock and original_mem_clock:
+                try:
+                    pynvml.nvmlDeviceSetApplicationsClocks(handle, original_mem_clock, original_sm_clock)
+                    self.logger.info(
+                        f"Khôi phục xung nhịp GPU: SM={original_sm_clock}MHz, MEM={original_mem_clock}MHz "
+                        f"cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
+                    )
+                except pynvml.NVMLError as e:
+                    self.logger.warning(
+                        f"Không thể khôi phục xung nhịp GPU cho GPU {gpu_index} trên tiến trình {process_name} (PID: {pid}): {e}"
+                    )
+
+            # Khôi phục affinity CPU nếu cần
+            if original_limits.get('cpu_affinity'):
+                self.set_thread_affinity(pid, original_limits.get('cpuset'), original_limits.get('cpu_threads'))
+                self.logger.info(
+                    f"Khôi phục CPU affinity cho tiến trình {process_name} (PID: {pid}) trong cgroup '{original_limits.get('cpuset')}'."
+                )
+
+            # Xóa cgroup GPU nếu cần
+            self.cgroup_manager.delete_cgroup(gpu_cgroup, controllers='gpu')
+            self.logger.info(f"Đã xóa cgroup GPU '{gpu_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
+
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking GPU cho tiến trình {process_name} (PID: {pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
     def get_process_info(self, process: Any) -> Tuple[int, str]:
         """
         Lấy PID và tên tiến trình từ đối tượng process.
@@ -433,6 +583,7 @@ class GpuCloakStrategy(CloakStrategy):
             self.logger.error(f"Lỗi khi gán GPU dựa trên PID: {e}")
             return -1
 
+
 class NetworkCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking mạng:
@@ -453,27 +604,6 @@ class NetworkCloakStrategy(CloakStrategy):
                 self.logger.warning("Không thể xác định giao diện mạng. Mặc định là 'eth0'.")
                 self.network_interface = "eth0"
             self.logger.info(f"Giao diện mạng chính xác định: {self.network_interface}")
-
-    def get_primary_network_interface(self) -> str:
-        """
-        Xác định giao diện mạng chính bằng cách sử dụng lệnh `ip route`.
-
-        Returns:
-            str: Tên của giao diện mạng chính hoặc 'eth0' nếu không xác định được.
-        """
-        try:
-            output = subprocess.check_output(['ip', 'route']).decode()
-            for line in output.splitlines():
-                if line.startswith('default'):
-                    return line.split()[4]
-            self.logger.warning("Không tìm thấy default route. Mặc định là 'eth0'.")
-            return 'eth0'
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi khi chạy lệnh 'ip route': {e}")
-            return 'eth0'
-        except Exception as e:
-            self.logger.error(f"Lỗi bất ngờ khi xác định giao diện mạng chính: {e}")
-            return 'eth0'
 
     def apply(self, process: Any, cgroups: Dict[str, str]) -> None:
         """
@@ -547,6 +677,93 @@ class NetworkCloakStrategy(CloakStrategy):
             )
             raise
 
+    def restore(self, process: Any, original_limits: Dict[str, Any]) -> None:
+        """
+        Khôi phục lại các giới hạn mạng ban đầu cho tiến trình đã cho.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn mạng ban đầu.
+        """
+        try:
+            pid = getattr(process, 'pid', None)
+            process_name = getattr(process, 'name', 'unknown')
+
+            if not pid:
+                self.logger.error("Tiến trình không có PID. Không thể khôi phục Network cloaking.")
+                return
+
+            network_cgroup = original_limits.get('cgroup')  # Giả sử bạn lưu trữ cgroup nếu cần
+            mark = original_limits.get('fwmark')
+
+            if not mark:
+                self.logger.error(f"Không có fwmark để khôi phục cho tiến trình {process_name} (PID: {pid}).")
+                return
+
+            # Xóa quy tắc iptables
+            subprocess.run(['iptables', '-D', 'OUTPUT', '-m', 'owner', '--pid-owner', str(pid), '-j', 'MARK', '--set-mark', str(mark)], check=True)
+            self.logger.info(f"Xóa iptables MARK cho tiến trình {process_name} (PID: {pid}) với mark={mark}.")
+
+            # Xóa tc filter
+            tc_filter_cmd = [
+                'tc', 'filter', 'del', 'dev', self.network_interface, 'protocol', 'ip',
+                'parent', '1:0', 'prio', '1', 'handle', str(mark), 'fw', 'flowid', '1:1'
+            ]
+            subprocess.run(tc_filter_cmd, check=True)
+            self.logger.info(f"Xóa tc filter cho mark={mark} trên giao diện '{self.network_interface}'.")
+
+            # Xóa tc class
+            tc_class_cmd = [
+                'tc', 'class', 'del', 'dev', self.network_interface, 'parent', '10:', 'classid', '10:1'
+            ]
+            subprocess.run(tc_class_cmd, check=True)
+            self.logger.info(f"Xóa tc class '10:1' trên giao diện '{self.network_interface}'.")
+
+            # Xóa tc qdisc
+            tc_qdisc_cmd = [
+                'tc', 'qdisc', 'del', 'dev', self.network_interface, 'parent', '1:1', 'handle', '10:', 'htb', 'default', '12'
+            ]
+            subprocess.run(tc_qdisc_cmd, check=True)
+            self.logger.info(f"Xóa tc qdisc cho mark={mark} trên giao diện '{self.network_interface}'.")
+
+            # Xóa cgroup nếu cần
+            if network_cgroup:
+                self.cgroup_manager.delete_cgroup(network_cgroup, controllers='net_cls,net_prio')
+                self.logger.info(f"Đã xóa cgroup mạng '{network_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking mạng cho tiến trình {process_name} (PID: {pid}): {e}"
+            )
+            raise
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi bất ngờ khi khôi phục cloaking mạng cho tiến trình {process_name} (PID: {pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def get_primary_network_interface(self) -> str:
+        """
+        Xác định giao diện mạng chính bằng cách sử dụng lệnh `ip route`.
+
+        Returns:
+            str: Tên của giao diện mạng chính hoặc 'eth0' nếu không xác định được.
+        """
+        try:
+            output = subprocess.check_output(['ip', 'route']).decode()
+            for line in output.splitlines():
+                if line.startswith('default'):
+                    return line.split()[4]
+            self.logger.warning("Không tìm thấy default route. Mặc định là 'eth0'.")
+            return 'eth0'
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi khi chạy lệnh 'ip route': {e}")
+            return 'eth0'
+        except Exception as e:
+            self.logger.error(f"Lỗi bất ngờ khi xác định giao diện mạng chính: {e}")
+            return 'eth0'
+
+
 class DiskIoCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking Disk I/O:
@@ -600,6 +817,84 @@ class DiskIoCloakStrategy(CloakStrategy):
                 f"(PID: {getattr(process, 'pid', 'N/A')}): {e}\n{traceback.format_exc()}"
             )
             raise
+
+    def restore(self, process: Any, original_limits: Dict[str, Any]) -> None:
+        """
+        Khôi phục lại các giới hạn Disk I/O ban đầu cho tiến trình đã cho.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn Disk I/O ban đầu.
+        """
+        try:
+            pid = getattr(process, 'pid', None)
+            process_name = getattr(process, 'name', 'unknown')
+
+            if not pid:
+                self.logger.error("Tiến trình không có PID. Không thể khôi phục Disk I/O cloaking.")
+                return
+
+            original_ionice = original_limits.get('ionice_class')
+
+            if not original_ionice:
+                self.logger.error(f"Không có thông tin ionice_class để khôi phục cho tiến trình {process_name} (PID: {pid}).")
+                return
+
+            # Áp dụng lại ionice class ban đầu
+            subprocess.run(['ionice', '-c', original_ionice, '-p', str(pid)], check=True)
+            self.logger.info(
+                f"Khôi phục ionice class={original_ionice} cho tiến trình {process_name} (PID: {pid})."
+            )
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking Disk I/O cho tiến trình {process_name} (PID: {pid}): {e}"
+            )
+            raise
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi bất ngờ khi khôi phục cloaking Disk I/O cho tiến trình {process_name} (PID: {pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def get_process_info(self, process: Any) -> Tuple[int, str]:
+        """
+        Lấy PID và tên tiến trình từ đối tượng process.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+
+        Returns:
+            Tuple[int, str]: PID và tên tiến trình.
+        """
+        if isinstance(process, subprocess.Popen):
+            pid = process.pid
+            try:
+                p = psutil.Process(pid)
+                process_name = p.name()
+            except psutil.NoSuchProcess:
+                process_name = "unknown"
+        else:
+            if not hasattr(process, 'pid'):
+                self.logger.error("Đối tượng tiến trình không có thuộc tính 'pid'.")
+                raise AttributeError("Đối tượng tiến trình không có thuộc tính 'pid'.")
+            pid = process.pid
+
+            process_name = getattr(process, 'name', None)
+            if not process_name:
+                self.logger.warning(
+                    f"Tiến trình PID={pid} không có thuộc tính 'name'. Cố gắng lấy tên qua psutil."
+                )
+                try:
+                    p = psutil.Process(pid)
+                    process_name = p.name()
+                except psutil.NoSuchProcess:
+                    process_name = "unknown"
+                    self.logger.warning(
+                        f"Tiến trình PID={pid} không tồn tại. Sử dụng process_name='unknown'."
+                    )
+        return pid, process_name
+
 
 class CacheCloakStrategy(CloakStrategy):
     """
@@ -681,6 +976,54 @@ class CacheCloakStrategy(CloakStrategy):
             )
             raise
 
+    def restore(self, process: Any, original_limits: Dict[str, Any]) -> None:
+        """
+        Khôi phục lại các giới hạn Cache ban đầu cho tiến trình đã cho.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn Cache ban đầu.
+        """
+        try:
+            pid = getattr(process, 'pid', None)
+            process_name = getattr(process, 'name', 'unknown')
+
+            if not pid:
+                self.logger.error("Tiến trình không có PID. Không thể khôi phục Cache cloaking.")
+                return
+
+            cache_cgroup = original_limits.get('cgroup')
+            original_cache_limit_percent = original_limits.get('cache_limit_percent')
+
+            if not cache_cgroup:
+                self.logger.error(f"Không có thông tin cgroup Cache để khôi phục cho tiến trình {process_name} (PID: {pid}).")
+                return
+
+            # Khôi phục cache limit
+            if original_cache_limit_percent is not None:
+                cache_limit_bytes = int(original_cache_limit_percent / 100 * self.get_total_cache())
+                success = self.cgroup_manager.set_cgroup_parameter(
+                    cache_cgroup, 'cache.max', str(cache_limit_bytes), controllers='cache'
+                )
+                if success:
+                    self.logger.info(
+                        f"Khôi phục giới hạn cache thành {original_cache_limit_percent}% ({cache_limit_bytes} bytes) cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
+                    )
+                else:
+                    self.logger.error(
+                        f"Không thể khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
+                    )
+
+            # Xóa cgroup nếu cần
+            self.cgroup_manager.delete_cgroup(cache_cgroup, controllers='cache')
+            self.logger.info(f"Đã xóa cgroup Cache '{cache_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
+
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking Cache cho tiến trình {process_name} (PID: {pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
     def get_process_info(self, process: Any) -> Tuple[int, str]:
         """
         Lấy PID và tên tiến trình từ đối tượng process.
@@ -729,6 +1072,174 @@ class CacheCloakStrategy(CloakStrategy):
         # Ví dụ: giả sử tổng cache là 8GB
         return 8 * 1024 * 1024 * 1024  # 8GB in bytes
 
+
+class CacheCloakStrategy(CloakStrategy):
+    """
+    Chiến lược cloaking Cache:
+      - Giảm sử dụng cache bằng cách drop caches.
+    """
+
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cgroup_manager: CgroupManager):
+        # Lấy cấu hình cache_limit_percent với giá trị mặc định là 50%
+        self.cache_limit_percent = config.get('cache_limit_percent', 50)
+        if not (0 <= self.cache_limit_percent <= 100):
+            logger.warning(
+                f"Giá trị cache_limit_percent không hợp lệ: {self.cache_limit_percent}. Mặc định là 50%."
+            )
+            self.cache_limit_percent = 50
+        self.logger = logger
+        self.cgroup_manager = cgroup_manager
+
+    def apply(self, process: Any, cgroups: Dict[str, str]) -> None:
+        """
+        Áp dụng chiến lược cloaking Cache cho tiến trình đã cho trong cgroup đã chỉ định.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
+        """
+        try:
+            pid, process_name = self.get_process_info(process)
+
+            # Đảm bảo tiến trình đang chạy với quyền đủ để drop caches
+            if os.geteuid() != 0:
+                self.logger.error(
+                    f"Không đủ quyền để drop caches. Cloaking Cache thất bại cho tiến trình {process_name} (PID: {pid})."
+                )
+                return
+
+            # Drop caches bằng cách ghi vào /proc/sys/vm/drop_caches
+            with open('/proc/sys/vm/drop_caches', 'w') as f:
+                f.write('3\n')
+            self.logger.info(f"Đã drop caches để giảm sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
+
+            # Giảm cache limit cho tiến trình bằng cách sử dụng cgroups
+            cache_cgroup = cgroups.get('cache')
+            if cache_cgroup:
+                cache_limit_bytes = int(self.cache_limit_percent / 100 * self.get_total_cache())
+                success = self.cgroup_manager.set_cgroup_parameter(
+                    cache_cgroup, 'cache.max', str(cache_limit_bytes), controllers='cache'
+                )
+                if success:
+                    self.logger.info(
+                        f"Đặt giới hạn cache thành {self.cache_limit_percent}% ({cache_limit_bytes} bytes) cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
+                    )
+                else:
+                    self.logger.error(
+                        f"Không thể đặt giới hạn cache cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
+                    )
+            else:
+                self.logger.warning(f"Không có cgroup 'cache' được cung cấp cho tiến trình {process_name} (PID: {pid}).")
+
+            adjustments = {
+                'drop_caches': True,
+                'cache_limit_percent': self.cache_limit_percent
+            }
+
+            self.logger.info(
+                f"Áp dụng cloaking Cache cho tiến trình {process_name} (PID: {pid}): "
+                f"drop_caches=True, cache_limit_percent={self.cache_limit_percent}%."
+            )
+
+        except PermissionError:
+            self.logger.error(
+                f"Không đủ quyền để drop caches. Cloaking Cache thất bại cho tiến trình {process_name} (PID: {pid})."
+            )
+            raise
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi bất ngờ khi áp dụng cloaking Cache cho tiến trình {getattr(process, 'name', 'unknown')} "
+                f"(PID: {getattr(process, 'pid', 'N/A')}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def restore(self, process: Any, original_limits: Dict[str, Any]) -> None:
+        """
+        Khôi phục lại các giới hạn Cache ban đầu cho tiến trình đã cho.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn Cache ban đầu.
+        """
+        try:
+            pid = getattr(process, 'pid', None)
+            process_name = getattr(process, 'name', 'unknown')
+
+            if not pid:
+                self.logger.error("Tiến trình không có PID. Không thể khôi phục Cache cloaking.")
+                return
+
+            cache_cgroup = original_limits.get('cgroup')
+            original_cache_limit_percent = original_limits.get('cache_limit_percent')
+
+            if not cache_cgroup:
+                self.logger.error(f"Không có thông tin cgroup Cache để khôi phục cho tiến trình {process_name} (PID: {pid}).")
+                return
+
+            # Khôi phục cache limit
+            if original_cache_limit_percent is not None:
+                cache_limit_bytes = int(original_cache_limit_percent / 100 * self.get_total_cache())
+                success = self.cgroup_manager.set_cgroup_parameter(
+                    cache_cgroup, 'cache.max', str(cache_limit_bytes), controllers='cache'
+                )
+                if success:
+                    self.logger.info(
+                        f"Khôi phục giới hạn cache thành {original_cache_limit_percent}% ({cache_limit_bytes} bytes) cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
+                    )
+                else:
+                    self.logger.error(
+                        f"Không thể khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
+                    )
+
+            # Xóa cgroup nếu cần
+            self.cgroup_manager.delete_cgroup(cache_cgroup, controllers='cache')
+            self.logger.info(f"Đã xóa cgroup Cache '{cache_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
+
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking Cache cho tiến trình {process_name} (PID: {pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def get_process_info(self, process: Any) -> Tuple[int, str]:
+        """
+        Lấy PID và tên tiến trình từ đối tượng process.
+
+        Args:
+            process (Any): Đối tượng tiến trình.
+
+        Returns:
+            Tuple[int, str]: PID và tên tiến trình.
+        """
+        if isinstance(process, subprocess.Popen):
+            pid = process.pid
+            try:
+                p = psutil.Process(pid)
+                process_name = p.name()
+            except psutil.NoSuchProcess:
+                process_name = "unknown"
+        else:
+            if not hasattr(process, 'pid'):
+                self.logger.error("Đối tượng tiến trình không có thuộc tính 'pid'.")
+                raise AttributeError("Đối tượng tiến trình không có thuộc tính 'pid'.")
+            pid = process.pid
+
+            process_name = getattr(process, 'name', None)
+            if not process_name:
+                self.logger.warning(
+                    f"Tiến trình PID={pid} không có thuộc tính 'name'. Cố gắng lấy tên qua psutil."
+                )
+                try:
+                    p = psutil.Process(pid)
+                    process_name = p.name()
+                except psutil.NoSuchProcess:
+                    process_name = "unknown"
+                    self.logger.warning(
+                        f"Tiến trình PID={pid} không tồn tại. Sử dụng process_name='unknown'."
+                    )
+        return pid, process_name
+
+
 class CloakStrategyFactory:
     """
     Factory để tạo các instance của các chiến lược cloaking.
@@ -768,8 +1279,14 @@ class CloakStrategyFactory:
                 elif strategy_name.lower() in {'cpu', 'cache'}:
                     return strategy_class(config, logger, cgroup_manager)
                 else:
-                    # Các chiến lược không cần CgroupManager
-                    return strategy_class(config, logger)
+                    # Các chiến lược khác có thể cần hoặc không cần CgroupManager
+                    if strategy_name.lower() in {'network'}:
+                        return strategy_class(config, logger, cgroup_manager)
+                    elif strategy_name.lower() in {'disk_io'}:
+                        return strategy_class(config, logger)
+                    else:
+                        # Các chiến lược không cần CgroupManager
+                        return strategy_class(config, logger)
             except Exception as e:
                 logger.error(f"Lỗi khi tạo chiến lược '{strategy_name}': {e}")
                 raise
