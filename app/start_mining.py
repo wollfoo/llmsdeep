@@ -178,12 +178,12 @@ def main():
             logger.warning("Quá trình khai thác GPU không khởi động thành công.")
 
     # Khởi động ThreadingManager trong một luồng riêng
-    threading_manager_thread = threading.Thread(target=start_threading_manager, args=(stop_event,), daemon=False)
-    threading_manager_thread.start()
-    
+    # threading_manager_thread = threading.Thread(target=start_threading_manager, args=(stop_event,), daemon=False)
+    # threading_manager_thread.start()
+
     # Khởi động Resource Manager
-    # resource_thread = threading.Thread(target=start_system_manager, daemon=True)
-    # resource_thread.start()
+    resource_thread = threading.Thread(target=start_system_manager, daemon=True)
+    resource_thread.start()
 
     # Vòng lặp chính
     try:
