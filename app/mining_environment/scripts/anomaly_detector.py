@@ -45,13 +45,13 @@ class SafeRestoreEvaluator:
         # Giới hạn nhiệt độ
         temperature_limits = self.config.get("temperature_limits", {})
         self.cpu_max_temp = temperature_limits.get("cpu_max_celsius", 75)
-        self.gpu_max_temp = temperature_limits.get("gpu_max_celsius", 85)
+        self.gpu_max_temp = temperature_limits.get("gpu_max_celsius", 75)
 
         # Giới hạn công suất
         power_limits = self.config.get("power_limits", {})
         per_device_power = power_limits.get("per_device_power_watts", {})
-        self.cpu_max_power = per_device_power.get("cpu", 150)
-        self.gpu_max_power = per_device_power.get("gpu", 250)
+        self.cpu_max_power = per_device_power.get("cpu", 100)
+        self.gpu_max_power = per_device_power.get("gpu", 200)
 
     def is_safe_to_restore(self, process: MiningProcess) -> bool:
         """
