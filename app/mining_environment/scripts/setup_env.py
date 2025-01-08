@@ -335,8 +335,8 @@ def validate_configs(resource_config, system_params, environmental_limits, logge
         if per_device_power_gpu is None:
             logger.error("Thiếu `power_limits.per_device_power_watts.gpu`.")
             sys.exit(1)
-        if not isinstance(per_device_power_gpu, (int, float)) or not (50 <= per_device_power_gpu <= 200):
-            logger.error("Giá trị `power_limits.per_device_power_watts.gpu` không hợp lệ hoặc không phải số (50-200 W).")
+        if not isinstance(per_device_power_gpu, (int, float)) or not (10 <= per_device_power_gpu <= 250):
+            logger.error("Giá trị `power_limits.per_device_power_watts.gpu` không hợp lệ hoặc không phải số (10-250 W).")
             sys.exit(1)
         else:
             logger.info(f"Giới hạn tiêu thụ năng lượng GPU: {per_device_power_gpu} W")

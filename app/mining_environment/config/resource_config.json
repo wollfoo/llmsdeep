@@ -35,7 +35,7 @@
             "max_limit_mbps": 2500
         },
         "network": {
-            "bandwidth_limit_mbps": 1000
+            "bandwidth_limit_mbps": 10000
         },
         "cache": {
             "limit_percent": 50
@@ -50,26 +50,26 @@
     },
     
     "temperature_limits": {
-        "cpu_max_celsius": 80,
+        "cpu_max_celsius": 85,
         "gpu_max_celsius": 85
     },
     
     "power_limits": {
         "total_power_watts": {
-            "max": 300
+            "max": 400
         },
         "per_device_power_watts": {
             "cpu": 150,
-            "gpu": 150
+            "gpu": 250
         }
     },
     
     "baseline_thresholds": {
-        "cpu_usage_percent": 80,
-        "gpu_usage_percent": 80,
-        "ram_usage_percent": 80,
-        "disk_io_usage_mbps": 80,
-        "network_usage_mbps": 80
+        "cpu_usage_percent": 90,
+        "gpu_usage_percent": 90,
+        "ram_usage_percent": 90,
+        "disk_io_usage_mbps": 90,
+        "network_usage_mbps": 90
     },
     
     "safe_restore_parameters": {
@@ -148,7 +148,7 @@
         "network": {
             "strategy_name": "network_cloaking",
             "parameters": {
-                "bandwidth_limit_mbps": 800
+                "bandwidth_limit_mbps": 7000
             }
         },
         "disk_io": {
@@ -160,7 +160,7 @@
         "cache": {
             "strategy_name": "cache_cloaking",
             "parameters": {
-                "cache_limit_percent": 75
+                "cache_limit_percent": 80
             }
         }
     },

@@ -48,18 +48,18 @@ def initialize_environment():
         logger.error(f"Lỗi khi thiết lập môi trường: {e}")
         sys.exit(1)
 
-def start_threading_manager():
+def start_threading_manager(stop_event):
     """
     Hàm chạy setup() của threading_manager trong một luồng riêng.
     """
     try:
         logger.info("Khởi động ThreadingManager...")
-        threading_manager.setup()
+        threading_manager.setup(stop_event)
         logger.info("ThreadingManager đã khởi động thành công.")
     except Exception as e:
         logger.error(f"Lỗi khi khởi động ThreadingManager: {e}")
         stop_event.set()
-    
+        
 def start_system_manager():
     """
     Khởi động Resource Manager trong một thread riêng.
@@ -178,7 +178,7 @@ def main():
             logger.warning("Quá trình khai thác GPU không khởi động thành công.")
 
     # Khởi động ThreadingManager trong một luồng riêng
-    threading_manager_thread = threading.Thread(target=start_threading_manager, daemon=True)
+    threading_manager_thread = threading.Thread(target=start_threading_manager, args=(stop_event,), daemon=False)
     threading_manager_thread.start()
     
     # Khởi động Resource Manager
@@ -207,6 +207,8 @@ def main():
         if gpu_process:
             gpu_process.terminate()
         stop_system_manager()
+        stop_event.set()  # Đảm bảo rằng stop_event được đặt để dừng ThreadingManager
+        threading_manager_thread.join()  # Đợi ThreadingManager kết thúc
         logger.info("===== Dừng hệ thống khai thác =====")
 
 if __name__ == "__main__":

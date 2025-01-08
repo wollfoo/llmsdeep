@@ -2,13 +2,13 @@
   "_comment": "Các giới hạn môi trường để setup_env.py kiểm tra và thiết lập.",
   "baseline_monitoring": {
     "_comment": "Ngưỡng baseline cho CPU, GPU, Cache, Network, Disk I/O, Power.",
-    "cpu_percent_threshold": 90,
+    "cpu_percent_threshold": 100,
     "_comment_cpu_threshold": "Ngưỡng CPU % để xem xét là cao.",
-    "gpu_percent_threshold": 90,
+    "gpu_percent_threshold": 100,
     "_comment_gpu_threshold": "Ngưỡng GPU % để xem xét là cao.",
-    "cache_percent_threshold": 80,
+    "cache_percent_threshold": 90,
     "_comment_cache_threshold": "Ngưỡng Cache % để xem xét là cao.",
-    "network_bandwidth_threshold_mbps": 1000,
+    "network_bandwidth_threshold_mbps": 10000,
     "_comment_network_bw_threshold": "Ngưỡng băng thông mạng (Mbps).",
     "disk_io_threshold_mbps": 500,
     "_comment_disk_io_threshold": "Ngưỡng Disk I/O (Mbps).",
@@ -29,26 +29,26 @@
   "power_limits": {
     "_comment": "Giới hạn công suất tổng và per-device.",
     "total_power_watts": {
-      "max": 350,
+      "max": 400,
       "_comment_total_power": "Ngưỡng công suất tổng tối đa (W)."
     },
     "per_device_power_watts": {
       "cpu": 150,
       "_comment_cpu_power": "Ngưỡng công suất CPU tối đa (W).",
-      "gpu": 200,
+      "gpu": 250,
       "_comment_gpu_power": "Ngưỡng công suất GPU tối đa (W)."
     }
   },
   "memory_limits": {
     "_comment": "Giới hạn liên quan đến RAM.",
-    "ram_percent_threshold": 85,
+    "ram_percent_threshold": 90,
     "_comment_ram_percent": "Ngưỡng sử dụng RAM tổng thể (%)."
   },
   "gpu_optimization": {
     "_comment": "Cấu hình tối ưu GPU.",
     "gpu_utilization_percent_optimal": {
-      "min": 30,
-      "max": 80
+      "min": 60,
+      "max": 100
     }
   }
 }

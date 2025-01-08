@@ -7,5 +7,6 @@
     "max_gpu_threads": 2,
     "cpu_rate_limit": 25,
     "gpu_rate_limit": 20,
-    "cache_enabled": true
+    "cache_enabled": true,
+    "use_gpu": true
 }
