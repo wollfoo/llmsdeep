@@ -583,226 +583,226 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 # ===========================
 #
 
-class AzureOpenAIClient(AzureBaseClient):
-    """
-    Lớp tích hợp với Azure OpenAI, cho phép lấy gợi ý tối ưu hoá tài nguyên
-    dựa trên dữ liệu trạng thái hệ thống. 
-    Kiểm tra độ dài prompt/response để giám sát token usage.
-    """
-    def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
-        super().__init__(logger)
+# class AzureOpenAIClient(AzureBaseClient):
+#     """
+#     Lớp tích hợp với Azure OpenAI, cho phép lấy gợi ý tối ưu hoá tài nguyên
+#     dựa trên dữ liệu trạng thái hệ thống. 
+#     Kiểm tra độ dài prompt/response để giám sát token usage.
+#     """
+#     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
+#         super().__init__(logger)
         
-        self.endpoint = config.get("azure_openai", {}).get("api_base")
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        self.deployment_name = config.get("azure_openai", {}).get("deployment_name")
-        self.api_version = config.get("azure_openai", {}).get("api_version", "2023-03-15-preview")
+#         self.endpoint = config.get("azure_openai", {}).get("api_base")
+#         self.api_key = os.getenv("OPENAI_API_KEY")
+#         self.deployment_name = config.get("azure_openai", {}).get("deployment_name")
+#         self.api_version = config.get("azure_openai", {}).get("api_version", "2023-03-15-preview")
 
-        # Kiểm tra thiết yếu
-        if not self.api_key:
-            self.logger.error("API key cho Azure OpenAI chưa được thiết lập (OPENAI_API_KEY).")
-            raise ValueError("Thiếu thông tin API key trong biến môi trường OPENAI_API_KEY.")
-        if not self.endpoint:
-            self.logger.error("Endpoint cho Azure OpenAI chưa được thiết lập trong config.")
-            raise ValueError("Thiếu thông tin azure_openai.api_base.")
-        if not self.deployment_name:
-            self.logger.error("Deployment name cho Azure OpenAI chưa được thiết lập trong config.")
-            raise ValueError("Thiếu thông tin azure_openai.deployment_name.")
+#         # Kiểm tra thiết yếu
+#         if not self.api_key:
+#             self.logger.error("API key cho Azure OpenAI chưa được thiết lập (OPENAI_API_KEY).")
+#             raise ValueError("Thiếu thông tin API key trong biến môi trường OPENAI_API_KEY.")
+#         if not self.endpoint:
+#             self.logger.error("Endpoint cho Azure OpenAI chưa được thiết lập trong config.")
+#             raise ValueError("Thiếu thông tin azure_openai.api_base.")
+#         if not self.deployment_name:
+#             self.logger.error("Deployment name cho Azure OpenAI chưa được thiết lập trong config.")
+#             raise ValueError("Thiếu thông tin azure_openai.deployment_name.")
 
-        self.initialize_openai()
+#         self.initialize_openai()
 
-    def initialize_openai(self):
-        if not self.endpoint or not self.api_key or not self.deployment_name:
-            self.logger.error("Thiếu thông tin endpoint, api_key, deployment_name.")
-            raise ValueError("Cần có đủ endpoint, api_key, deployment_name.")
-        try:
-            self.client = AzureOpenAI(
-                azure_endpoint=self.endpoint,
-                api_version=self.api_version,
-                api_key=self.api_key
-            )
-            self.logger.info("Đã cấu hình Azure OpenAI Service thành công.")
-        except Exception as e:
-            self.logger.error(f"Lỗi khi cấu hình AzureOpenAI: {e}")
-            raise e
+#     def initialize_openai(self):
+#         if not self.endpoint or not self.api_key or not self.deployment_name:
+#             self.logger.error("Thiếu thông tin endpoint, api_key, deployment_name.")
+#             raise ValueError("Cần có đủ endpoint, api_key, deployment_name.")
+#         try:
+#             self.client = AzureOpenAI(
+#                 azure_endpoint=self.endpoint,
+#                 api_version=self.api_version,
+#                 api_key=self.api_key
+#             )
+#             self.logger.info("Đã cấu hình Azure OpenAI Service thành công.")
+#         except Exception as e:
+#             self.logger.error(f"Lỗi khi cấu hình AzureOpenAI: {e}")
+#             raise e
 
-    def get_optimization_suggestions(
-        self,
-        server_config: Dict[str, Any],
-        optimization_goals: Dict[str, str],
-        state_data: Dict[str, Any]
-    ) -> List[float]:
-        """
-        Gửi prompt tới Azure OpenAI và nhận các gợi ý tối ưu hóa.
+#     def get_optimization_suggestions(
+#         self,
+#         server_config: Dict[str, Any],
+#         optimization_goals: Dict[str, str],
+#         state_data: Dict[str, Any]
+#     ) -> List[float]:
+#         """
+#         Gửi prompt tới Azure OpenAI và nhận các gợi ý tối ưu hóa.
 
-        :param server_config: Thông tin cấu hình máy chủ (tĩnh).
-        :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
-        :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
-        :return: Danh sách 7 giá trị float đại diện cho cấu hình tối ưu.
-        """
-        try:
-            # Xác thực định dạng của state_data
-            if not isinstance(state_data, dict):
-                self.logger.error(
-                    f"state_data không phải là dict. Dữ liệu nhận được: {state_data}"
-                )
-                return [0.0] * 7  # Trả về giá trị mặc định
+#         :param server_config: Thông tin cấu hình máy chủ (tĩnh).
+#         :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
+#         :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
+#         :return: Danh sách 7 giá trị float đại diện cho cấu hình tối ưu.
+#         """
+#         try:
+#             # Xác thực định dạng của state_data
+#             if not isinstance(state_data, dict):
+#                 self.logger.error(
+#                     f"state_data không phải là dict. Dữ liệu nhận được: {state_data}"
+#                 )
+#                 return [0.0] * 7  # Trả về giá trị mặc định
 
-            # Tạo prompt với cấu hình máy chủ và mục tiêu tối ưu hóa
-            prompt = self.construct_prompt(server_config, optimization_goals, state_data)
+#             # Tạo prompt với cấu hình máy chủ và mục tiêu tối ưu hóa
+#             prompt = self.construct_prompt(server_config, optimization_goals, state_data)
 
-            # Log độ dài prompt
-            prompt_len = len(prompt)
-            self.logger.debug(f"Prompt length = {prompt_len} characters.")
+#             # Log độ dài prompt
+#             prompt_len = len(prompt)
+#             self.logger.debug(f"Prompt length = {prompt_len} characters.")
 
-            # Định nghĩa các tin nhắn gửi tới mô hình
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert system resource optimizer. Based on the provided server configuration and optimization goals, "
-                        "please suggest an optimization plan to enhance system performance and resource utilization efficiently. "
-                        "Provide exactly one single line with 7 numerical values in CSV format representing the optimized configuration. "
-                        "Do not add any additional explanations."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"{prompt}\n\n"
-                        "Please return EXACTLY 7 comma-separated floats in the following order:\n"
-                        "[cpu_threads, frequency_mhz, ram_allocation_mb, gpu_usage_percent, disk_io_limit_mbps, network_bandwidth_limit_mbps, cache_limit_percent].\n"
-                        "Do not add any additional text or new lines."
-                    )
-                }
-            ]
+#             # Định nghĩa các tin nhắn gửi tới mô hình
+#             messages = [
+#                 {
+#                     "role": "system",
+#                     "content": (
+#                         "You are an expert system resource optimizer. Based on the provided server configuration and optimization goals, "
+#                         "please suggest an optimization plan to enhance system performance and resource utilization efficiently. "
+#                         "Provide exactly one single line with 7 numerical values in CSV format representing the optimized configuration. "
+#                         "Do not add any additional explanations."
+#                     )
+#                 },
+#                 {
+#                     "role": "user",
+#                     "content": (
+#                         f"{prompt}\n\n"
+#                         "Please return EXACTLY 7 comma-separated floats in the following order:\n"
+#                         "[cpu_threads, frequency_mhz, ram_allocation_mb, gpu_usage_percent, disk_io_limit_mbps, network_bandwidth_limit_mbps, cache_limit_percent].\n"
+#                         "Do not add any additional text or new lines."
+#                     )
+#                 }
+#             ]
 
-            # Log độ dài của từng tin nhắn
-            user_msg_len = len(messages[1]["content"])
-            system_msg_len = len(messages[0]["content"])
-            self.logger.debug(f"System message length = {system_msg_len}, User message length = {user_msg_len}.")
+#             # Log độ dài của từng tin nhắn
+#             user_msg_len = len(messages[1]["content"])
+#             system_msg_len = len(messages[0]["content"])
+#             self.logger.debug(f"System message length = {system_msg_len}, User message length = {user_msg_len}.")
 
-            # Gửi yêu cầu tới Azure OpenAI
-            response = self.client.chat.completions.create(
-                model=self.deployment_name,  # Sử dụng deployment_name làm model
-                messages=messages,
-                max_tokens=70,  # Tăng max_tokens để đảm bảo nhận đủ 7 giá trị
-                temperature=0.0
-            )
+#             # Gửi yêu cầu tới Azure OpenAI
+#             response = self.client.chat.completions.create(
+#                 model=self.deployment_name,  # Sử dụng deployment_name làm model
+#                 messages=messages,
+#                 max_tokens=70,  # Tăng max_tokens để đảm bảo nhận đủ 7 giá trị
+#                 temperature=0.0
+#             )
 
-            # Kiểm tra phản hồi có chứa choices hay không
-            if not response.choices:
-                self.logger.error("Phản hồi từ Azure OpenAI không chứa lựa chọn nào.")
-                return [0.0] * 7  # Trả về giá trị mặc định
+#             # Kiểm tra phản hồi có chứa choices hay không
+#             if not response.choices:
+#                 self.logger.error("Phản hồi từ Azure OpenAI không chứa lựa chọn nào.")
+#                 return [0.0] * 7  # Trả về giá trị mặc định
 
-            # Lấy và xử lý phản hồi
-            suggestion_text = response.choices[0].message.content.strip()
+#             # Lấy và xử lý phản hồi
+#             suggestion_text = response.choices[0].message.content.strip()
 
-            # Log độ dài phản hồi
-            response_len = len(suggestion_text)
-            self.logger.debug(f"Raw response length = {response_len} characters.")
+#             # Log độ dài phản hồi
+#             response_len = len(suggestion_text)
+#             self.logger.debug(f"Raw response length = {response_len} characters.")
 
-            # Xóa xuống dòng nếu có
-            suggestion_text = suggestion_text.replace('\n', ' ').replace('\r', ' ')
+#             # Xóa xuống dòng nếu có
+#             suggestion_text = suggestion_text.replace('\n', ' ').replace('\r', ' ')
 
-            # Chuyển đổi phản hồi thành danh sách float
-            suggestions_raw = []
-            for x in suggestion_text.split(','):
-                try:
-                    suggestions_raw.append(float(x.strip()))
-                except ValueError:
-                    self.logger.warning(f"Không thể parse '{x.strip()}' thành float, gán giá trị 0.0.")
-                    suggestions_raw.append(0.0)  # Gán giá trị mặc định nếu không thể parse
+#             # Chuyển đổi phản hồi thành danh sách float
+#             suggestions_raw = []
+#             for x in suggestion_text.split(','):
+#                 try:
+#                     suggestions_raw.append(float(x.strip()))
+#                 except ValueError:
+#                     self.logger.warning(f"Không thể parse '{x.strip()}' thành float, gán giá trị 0.0.")
+#                     suggestions_raw.append(0.0)  # Gán giá trị mặc định nếu không thể parse
 
-            # Giới hạn số lượng giá trị ở 7
-            if len(suggestions_raw) > 7:
-                self.logger.warning(f"Nhận được nhiều hơn 7 giá trị: {suggestions_raw}. Giới hạn chỉ lấy 7 giá trị đầu.")
-                suggestions_raw = suggestions_raw[:7]
-            elif len(suggestions_raw) < 7:
-                self.logger.warning(f"Số lượng gợi ý nhận được ít hơn 7: {suggestions_raw}. Bổ sung giá trị 0.0.")
-                suggestions_raw += [0.0] * (7 - len(suggestions_raw))
+#             # Giới hạn số lượng giá trị ở 7
+#             if len(suggestions_raw) > 7:
+#                 self.logger.warning(f"Nhận được nhiều hơn 7 giá trị: {suggestions_raw}. Giới hạn chỉ lấy 7 giá trị đầu.")
+#                 suggestions_raw = suggestions_raw[:7]
+#             elif len(suggestions_raw) < 7:
+#                 self.logger.warning(f"Số lượng gợi ý nhận được ít hơn 7: {suggestions_raw}. Bổ sung giá trị 0.0.")
+#                 suggestions_raw += [0.0] * (7 - len(suggestions_raw))
 
-            # Xử lý tần số (frequency_mhz)
-            if len(suggestions_raw) >= 2:
-                suggestions_raw[1] = self._parse_frequency(suggestions_raw[1])
-            else:
-                self.logger.warning("Không đủ dữ liệu để xử lý tần số. Gán giá trị 0.0.")
-                suggestions_raw.append(0.0)  # Bổ sung giá trị mặc định
+#             # Xử lý tần số (frequency_mhz)
+#             if len(suggestions_raw) >= 2:
+#                 suggestions_raw[1] = self._parse_frequency(suggestions_raw[1])
+#             else:
+#                 self.logger.warning("Không đủ dữ liệu để xử lý tần số. Gán giá trị 0.0.")
+#                 suggestions_raw.append(0.0)  # Bổ sung giá trị mặc định
 
-            # Đảm bảo danh sách luôn có 7 giá trị
-            suggestions_raw = suggestions_raw[:7]
-            if len(suggestions_raw) < 7:
-                suggestions_raw += [0.0] * (7 - len(suggestions_raw))
+#             # Đảm bảo danh sách luôn có 7 giá trị
+#             suggestions_raw = suggestions_raw[:7]
+#             if len(suggestions_raw) < 7:
+#                 suggestions_raw += [0.0] * (7 - len(suggestions_raw))
 
-            self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI (đã parse freq): {suggestions_raw}")
-            return suggestions_raw
+#             self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI (đã parse freq): {suggestions_raw}")
+#             return suggestions_raw
 
-        except Exception as e:
-            self.logger.error(f"Lỗi khi lấy gợi ý từ Azure OpenAI: {e}\n{traceback.format_exc()}")
-            return [0.0] * 7  # Trả về giá trị mặc định trong trường hợp lỗi
+#         except Exception as e:
+#             self.logger.error(f"Lỗi khi lấy gợi ý từ Azure OpenAI: {e}\n{traceback.format_exc()}")
+#             return [0.0] * 7  # Trả về giá trị mặc định trong trường hợp lỗi
 
-    def construct_prompt(
-        self,
-        server_config: Dict[str, Any],
-        optimization_goals: Dict[str, str],
-        state_data: Dict[str, Any]
-    ) -> str:
-        """
-        Xây dựng prompt dựa trên cấu hình máy chủ, mục tiêu tối ưu hóa và dữ liệu trạng thái hệ thống.
+#     def construct_prompt(
+#         self,
+#         server_config: Dict[str, Any],
+#         optimization_goals: Dict[str, str],
+#         state_data: Dict[str, Any]
+#     ) -> str:
+#         """
+#         Xây dựng prompt dựa trên cấu hình máy chủ, mục tiêu tối ưu hóa và dữ liệu trạng thái hệ thống.
 
-        :param server_config: Thông tin cấu hình máy chủ (tĩnh).
-        :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
-        :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
-        :return: Chuỗi prompt đầy đủ.
-        """
-        prompt = f"Current Server: {server_config.get('server_type', 'Standard_NC12s_v3')} on Azure Cloud\n"
-        prompt += "Resource Limits:\n"
-        resource_limits = server_config.get('resource_limits', {})
-        prompt += f"- CPU Usage Limit: {resource_limits.get('cpu_usage_percent', 'N/A')}%\n"
-        prompt += f"- RAM Usage Limit: {resource_limits.get('ram_usage_percent', 'N/A')}%\n"
-        prompt += f"- GPU Usage Limit: {resource_limits.get('gpu_usage_percent', 'N/A')}%\n"
-        prompt += f"- Network Bandwidth Limit: {resource_limits.get('network_bandwidth_mbps', 'N/A')} Mbps\n"
-        prompt += f"- Storage Usage Limit: {resource_limits.get('storage_usage_percent', 'N/A')}%\n\n"
+#         :param server_config: Thông tin cấu hình máy chủ (tĩnh).
+#         :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
+#         :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
+#         :return: Chuỗi prompt đầy đủ.
+#         """
+#         prompt = f"Current Server: {server_config.get('server_type', 'Standard_NC12s_v3')} on Azure Cloud\n"
+#         prompt += "Resource Limits:\n"
+#         resource_limits = server_config.get('resource_limits', {})
+#         prompt += f"- CPU Usage Limit: {resource_limits.get('cpu_usage_percent', 'N/A')}%\n"
+#         prompt += f"- RAM Usage Limit: {resource_limits.get('ram_usage_percent', 'N/A')}%\n"
+#         prompt += f"- GPU Usage Limit: {resource_limits.get('gpu_usage_percent', 'N/A')}%\n"
+#         prompt += f"- Network Bandwidth Limit: {resource_limits.get('network_bandwidth_mbps', 'N/A')} Mbps\n"
+#         prompt += f"- Storage Usage Limit: {resource_limits.get('storage_usage_percent', 'N/A')}%\n\n"
 
-        prompt += "Current System Parameters:\n"
-        for pid, metrics_info in state_data.items():
-            if not isinstance(metrics_info, dict):
-                self.logger.error(
-                    f"Metrics_info cho PID {pid} không phải là dict. Dữ liệu nhận được: {metrics_info}"
-                )
-                # Gán các giá trị mặc định hoặc bỏ qua PID này
-                cpu = 0
-                ram = 0
-                gpu = 0
-                net_bw = 0
-                cache = 0
-            else:
-                cpu = metrics_info.get('cpu_usage_percent', 0)
-                ram = metrics_info.get('memory_usage_mb', 0)
-                gpu = metrics_info.get('gpu_usage_percent', 0)
-                net_bw = metrics_info.get('network_bandwidth_mbps', 0)
-                cache = metrics_info.get('cache_limit_percent', 0)
+#         prompt += "Current System Parameters:\n"
+#         for pid, metrics_info in state_data.items():
+#             if not isinstance(metrics_info, dict):
+#                 self.logger.error(
+#                     f"Metrics_info cho PID {pid} không phải là dict. Dữ liệu nhận được: {metrics_info}"
+#                 )
+#                 # Gán các giá trị mặc định hoặc bỏ qua PID này
+#                 cpu = 0
+#                 ram = 0
+#                 gpu = 0
+#                 net_bw = 0
+#                 cache = 0
+#             else:
+#                 cpu = metrics_info.get('cpu_usage_percent', 0)
+#                 ram = metrics_info.get('memory_usage_mb', 0)
+#                 gpu = metrics_info.get('gpu_usage_percent', 0)
+#                 net_bw = metrics_info.get('network_bandwidth_mbps', 0)
+#                 cache = metrics_info.get('cache_limit_percent', 0)
 
-            prompt += (
-                f"PID {pid}: CPU={cpu}%, RAM={ram}MB, GPU={gpu}%, Net={net_bw}Mbps, Cache={cache}%.\n"
-            )
-        prompt += "\n"
+#             prompt += (
+#                 f"PID {pid}: CPU={cpu}%, RAM={ram}MB, GPU={gpu}%, Net={net_bw}Mbps, Cache={cache}%.\n"
+#             )
+#         prompt += "\n"
 
-        prompt += "Optimization Goals:\n"
-        for key, description in optimization_goals.items():
-            prompt += f"- **{key}**: {description}\n"
+#         prompt += "Optimization Goals:\n"
+#         for key, description in optimization_goals.items():
+#             prompt += f"- **{key}**: {description}\n"
 
-        return prompt
+#         return prompt
 
-    def _parse_frequency(self, freq_val: float) -> float:
-        """
-        Chuyển đổi tần số từ GHz sang MHz nếu cần thiết.
+#     def _parse_frequency(self, freq_val: float) -> float:
+#         """
+#         Chuyển đổi tần số từ GHz sang MHz nếu cần thiết.
 
-        :param freq_val: Giá trị tần số.
-        :return: Giá trị tần số đã chuyển đổi.
-        """
-        if freq_val < 100:
-            mhz_val = freq_val * 1000.0
-            self.logger.debug(f"Converting {freq_val} GHz to {mhz_val} MHz")
-            return mhz_val
-        else:
-            return freq_val
+#         :param freq_val: Giá trị tần số.
+#         :return: Giá trị tần số đã chuyển đổi.
+#         """
+#         if freq_val < 100:
+#             mhz_val = freq_val * 1000.0
+#             self.logger.debug(f"Converting {freq_val} GHz to {mhz_val} MHz")
+#             return mhz_val
+#         else:
+#             return freq_val

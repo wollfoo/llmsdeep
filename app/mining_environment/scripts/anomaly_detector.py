@@ -8,7 +8,6 @@ from time import sleep, time
 from pathlib import Path
 from threading import Lock, Event, Thread
 from typing import List, Any, Dict, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base_manager import BaseManager
 from .utils import MiningProcess
@@ -23,22 +22,25 @@ from .auxiliary_modules.temperature_monitor import (
     get_gpu_temperature
 )
 
+# Loại bỏ các import không sử dụng
+# from concurrent.futures import ThreadPoolExecutor, as_completed
+
 class SafeRestoreEvaluator:
     """
     Lớp đánh giá điều kiện an toàn để khôi phục tài nguyên cho các tiến trình.
     """
-
     def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_manager):
         self.config = config
         self.logger = logger
         self.resource_manager = resource_manager
 
         # Các ngưỡng baseline
-        self.baseline_cpu_usage_percent = self.config.get('baseline_thresholds', {}).get('cpu_usage_percent', 80)
-        self.baseline_gpu_usage_percent = self.config.get('baseline_thresholds', {}).get('gpu_usage_percent', 80)
-        self.baseline_ram_usage_percent = self.config.get('baseline_thresholds', {}).get('ram_usage_percent', 80)
-        self.baseline_disk_io_usage_mbps = self.config.get('baseline_thresholds', {}).get('disk_io_usage_mbps', 80)
-        self.baseline_network_usage_mbps = self.config.get('baseline_thresholds', {}).get('network_usage_mbps', 80)
+        baseline_thresholds = self.config.get('baseline_thresholds', {})
+        self.baseline_cpu_usage_percent = baseline_thresholds.get('cpu_usage_percent', 80)
+        self.baseline_gpu_usage_percent = baseline_thresholds.get('gpu_usage_percent', 80)
+        self.baseline_ram_usage_percent = baseline_thresholds.get('ram_usage_percent', 80)
+        self.baseline_disk_io_usage_mbps = baseline_thresholds.get('disk_io_usage_mbps', 80)
+        self.baseline_network_usage_mbps = baseline_thresholds.get('network_usage_mbps', 80)
 
         # Giới hạn nhiệt độ
         temperature_limits = self.config.get("temperature_limits", {})
@@ -47,19 +49,26 @@ class SafeRestoreEvaluator:
 
         # Giới hạn công suất
         power_limits = self.config.get("power_limits", {})
-        self.cpu_max_power = power_limits.get("per_device_power_watts", {}).get("cpu", 150)
-        self.gpu_max_power = power_limits.get("per_device_power_watts", {}).get("gpu", 300)
+        per_device_power = power_limits.get("per_device_power_watts", {})
+        self.cpu_max_power = per_device_power.get("cpu", 150)
+        self.gpu_max_power = per_device_power.get("gpu", 300)
 
     def is_safe_to_restore(self, process: MiningProcess) -> bool:
         """
         Kiểm tra xem điều kiện có đủ an toàn để khôi phục tài nguyên cho tiến trình hay không.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình khai thác.
+
+        Returns:
+            bool: True nếu an toàn để khôi phục, ngược lại False.
         """
         try:
             # 1) Kiểm tra nhiệt độ CPU
             cpu_temp = get_cpu_temperature(process.pid)
             if cpu_temp is not None and cpu_temp >= self.cpu_max_temp:
                 self.logger.info(
-                    f"Nhiệt độ CPU {cpu_temp}°C vẫn cao cho tiến trình {process.name} (PID: {process.pid})."
+                    f"Nhiệt độ CPU {cpu_temp}°C vẫn cao cho tiến trình {process.name} (PID={process.pid})."
                 )
                 return False
 
@@ -68,7 +77,7 @@ class SafeRestoreEvaluator:
                 gpu_temps = get_gpu_temperature(process.pid)
                 if gpu_temps and any(temp >= self.gpu_max_temp for temp in gpu_temps):
                     self.logger.info(
-                        f"Nhiệt độ GPU {gpu_temps}°C vẫn cao cho tiến trình {process.name} (PID: {process.pid})."
+                        f"Nhiệt độ GPU {gpu_temps}°C vẫn cao cho tiến trình {process.name} (PID={process.pid})."
                     )
                     return False
 
@@ -76,7 +85,7 @@ class SafeRestoreEvaluator:
             cpu_power = get_cpu_power(process.pid)
             if cpu_power is not None and cpu_power >= self.cpu_max_power:
                 self.logger.info(
-                    f"Công suất CPU {cpu_power}W vẫn cao cho tiến trình {process.name} (PID: {process.pid})."
+                    f"Công suất CPU {cpu_power}W vẫn cao cho tiến trình {process.name} (PID={process.pid})."
                 )
                 return False
 
@@ -85,7 +94,7 @@ class SafeRestoreEvaluator:
                 gpu_power = get_gpu_power(process.pid)
                 if gpu_power is not None and gpu_power >= self.gpu_max_power:
                     self.logger.info(
-                        f"Công suất GPU {gpu_power}W vẫn cao cho tiến trình {process.name} (PID: {process.pid})."
+                        f"Công suất GPU {gpu_power}W vẫn cao cho tiến trình {process.name} (PID={process.pid})."
                     )
                     return False
 
@@ -142,10 +151,6 @@ class SafeRestoreEvaluator:
                 )
                 return False
 
-            # 11) (ĐÃ LOẠI BỎ) - Phần gọi azure_security_center_client.get_secure_scores()
-
-            # 12) (ĐÃ LOẠI BỎ) - Kiểm tra lưu lượng từ Azure Traffic Analytics
-
             # 13) Kiểm tra bất thường qua Azure Anomaly Detector
             current_state = self.resource_manager.collect_metrics(process)
             anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
@@ -166,6 +171,10 @@ class SafeRestoreEvaluator:
             return False
 
 class AnomalyDetector(BaseManager):
+    """
+    Lớp phát hiện bất thường cho các tiến trình khai thác.
+    Chịu trách nhiệm giám sát các chỉ số hệ thống và enqueue các tiến trình cần cloaking khi phát hiện bất thường.
+    """
     _instance = None
     _instance_lock = Lock()
 
@@ -195,6 +204,7 @@ class AnomalyDetector(BaseManager):
             daemon=True
         )
 
+        # Khởi tạo NVML để quản lý GPU nếu có
         try:
             pynvml.nvmlInit()
             self.gpu_initialized = True
@@ -207,6 +217,12 @@ class AnomalyDetector(BaseManager):
         self.safe_restore_evaluator = None
 
     def set_resource_manager(self, resource_manager):
+        """
+        Thiết lập ResourceManager cho AnomalyDetector.
+
+        Args:
+            resource_manager (ResourceManager): Instance của ResourceManager.
+        """
         self.resource_manager = resource_manager
         self.logger.info("ResourceManager has been set for AnomalyDetector.")
 
@@ -217,11 +233,17 @@ class AnomalyDetector(BaseManager):
         )
 
     def start(self):
+        """
+        Bắt đầu AnomalyDetector, bao gồm việc khởi động thread phát hiện bất thường.
+        """
         self.logger.info("Starting AnomalyDetector...")
         self.anomaly_thread.start()
         self.logger.info("AnomalyDetector started successfully.")
 
     def stop(self):
+        """
+        Dừng AnomalyDetector, bao gồm việc dừng thread phát hiện bất thường và shutdown NVML.
+        """
         self.logger.info("Stopping AnomalyDetector...")
         self.stop_event.set()
         self.anomaly_thread.join()
@@ -236,6 +258,9 @@ class AnomalyDetector(BaseManager):
         self.logger.info("AnomalyDetector stopped successfully.")
 
     def discover_mining_processes(self):
+        """
+        Khám phá các tiến trình khai thác đang chạy trên hệ thống dựa trên cấu hình.
+        """
         cpu_process_name = self.config['processes'].get('CPU', '').lower()
         gpu_process_name = self.config['processes'].get('GPU', '').lower()
 
@@ -259,6 +284,15 @@ class AnomalyDetector(BaseManager):
             self.logger.info(f"Discovered {len(self.mining_processes)} mining processes.")
 
     def get_process_priority(self, process_name: str) -> int:
+        """
+        Lấy độ ưu tiên của tiến trình dựa trên tên.
+
+        Args:
+            process_name (str): Tên của tiến trình.
+
+        Returns:
+            int: Độ ưu tiên của tiến trình.
+        """
         priority_map = self.config.get('process_priority_map', {})
         priority = priority_map.get(process_name.lower(), 1)
         if not isinstance(priority, int):
@@ -269,6 +303,9 @@ class AnomalyDetector(BaseManager):
         return priority
 
     def anomaly_detection(self):
+        """
+        Thread để phát hiện bất thường trong các tiến trình khai thác.
+        """
         detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 3600)
         cloak_activation_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
         last_detection_time = 0
@@ -327,19 +364,23 @@ class AnomalyDetector(BaseManager):
                             process.is_cloaked = True
                             continue
 
-                        # 4) (ĐÃ LOẠI BỎ) - Kiểm tra flow logs từ Azure Network Watcher
-                        # Không còn phần kiểm tra flow logs từ Azure Network Watcher
-
-                        # 5) (ĐÃ LOẠI BỎ) - Kiểm tra traffic từ Azure Traffic Analytics
-                        # Đã loại bỏ phần kiểm tra traffic từ Azure Traffic Analytics
+                        # Các kiểm tra khác đã bị loại bỏ
 
             except Exception as e:
                 self.logger.error(f"Error in anomaly_detection: {e}")
 
             sleep(1)  # Nghỉ ngắn để tránh vòng lặp quá sát
 
-
     def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
+        """
+        Thu thập các metrics cho một tiến trình cụ thể.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình khai thác.
+
+        Returns:
+            Dict[str, Any]: Dictionary chứa các metrics của tiến trình.
+        """
         try:
             proc = psutil.Process(process.pid)
             disk_io = proc.io_counters()
@@ -356,8 +397,8 @@ class AnomalyDetector(BaseManager):
                 'cache_percent': self.get_cache_percent(),
                 'gpus': [
                     {
-                        'gpu_percent': self.get_gpu_memory_percent(process.pid),
-                        'memory_percent': self.get_gpu_memory_percent(process.pid),
+                        'gpu_percent': self.get_gpu_memory_percent(),
+                        'memory_percent': self.get_gpu_memory_percent(),
                         'temperature_celsius': self.get_gpu_temperature(process.pid)
                     }
                 ],
@@ -384,6 +425,12 @@ class AnomalyDetector(BaseManager):
             return {}
 
     def get_cpu_freq(self) -> Optional[float]:
+        """
+        Lấy tần số CPU hiện tại.
+
+        Returns:
+            Optional[float]: Tần số CPU hiện tại (MHz) hoặc None nếu gặp lỗi.
+        """
         try:
             freq = psutil.cpu_freq().current
             self.logger.debug(f"Tần số CPU hiện tại: {freq} MHz")
@@ -393,6 +440,12 @@ class AnomalyDetector(BaseManager):
             return None
 
     def get_cache_percent(self) -> Optional[float]:
+        """
+        Lấy phần trăm sử dụng cache của RAM.
+
+        Returns:
+            Optional[float]: Phần trăm cache hoặc None nếu gặp lỗi.
+        """
         try:
             mem = psutil.virtual_memory()
             cache_percent = mem.cached / mem.total * 100
@@ -402,7 +455,13 @@ class AnomalyDetector(BaseManager):
             self.logger.error(f"Lỗi khi lấy phần trăm Cache: {e}")
             return None
 
-    def get_gpu_memory_percent(self, pid: Optional[int] = None) -> float:
+    def get_gpu_memory_percent(self) -> float:
+        """
+        Lấy phần trăm sử dụng bộ nhớ GPU tổng thể.
+
+        Returns:
+            float: Phần trăm sử dụng GPU.
+        """
         if not self.gpu_initialized:
             self.logger.warning("GPU not initialized. Cannot get GPU memory percent.")
             return 0.0
@@ -430,6 +489,15 @@ class AnomalyDetector(BaseManager):
             return 0.0
 
     def get_gpu_temperature(self, pid: Optional[int] = None) -> float:
+        """
+        Lấy nhiệt độ trung bình của GPU.
+
+        Args:
+            pid (Optional[int], optional): PID của tiến trình. Defaults to None.
+
+        Returns:
+            float: Nhiệt độ trung bình GPU (°C).
+        """
         temps = get_gpu_temperature(pid)
         if temps:
             avg_temp = sum(temps) / len(temps)
