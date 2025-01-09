@@ -264,6 +264,7 @@ class ResourceManager(BaseManager):
         self.config = config
         self.logger = logger
 
+
         self.stop_event = Event()
         self.resource_lock = rwlock.RWLockFair()
         self.cloaking_request_queue = Queue()
@@ -353,7 +354,7 @@ class ResourceManager(BaseManager):
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
-    def acquire_write_lock(self, write_lock, timeout: Optional[float] = None) -> bool:
+    def acquire_write_lock(self, read_lock, timeout: Optional[float] = None) -> bool:
         """
         Tiện ích để chiếm write lock với timeout.
 
@@ -365,7 +366,7 @@ class ResourceManager(BaseManager):
             bool: True nếu chiếm thành công, False nếu timeout.
         """
         try:
-            acquired = write_lock.acquire(timeout=timeout)
+            acquired = read_lock.acquire(timeout=timeout)
             if acquired:
                 self.logger.debug("Acquired write lock successfully.")
             else:
@@ -406,7 +407,7 @@ class ResourceManager(BaseManager):
             gpu_name = self.config['processes'].get('GPU', '').lower()
 
             # Sử dụng context managers để quản lý locks
-            with self.mining_processes_lock.read_lock(timeout=5) as read_lock:
+            with self.mining_processes_lock.gen_rlock(timeout=5) as read_lock:
                 if not read_lock:
                     self.logger.error("Failed to acquire mining_processes_lock trong discover_mining_processes.")
                     return
@@ -588,22 +589,13 @@ class ResourceManager(BaseManager):
         Phân bổ tài nguyên cho các tiến trình khai thác theo thứ tự ưu tiên.
         """
         try:
-            # Acquire write lock với timeout
-            write_lock = self.resource_lock.write_lock()
-            acquired = self.acquire_write_lock(write_lock, timeout=5)
-            if not acquired:
-                self.logger.error("Timeout khi acquire resource_lock trong allocate_resources_with_priority.")
-                return
-
-            try:
-                # Acquire read lock với timeout
-                read_lock = self.mining_processes_lock.read_lock()
-                acquired_read = self.acquire_read_lock(read_lock, timeout=5)
-                if not acquired_read:
-                    self.logger.error("Timeout khi acquire mining_processes_lock trong allocate_resources_with_priority.")
-                    return
-
-                try:
+            # Lấy khóa ghi với thời gian chờ 5 giây
+            with self.resource_lock.gen_wlock(timeout=5) as write_lock:
+                # Không cần gọi write_lock.acquire()
+                
+                with self.mining_processes_lock.gen_rlock(timeout=5) as read_lock:
+                    # Không cần gọi read_lock.acquire()
+                    
                     # Sắp xếp các tiến trình theo độ ưu tiên giảm dần
                     sorted_procs = sorted(
                         self.mining_processes,
@@ -664,10 +656,6 @@ class ResourceManager(BaseManager):
                         ))
                         
                         allocated += proc.priority
-                finally:
-                    read_lock.release()
-            finally:
-                write_lock.release()
         except Exception as e:
             self.logger.error(
                 f"Lỗi allocate_resources_with_priority: {e}\n{traceback.format_exc()}"
@@ -799,7 +787,7 @@ class ResourceManager(BaseManager):
         """
         metrics_data = {}
         try:
-            with self.mining_processes_lock.read_lock(timeout=5) as read_lock:
+            with self.mining_processes_lock.gen_rlock(timeout=5) as read_lock:
                 if not read_lock:
                     self.logger.error("Timeout khi acquire mining_processes_lock trong collect_all_metrics.")
                     return metrics_data
@@ -832,7 +820,7 @@ class ResourceManager(BaseManager):
         self.stop_event.set()
         self.executor.shutdown(wait=True)
         self.shared_resource_manager.shutdown_nvml()  # Sử dụng GPUManager để shutdown NVML
-        shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
         # Xóa các cgroup đã tạo nếu cần
         self.cgroup_manager.delete_cgroup('priority_cpu', controllers='cpu')
         self.logger.info("ResourceManager đã dừng.")
+        shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
