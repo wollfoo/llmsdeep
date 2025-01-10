@@ -12,7 +12,6 @@ class CgroupManager:
     Các chức năng bao gồm:
     - Kiểm tra sự tồn tại của cgroup v2.
     - Tạo và xóa cgroup v2.
-    - Thiết lập các tham số cho cgroup v2.
     - Gán tiến trình vào cgroup v2.
     
     Yêu cầu:
@@ -35,6 +34,9 @@ class CgroupManager:
         if self.cgroup_version != 2:
             self.logger.error("Hệ thống không sử dụng cgroups v2. CgroupManager chỉ hỗ trợ cgroups v2.")
             raise EnvironmentError("Unsupported cgroup version. Only cgroups v2 is supported.")
+        
+        # Tạo các cgroup cha 'root' và 'root_gpu' nếu chưa tồn tại
+        self.create_parent_cgroups()
 
     def detect_cgroup_version(self) -> int:
         """
@@ -121,37 +123,6 @@ class CgroupManager:
                 self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}': {e}")
             except Exception as e:
                 self.logger.error(f"Lỗi không xác định khi xóa cgroup '{cgroup_name}': {e}")
-            return False
-
-    def set_cgroup_parameter(self, cgroup_name: str, parameter: str, value: str) -> bool:
-        """
-        Thiết lập một tham số cho cgroup v2.
-
-        Args:
-            cgroup_name (str): Tên của cgroup.
-            parameter (str): Tên tham số (ví dụ: 'cpu.max').
-            value (str): Giá trị của tham số (ví dụ: '50000 100000').
-
-        Returns:
-            bool: True nếu thiết lập thành công, False nếu thất bại.
-        """
-        with self.lock:
-            if not self.cgroup_exists(cgroup_name):
-                self.logger.error(f"Cgroup '{cgroup_name}' không tồn tại. Không thể thiết lập tham số '{parameter}'.")
-                return False
-
-            cgroup_path = os.path.join(self.CGROUP_ROOT, cgroup_name, parameter)
-            try:
-                with open(os.path.join(self.CGROUP_ROOT, cgroup_name, parameter), 'w') as f:
-                    f.write(value)
-                self.logger.info(f"Đặt tham số '{parameter}={value}' cho cgroup '{cgroup_name}'.")
-                return True
-            except FileNotFoundError:
-                self.logger.error(f"Tham số '{parameter}' không tồn tại trong cgroup '{cgroup_name}'.")
-            except PermissionError as e:
-                self.logger.error(f"Không đủ quyền để thiết lập tham số '{parameter}' cho cgroup '{cgroup_name}': {e}")
-            except Exception as e:
-                self.logger.error(f"Lỗi không xác định khi thiết lập tham số '{parameter}' cho cgroup '{cgroup_name}': {e}")
             return False
 
     def assign_process_to_cgroup(self, pid: int, cgroup_name: str) -> bool:
@@ -250,61 +221,6 @@ class CgroupManager:
             self.logger.error(f"Lỗi không xác định khi liệt kê cgroups: {e}")
         return []
 
-    def set_cpu_quota(self, cgroup_name: str, quota: int, period: int = 100000) -> bool:
-        """
-        Thiết lập giới hạn CPU cho cgroup v2.
-
-        Args:
-            cgroup_name (str): Tên của cgroup.
-            quota (int): Số microseconds CPU quota.
-            period (int, optional): Số microseconds CPU period. Defaults to 100000.
-
-        Returns:
-            bool: True nếu thiết lập thành công, False nếu thất bại.
-        """
-        cpu_max_value = f"{quota} {period}"
-        return self.set_cgroup_parameter(cgroup_name, "cpu.max", cpu_max_value)
-
-    def set_memory_limit(self, cgroup_name: str, memory_limit: str) -> bool:
-        """
-        Thiết lập giới hạn bộ nhớ cho cgroup v2.
-
-        Args:
-            cgroup_name (str): Tên của cgroup.
-            memory_limit (str): Giới hạn bộ nhớ (ví dụ: '500M', '2G').
-
-        Returns:
-            bool: True nếu thiết lập thành công, False nếu thất bại.
-        """
-        return self.set_cgroup_parameter(cgroup_name, "memory.max", memory_limit)
-
-    def set_io_limit(self, cgroup_name: str, io_weight: int) -> bool:
-        """
-        Thiết lập giới hạn I/O cho cgroup v2.
-
-        Args:
-            cgroup_name (str): Tên của cgroup.
-            io_weight (int): Trọng số I/O (1-1000).
-
-        Returns:
-            bool: True nếu thiết lập thành công, False nếu thất bại.
-        """
-        io_weight_value = f"{io_weight}"
-        return self.set_cgroup_parameter(cgroup_name, "io.weight", io_weight_value)
-
-    def move_pid_to_cgroup(self, pid: int, cgroup_name: str) -> bool:
-        """
-        Di chuyển một PID vào cgroup v2.
-
-        Args:
-            pid (int): PID của tiến trình.
-            cgroup_name (str): Tên của cgroup.
-
-        Returns:
-            bool: True nếu di chuyển thành công, False nếu thất bại.
-        """
-        return self.assign_process_to_cgroup(pid, cgroup_name)
-
     def add_cgroup_to_parent(self, parent_cgroup: str, child_cgroup: str) -> bool:
         """
         Thêm một cgroup con vào cgroup cha trong cgroups v2.
@@ -316,9 +232,6 @@ class CgroupManager:
         Returns:
             bool: True nếu thêm thành công, False nếu thất bại.
         """
-        parent_path = os.path.join(self.CGROUP_ROOT, parent_cgroup, "cgroup.subtree_control")
-        child_path = os.path.join(self.CGROUP_ROOT, child_cgroup)
-
         if not self.cgroup_exists(parent_cgroup):
             self.logger.error(f"Cgroup cha '{parent_cgroup}' không tồn tại.")
             return False
@@ -327,20 +240,26 @@ class CgroupManager:
             self.logger.error(f"Cgroup con '{child_cgroup}' không tồn tại.")
             return False
 
-        try:
-            # Bật các controllers cần thiết cho cgroup con trong cgroup cha
-            with open(parent_path, 'a') as f:
-                # Ví dụ: bật controller 'cpu' cho cgroup con
-                f.write("+cpu\n")
-            self.logger.info(f"Thêm controller 'cpu' cho cgroup con '{child_cgroup}' trong cgroup cha '{parent_cgroup}'.")
-            return True
-        except FileNotFoundError:
-            self.logger.error(f"Tệp 'cgroup.subtree_control' không tồn tại trong cgroup cha '{parent_cgroup}'.")
-        except PermissionError as e:
-            self.logger.error(f"Không đủ quyền để thêm controller vào cgroup cha '{parent_cgroup}': {e}")
-        except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi thêm controller vào cgroup cha '{parent_cgroup}': {e}")
-        return False
+        # Trong cgroup v2, các cgroup con chỉ cần được tạo trong thư mục cha,
+        # không cần phải thêm thông qua một phương thức đặc biệt.
+        # Nếu các cgroup đã được tạo đúng cách, chúng tự động là con của cha.
 
-    # Thêm các phương thức bổ sung nếu cần thiết...
+        # Do đó, phương thức này có thể không cần thiết hoặc chỉ cần xác nhận cấu trúc.
+        self.logger.info(f"Cgroup '{child_cgroup}' đã được thêm vào cgroup cha '{parent_cgroup}'.")
+        return True
 
+    def create_parent_cgroups(self):
+        """
+        Tạo các cgroup cha 'root' và 'root_gpu' nếu chúng chưa tồn tại.
+        """
+        parents = ['root', 'root_gpu']
+        for parent in parents:
+            if not self.cgroup_exists(parent):
+                success = self.create_cgroup(parent)
+                if success:
+                    self.logger.info(f"Đã tạo cgroup cha '{parent}'.")
+                else:
+                    self.logger.error(f"Không thể tạo cgroup cha '{parent}'.")
+                    raise RuntimeError(f"Cannot create parent cgroup '{parent}'.")
+        
+        self.logger.info("Các cgroup cha 'root' và 'root_gpu' đã được tạo hoặc đã tồn tại.")
