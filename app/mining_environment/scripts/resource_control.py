@@ -5,6 +5,7 @@ import subprocess
 import os
 from typing import Any, Dict
 from .utils import GPUManager  # Import GPUManager từ utils.py
+from .cgroup_manager import CgroupManager  # Import CgroupManager từ cgroup_manager.py
 
 
 class CPUResourceManager:
@@ -12,8 +13,10 @@ class CPUResourceManager:
     Quản lý tài nguyên CPU thông qua cgroups.
     """
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, cgroup_manager: CgroupManager):
         self.logger = logger
+        self.cgroup_manager = cgroup_manager
+
 
     def set_cpu_quota(self, cgroup_name: str, quota: int, period: int = 100000) -> bool:
         """
@@ -36,15 +39,22 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi đặt CPU quota cho cgroup '{cgroup_name}': {e}")
             return False
+        
+    def delete_cgroup(self, cgroup_name: str) -> bool:
+        """
+        Xóa cgroup CPU sử dụng CgroupManager.
+        """
+        return self.cgroup_manager.delete_cgroup(cgroup_name)
 
 class GPUResourceManager:
     """
     Quản lý tài nguyên GPU thông qua NVML và cgroups.
     """
 
-    def __init__(self, logger: logging.Logger, gpu_manager: GPUManager):
+    def __init__(self, logger: logging.Logger, gpu_manager: GPUManager, cgroup_manager: CgroupManager):
         self.logger = logger
         self.gpu_manager = gpu_manager
+        self.cgroup_manager = cgroup_manager
         if self.gpu_manager.gpu_count > 0:
             self.gpu_initialized = True
         else:
@@ -122,14 +132,22 @@ class GPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi đặt 'gpu.max' cho cgroup '{cgroup_name}': {e}")
             return False
+        
+    def delete_cgroup(self, cgroup_name: str) -> bool:
+        """
+        Xóa cgroup GPU sử dụng CgroupManager.
+        """
+        return self.cgroup_manager.delete_cgroup(cgroup_name)
+
 
 class NetworkResourceManager:
     """
     Quản lý tài nguyên mạng thông qua iptables và tc.
     """
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, cgroup_manager: CgroupManager):
         self.logger = logger
+        self.cgroup_manager = cgroup_manager
 
     def mark_packets(self, pid: int, mark: int) -> bool:
         """
@@ -291,13 +309,21 @@ class NetworkResourceManager:
             self.logger.error(f"Lỗi khi khôi phục 'net_cls.classid' cho cgroup '{cgroup_name}': {e}")
             return False
 
+    def delete_cgroup(self, cgroup_name: str) -> bool:
+        """
+        Xóa cgroup Network sử dụng CgroupManager.
+        """
+        return self.cgroup_manager.delete_cgroup(cgroup_name)
+    
+
 class DiskIOResourceManager:
     """
     Quản lý tài nguyên Disk I/O thông qua cgroups.
     """
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, cgroup_manager: CgroupManager):
         self.logger = logger
+        self.cgroup_manager = cgroup_manager
 
     def set_io_weight(self, cgroup_name: str, io_weight: int) -> bool:
         """
@@ -320,13 +346,21 @@ class DiskIOResourceManager:
             self.logger.error(f"Lỗi khi đặt I/O weight cho cgroup '{cgroup_name}': {e}")
             return False
 
+    def delete_cgroup(self, cgroup_name: str) -> bool:
+        """
+        Xóa cgroup Disk I/O sử dụng CgroupManager.
+        """
+        return self.cgroup_manager.delete_cgroup(cgroup_name)
+    
+
 class CacheResourceManager:
     """
     Quản lý tài nguyên Cache thông qua cgroups.
     """
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, cgroup_manager: CgroupManager):
         self.logger = logger
+        self.cgroup_manager = cgroup_manager
 
     def drop_caches(self) -> bool:
         """
@@ -367,14 +401,23 @@ class CacheResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi đặt 'cache.max' cho cgroup '{cgroup_name}': {e}")
             return False
+    
+    def delete_cgroup(self, cgroup_name: str) -> bool:
+        """
+        Xóa cgroup Cache sử dụng CgroupManager.
+        """
+        return self.cgroup_manager.delete_cgroup(cgroup_name)
+
 
 class MemoryResourceManager:
     """
     Quản lý tài nguyên Memory thông qua cgroups.
     """
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, cgroup_manager: CgroupManager):
         self.logger = logger
+        self.cgroup_manager = cgroup_manager
+        self.memory_limits = {}  # Optional: Dùng để lưu trữ giới hạn bộ nhớ đã thiết lập theo PID
 
     def drop_caches(self) -> bool:
         """
@@ -416,6 +459,37 @@ class MemoryResourceManager:
             self.logger.error(f"Lỗi khi đặt 'memory.max' cho cgroup '{cgroup_name}': {e}")
             return False
 
+    def get_memory_limit(self, cgroup_name: str) -> float:
+        """
+        Lấy giới hạn bộ nhớ đã thiết lập cho cgroup cụ thể.
+
+        Args:
+            cgroup_name (str): Tên của cgroup.
+
+        Returns:
+            float: Giới hạn bộ nhớ tính bằng bytes. Trả về 0.0 nếu không thành công.
+        """
+        try:
+            memory_max_path = f"/sys/fs/cgroup/{cgroup_name}/memory.max"
+            with open(memory_max_path, 'r') as f:
+                content = f.read().strip()
+                if content == "max":
+                    self.logger.debug(f"Giới hạn bộ nhớ cho cgroup '{cgroup_name}' là 'max' (inf).")
+                    return float('inf')
+                memory_limit = float(content)
+                self.logger.debug(f"Giới hạn bộ nhớ cho cgroup '{cgroup_name}' là {memory_limit} bytes.")
+                return memory_limit
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy 'memory.max' từ cgroup '{cgroup_name}': {e}")
+            return 0.0
+
+    def delete_cgroup(self, cgroup_name: str) -> bool:
+        """
+        Xóa cgroup Memory sử dụng CgroupManager.
+        """
+        return self.cgroup_manager.delete_cgroup(cgroup_name)
+
+
 class ResourceControlFactory:
     """
     Factory để tạo các instance của các resource manager.
@@ -432,13 +506,15 @@ class ResourceControlFactory:
         Returns:
             Dict[str, Any]: Dictionary chứa các resource manager.
         """
-        gpu_manager = GPUManager(logger)
+        gpu_manager = GPUManager()
+        cgroup_manager = CgroupManager(logger)  # Khởi tạo CgroupManager
+
         resource_managers = {
-            'cpu': CPUResourceManager(logger),
-            'gpu': GPUResourceManager(logger, gpu_manager),
-            'network': NetworkResourceManager(logger),
-            'disk_io': DiskIOResourceManager(logger),
-            'cache': CacheResourceManager(logger),
-            'memory': MemoryResourceManager(logger)
+            'cpu': CPUResourceManager(logger, cgroup_manager),  # Truyền cgroup_manager vào
+            'gpu': GPUResourceManager(logger, gpu_manager, cgroup_manager),
+            'network': NetworkResourceManager(logger, cgroup_manager),
+            'io': DiskIOResourceManager(logger, cgroup_manager),
+            'cache': CacheResourceManager(logger, cgroup_manager),
+            'memory': MemoryResourceManager(logger, cgroup_manager)
         }
         return resource_managers

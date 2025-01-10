@@ -117,9 +117,30 @@ class CgroupManager:
                 return True
 
             cgroup_path = os.path.join(self.CGROUP_ROOT, cgroup_name)
+            cgroup_procs_path = os.path.join(cgroup_path, "cgroup.procs")
+
             try:
+                # Kiểm tra và di chuyển hoặc dừng tiến trình trong cgroup
+                if os.path.exists(cgroup_procs_path):
+                    with open(cgroup_procs_path, 'r') as f:
+                        procs = f.read().strip().split('\n')
+                    if procs:
+                        self.logger.warning(f"Cgroup '{cgroup_name}' vẫn còn tiến trình: {procs}. Đang giải quyết...")
+                        for pid in procs:
+                            try:
+                                os.kill(int(pid), 9)  # Dừng tiến trình (SIGKILL)
+                                self.logger.info(f"Đã giết tiến trình PID={pid} thuộc cgroup '{cgroup_name}'.")
+                            except ProcessLookupError:
+                                self.logger.warning(f"Tiến trình PID={pid} không tồn tại.")
+                            except Exception as e:
+                                self.logger.error(f"Lỗi khi giết tiến trình PID={pid}: {e}")
+
+                # Sau khi đảm bảo không còn tiến trình, xóa cgroup
                 os.rmdir(cgroup_path)
                 self.logger.info(f"Xóa cgroup '{cgroup_name}' thành công.")
+                return True
+            except FileNotFoundError:
+                self.logger.info(f"Cgroup '{cgroup_name}' không tồn tại. Không cần xóa.")
                 return True
             except OSError as e:
                 self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}': {e}")

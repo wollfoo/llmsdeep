@@ -190,32 +190,32 @@ class SafeRestoreEvaluator:
             return False
 
         # 10) Kiểm tra cảnh báo từ Azure Sentinel
-        try:
-            alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=2)
-            if isinstance(alerts, list) and len(alerts) > 0:
-                self.logger.info(
-                    f"Vẫn còn {len(alerts)} cảnh báo từ Azure Sentinel."
-                )
-                return False
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khi kiểm tra cảnh báo từ Azure Sentinel: {e}\n{traceback.format_exc()}"
-            )
-            return False
+        # try:
+        #     alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=2)
+        #     if isinstance(alerts, list) and len(alerts) > 0:
+        #         self.logger.info(
+        #             f"Vẫn còn {len(alerts)} cảnh báo từ Azure Sentinel."
+        #         )
+        #         return False
+        # except Exception as e:
+        #     self.logger.error(
+        #         f"Lỗi khi kiểm tra cảnh báo từ Azure Sentinel: {e}\n{traceback.format_exc()}"
+        #     )
+        #     return False
 
-        # 11) Kiểm tra logs từ Azure Log Analytics (dành cho AML logs nói chung)
-        try:
-            logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
-            if isinstance(logs, list) and len(logs) > 0:
-                self.logger.info(
-                    f"Phát hiện logs AML (AzureDiagnostics) => Cloaking process {process.name} (PID={process.pid})."
-                )
-                return False
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khi kiểm tra logs từ Azure Log Analytics: {e}\n{traceback.format_exc()}"
-            )
-            return False
+        # # 11) Kiểm tra logs từ Azure Log Analytics (dành cho AML logs nói chung)
+        # try:
+        #     logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
+        #     if isinstance(logs, list) and len(logs) > 0:
+        #         self.logger.info(
+        #             f"Phát hiện logs AML (AzureDiagnostics) => Cloaking process {process.name} (PID={process.pid})."
+        #         )
+        #         return False
+        # except Exception as e:
+        #     self.logger.error(
+        #         f"Lỗi khi kiểm tra logs từ Azure Log Analytics: {e}\n{traceback.format_exc()}"
+        #     )
+        #     return False
 
         # 12) Kiểm tra bất thường qua Azure Anomaly Detector
         try:
@@ -450,24 +450,24 @@ class AnomalyDetector(BaseManager):
                 return
 
             # 2) Kiểm tra alerts từ Azure Sentinel
-            alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=2)
-            if isinstance(alerts, list) and len(alerts) > 0:
-                self.logger.warning(
-                    f"Phát hiện {len(alerts)} cảnh báo từ Azure Sentinel cho PID: {process.pid}"
-                )
-                self.enqueue_cloaking(process)
-                process.is_cloaked = True
-                return
+            # alerts = self.resource_manager.azure_sentinel_client.get_recent_alerts(days=2)
+            # if isinstance(alerts, list) and len(alerts) > 0:
+            #     self.logger.warning(
+            #         f"Phát hiện {len(alerts)} cảnh báo từ Azure Sentinel cho PID: {process.pid}"
+            #     )
+            #     self.enqueue_cloaking(process)
+            #     process.is_cloaked = True
+            #     return
 
             # 3) Kiểm tra AML logs từ Azure Log Analytics
-            logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
-            if isinstance(logs, list) and len(logs) > 0:
-                self.logger.warning(
-                    f"Phát hiện logs AML (AzureDiagnostics) => Cloaking process {process.name} (PID={process.pid})."
-                )
-                self.enqueue_cloaking(process)
-                process.is_cloaked = True
-                return
+            # logs = self.resource_manager.azure_log_analytics_client.query_aml_logs(days=2)
+            # if isinstance(logs, list) and len(logs) > 0:
+            #     self.logger.warning(
+            #         f"Phát hiện logs AML (AzureDiagnostics) => Cloaking process {process.name} (PID={process.pid})."
+            #     )
+            #     self.enqueue_cloaking(process)
+            #     process.is_cloaked = True
+            #     return
 
         except psutil.NoSuchProcess:
             self.logger.warning(f"Tiến trình PID {process.pid} không tồn tại khi đánh giá bất thường.")

