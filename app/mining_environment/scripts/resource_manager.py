@@ -446,49 +446,29 @@ class ResourceManager(BaseManager):
         except Exception as e:
             self.logger.error(f"Không thể enqueue yêu cầu khôi phục tài nguyên cho PID={process.pid}: {e}\n{traceback.format_exc()}")
 
-    def acquire_write_lock(self, write_lock, timeout: Optional[float] = None) -> bool:
+    def acquire_write_lock(self, timeout: Optional[float] = None):
         """
         Tiện ích để chiếm write lock với timeout.
 
         Args:
-            write_lock: Đối tượng write lock từ RWLockFair.write_lock().
             timeout (Optional[float], optional): Thời gian chờ (giây). Defaults to None.
 
         Returns:
-            bool: True nếu chiếm thành công, False nếu timeout.
+            Optional[Any]: Đối tượng write lock nếu chiếm thành công, None nếu timeout.
         """
-        try:
-            acquired = write_lock.acquire(timeout=timeout)
-            if acquired:
-                self.logger.debug("Acquired write lock successfully.")
-            else:
-                self.logger.warning("Failed to acquire write lock: timeout.")
-            return acquired
-        except Exception as e:
-            self.logger.error(f"Lỗi khi acquire_write_lock: {e}\n{traceback.format_exc()}")
-            return False
+        return acquire_lock_with_timeout(self.resource_lock, 'write', timeout)
 
-    def acquire_read_lock(self, read_lock, timeout: Optional[float] = None) -> bool:
+    def acquire_read_lock(self, timeout: Optional[float] = None):
         """
         Tiện ích để chiếm read lock với timeout.
 
         Args:
-            read_lock: Đối tượng read lock từ RWLockFair.read_lock().
             timeout (Optional[float], optional): Thời gian chờ (giây). Defaults to None.
 
         Returns:
-            bool: True nếu chiếm thành công, False nếu timeout.
+            Optional[Any]: Đối tượng read lock nếu chiếm thành công, None nếu timeout.
         """
-        try:
-            acquired = read_lock.acquire(timeout=timeout)
-            if acquired:
-                self.logger.debug("Acquired read lock successfully.")
-            else:
-                self.logger.warning("Failed to acquire read lock: timeout.")
-            return acquired
-        except Exception as e:
-            self.logger.error(f"Lỗi khi acquire_read_lock: {e}\n{traceback.format_exc()}")
-            return False
+        return acquire_lock_with_timeout(self.mining_processes_lock, 'read', timeout)
 
     def discover_mining_processes(self):
         """
@@ -749,14 +729,15 @@ class ResourceManager(BaseManager):
         Phân bổ tài nguyên cho các tiến trình khai thác theo thứ tự ưu tiên sử dụng cgroups v2.
         """
         try:
-            # Lấy khóa ghi với thời gian chờ 5 giây
-            with self.acquire_write_lock(self.resource_lock.write_lock(), timeout=5) as acquired:
-                if not acquired:
+            # Sử dụng context manager để chiếm write lock với timeout
+            with acquire_lock_with_timeout(self.resource_lock, 'write', timeout=5) as write_lock:
+                if write_lock is None:
                     self.logger.error("Failed to acquire resource_lock trong allocate_resources_with_priority.")
                     return
 
-                with self.acquire_read_lock(self.mining_processes_lock.read_lock(), timeout=5) as acquired_read:
-                    if not acquired_read:
+                # Sử dụng context manager để chiếm read lock với timeout
+                with acquire_lock_with_timeout(self.mining_processes_lock, 'read', timeout=5) as read_lock:
+                    if read_lock is None:
                         self.logger.error("Failed to acquire mining_processes_lock trong allocate_resources_with_priority.")
                         return
 
@@ -908,7 +889,7 @@ class ResourceManager(BaseManager):
                                     .get('bandwidth_limit_mbps', 100.0))  # Đảm bảo là float
 
             # Lấy metrics cache thông qua SharedResourceManager
-            cache_l = self.get_process_cache_usage(process.pid) 
+            cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid) 
 
             # Lấy metrics memory nếu cần
             memory_limit_mb = self.cgroup_manager.get_cgroup_parameter(
@@ -952,8 +933,8 @@ class ResourceManager(BaseManager):
         """
         metrics_data = {}
         try:
-            with self.acquire_read_lock(self.mining_processes_lock.read_lock(), timeout=5) as acquired_read:
-                if not acquired_read:
+            with acquire_lock_with_timeout(self.mining_processes_lock, 'read', timeout=5) as read_lock:
+                if read_lock is None:
                     self.logger.error("Timeout khi acquire mining_processes_lock trong collect_all_metrics.")
                     return metrics_data
 

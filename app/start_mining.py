@@ -207,8 +207,8 @@ def main():
         if gpu_process:
             gpu_process.terminate()
         stop_system_manager()
-        stop_event.set()  # Đảm bảo rằng stop_event được đặt để dừng ThreadingManager
-        threading_manager_thread.join()  # Đợi ThreadingManager kết thúc
+        # stop_event.set()  # Đảm bảo rằng stop_event được đặt để dừng ThreadingManager
+        # threading_manager_thread.join()  # Đợi ThreadingManager kết thúc
         logger.info("===== Dừng hệ thống khai thác =====")
 
 if __name__ == "__main__":
