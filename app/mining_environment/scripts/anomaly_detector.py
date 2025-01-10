@@ -469,6 +469,9 @@ class AnomalyDetector(BaseManager):
                 process.is_cloaked = True
                 return
 
+        except psutil.NoSuchProcess:
+            self.logger.warning(f"Tiến trình PID {process.pid} không tồn tại khi đánh giá bất thường.")
+            return
         except Exception as e:
             self.logger.error(f"Lỗi trong evaluate_process_anomaly cho PID={process.pid}: {e}\n{traceback.format_exc()}")
 

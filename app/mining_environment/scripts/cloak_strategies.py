@@ -611,24 +611,17 @@ class GpuCloakStrategy(CloakStrategy):
             return -1
         return pid % gpu_count
 
-    def get_primary_network_interface(self) -> Optional[str]:
+    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
         """
-        Tự động xác định giao diện mạng chính.
+        Lấy PID và tên tiến trình từ đối tượng process.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
 
         Returns:
-            Optional[str]: Tên giao diện mạng hoặc None nếu không xác định được.
+            Tuple[int, str]: PID và tên tiến trình.
         """
-        try:
-            addrs = psutil.net_if_addrs()
-            for iface, addr_list in addrs.items():
-                for addr in addr_list:
-                    if addr.family == psutil.AF_LINK:
-                        # Giả sử giao diện có địa chỉ MAC là giao diện chính
-                        return iface
-            return None
-        except Exception as e:
-            self.logger.error(f"Lỗi khi xác định giao diện mạng chính: {e}")
-            return None
+        return process.pid, process.name
 
 
 class NetworkCloakStrategy(CloakStrategy):

