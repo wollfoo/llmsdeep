@@ -273,9 +273,28 @@ class CgroupManager:
 
     def create_parent_cgroups(self):
         """
-        Tạo các cgroup cha 'root' và 'root_gpu' nếu chúng chưa tồn tại.
+        Tạo các cgroup cha và kích hoạt các controllers cần thiết nếu chúng chưa tồn tại.
         """
-        parents = ['root_cpu', 'root_gpu', 'root_memory', 'root_network','root_cache', 'root_io']
+        # Danh sách các cgroup cha cần tạo
+        parents = [
+            'root_cpu',
+            'root_memory',
+            'root_network',
+            'root_cache',
+            'root_io'
+            # 'root_gpu' đã bị loại bỏ
+        ]
+        
+        # Mapping giữa cgroup cha và các controllers cần kích hoạt
+        controllers = {
+            'root_cpu': ['cpu'],
+            'root_memory': ['memory'],
+            'root_network': ['net_cls'],
+            'root_cache': ['cache'],
+            'root_io': ['io']
+            # 'root_gpu' đã bị loại bỏ hoặc cần được xử lý đặc biệt
+        }
+        
         for parent in parents:
             if not self.cgroup_exists(parent):
                 success = self.create_cgroup(parent)
@@ -285,4 +304,15 @@ class CgroupManager:
                     self.logger.error(f"Không thể tạo cgroup cha '{parent}'.")
                     raise RuntimeError(f"Cannot create parent cgroup '{parent}'.")
         
-        self.logger.info("Các cgroup cha 'root' và 'root_gpu' đã được tạo hoặc đã tồn tại.")
+            # Kích hoạt các controllers cho từng cgroup cha
+            try:
+                subtree_control_path = os.path.join(self.CGROUP_ROOT, parent, 'cgroup.subtree_control')
+                with open(subtree_control_path, 'a') as f:
+                    for ctrl in controllers.get(parent, []):
+                        f.write(f"+{ctrl}\n")
+                        self.logger.info(f"Đã kích hoạt controller '{ctrl}' cho cgroup cha '{parent}'.")
+            except Exception as e:
+                self.logger.error(f"Lỗi khi kích hoạt controllers cho cgroup cha '{parent}': {e}")
+                raise
+        
+        self.logger.info("Các cgroup cha và controllers đã được tạo hoặc đã tồn tại và được kích hoạt.")
