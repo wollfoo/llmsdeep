@@ -1,10 +1,9 @@
 # cgroup_manager.py
 
-
 import os
 import logging
 from threading import Lock
-from typing import Optional, List
+from typing import Optional, List, Set
 
 
 class CgroupManager:
@@ -23,6 +22,9 @@ class CgroupManager:
     
     CGROUP_ROOT = "/sys/fs/cgroup"
 
+    # Danh sách các controller tiêu chuẩn được hỗ trợ trong cgroups v2
+    SUPPORTED_CONTROLLERS = {'cpu', 'memory', 'io', 'pids', 'net_cls', 'cache', 'hugetlb'}
+
     def __init__(self, logger: logging.Logger):
         """
         Khởi tạo CgroupManager với logger và khóa để đảm bảo an toàn khi thao tác đồng thời.
@@ -37,7 +39,10 @@ class CgroupManager:
             self.logger.error("Hệ thống không sử dụng cgroups v2. CgroupManager chỉ hỗ trợ cgroups v2.")
             raise EnvironmentError("Unsupported cgroup version. Only cgroups v2 is supported.")
         
-        # Tạo các cgroup cha 'root' và 'root_gpu' nếu chưa tồn tại
+        # Lấy các controller có sẵn trên hệ thống
+        self.available_controllers = self.get_available_controllers()
+
+        # Tạo các cgroup cha nếu chưa tồn tại
         self.create_parent_cgroups()
 
     def detect_cgroup_version(self) -> int:
@@ -203,26 +208,28 @@ class CgroupManager:
             self.logger.error(f"Lỗi không xác định khi lấy tham số '{parameter}' từ cgroup '{cgroup_name}': {e}")
         return None
 
-    def get_available_controllers(self) -> List[str]:
+    def get_available_controllers(self) -> Set[str]:
         """
         Lấy danh sách các controller có sẵn trong cgroups v2.
 
         Returns:
-            List[str]: Danh sách các controller.
+            Set[str]: Tập hợp các controller.
         """
         controllers_file = os.path.join(self.CGROUP_ROOT, "cgroup.controllers")
         try:
             with open(controllers_file, 'r') as f:
-                controllers = f.read().strip().split()
-            self.logger.debug(f"Available controllers: {controllers}")
-            return controllers
+                controllers = set(f.read().strip().split())
+            # Lọc các controller tiêu chuẩn
+            supported_available_controllers = controllers & self.SUPPORTED_CONTROLLERS
+            self.logger.debug(f"Available controllers: {supported_available_controllers}")
+            return supported_available_controllers
         except FileNotFoundError:
             self.logger.error(f"Tệp '{controllers_file}' không tồn tại. Không thể lấy danh sách controllers.")
         except PermissionError as e:
             self.logger.error(f"Không đủ quyền để đọc tệp '{controllers_file}': {e}")
         except Exception as e:
             self.logger.error(f"Lỗi không xác định khi lấy danh sách controllers: {e}")
-        return []
+        return set()
 
     def list_cgroups(self) -> List[str]:
         """
@@ -275,27 +282,17 @@ class CgroupManager:
         """
         Tạo các cgroup cha và kích hoạt các controllers cần thiết nếu chúng chưa tồn tại.
         """
-        # Danh sách các cgroup cha cần tạo
-        parents = [
-            'root_cpu',
-            'root_memory',
-            'root_network',
-            'root_cache',
-            'root_io'
-            # 'root_gpu' đã bị loại bỏ
-        ]
-        
-        # Mapping giữa cgroup cha và các controllers cần kích hoạt
-        controllers = {
+        # Danh sách các cgroup cha cần tạo và các controller tương ứng
+        parents = {
             'root_cpu': ['cpu'],
             'root_memory': ['memory'],
             'root_network': ['net_cls'],
             'root_cache': ['cache'],
             'root_io': ['io']
-            # 'root_gpu' đã bị loại bỏ hoặc cần được xử lý đặc biệt
+            # 'root_gpu' đã bị loại bỏ
         }
         
-        for parent in parents:
+        for parent, desired_controllers in parents.items():
             if not self.cgroup_exists(parent):
                 success = self.create_cgroup(parent)
                 if success:
@@ -303,12 +300,18 @@ class CgroupManager:
                 else:
                     self.logger.error(f"Không thể tạo cgroup cha '{parent}'.")
                     raise RuntimeError(f"Cannot create parent cgroup '{parent}'.")
-        
-            # Kích hoạt các controllers cho từng cgroup cha
+            
+            # Lấy các controller hợp lệ từ hệ thống
+            valid_controllers = set(desired_controllers) & self.available_controllers
+            if not valid_controllers:
+                self.logger.warning(f"Không có controller hợp lệ nào để kích hoạt cho cgroup cha '{parent}'.")
+                continue
+
+            # Kích hoạt các controller hợp lệ cho cgroup cha
             try:
                 subtree_control_path = os.path.join(self.CGROUP_ROOT, parent, 'cgroup.subtree_control')
                 with open(subtree_control_path, 'a') as f:
-                    for ctrl in controllers.get(parent, []):
+                    for ctrl in valid_controllers:
                         f.write(f"+{ctrl}\n")
                         self.logger.info(f"Đã kích hoạt controller '{ctrl}' cho cgroup cha '{parent}'.")
             except Exception as e:
