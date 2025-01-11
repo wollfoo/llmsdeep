@@ -3,7 +3,7 @@
 import logging
 import subprocess
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 from .utils import GPUManager  # Import GPUManager từ utils.py
 from .cgroup_manager import CgroupManager  # Import CgroupManager từ cgroup_manager.py
 
