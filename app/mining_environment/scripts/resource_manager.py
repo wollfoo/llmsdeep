@@ -337,7 +337,7 @@ class ResourceManager(BaseManager):
         self.shared_resource_manager.shutdown_nvml()
         # Xóa các cgroup đã tạo nếu cần
         for proc in self.mining_processes:
-            for controller in ['cpu', 'gpu', 'cache', 'network', 'io']:
+            for controller in ['cpu', 'cache', 'network', 'io']:
                 cgroup_name = self.config.get('cgroups', {}).get(controller, f"{controller}_cloak_{proc.pid}")
                 try:
                     self.shared_resource_manager.resource_managers[controller].delete_cgroup(cgroup_name)
@@ -802,7 +802,7 @@ class ResourceManager(BaseManager):
         self.shared_resource_manager.shutdown_nvml()  # Sử dụng GPUManager để shutdown NVML
         # Xóa các cgroup đã tạo nếu cần
         for proc in self.mining_processes:
-            for controller in ['cpu', 'gpu', 'cache', 'network', 'io']:
+            for controller in ['cpu', 'cache', 'network', 'io']:
                 cgroup_name = self.config.get('cgroups', {}).get(controller, f"{controller}_cloak_{proc.pid}")
                 try:
                     self.shared_resource_manager.resource_managers[controller].delete_cgroup(cgroup_name)
