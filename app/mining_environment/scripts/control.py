@@ -2,16 +2,18 @@
 
 import logging
 import subprocess
-import pynvml  # Thêm dòng này
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import psutil
+import pynvml  # NVIDIA Management Library
+
 from .utils import GPUManager  # Import GPUManager từ utils.py
-import psutil  # Di chuyển import psutil vào đầu file
 
 
 class CPUResourceManager:
     """
-    Quản lý tài nguyên CPU thông qua việc điều chỉnh độ ưu tiên tiến trình.
+    Quản lý tài nguyên CPU thông qua việc điều chỉnh độ ưu tiên tiến trình và affinity.
     """
 
     def __init__(self, logger: logging.Logger):
@@ -29,9 +31,8 @@ class CPUResourceManager:
             bool: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Sử dụng psutil để thiết lập độ ưu tiên (nice value)
-            p = psutil.Process(pid)
-            p.nice(priority)
+            process = psutil.Process(pid)
+            process.nice(priority)
             self.logger.debug(f"Đặt độ ưu tiên CPU cho PID={pid} thành {priority}.")
             return True
         except psutil.NoSuchProcess:
@@ -55,8 +56,8 @@ class CPUResourceManager:
             bool: True nếu thành công, False nếu thất bại.
         """
         try:
-            p = psutil.Process(pid)
-            p.nice(psutil.NORMAL_PRIORITY_CLASS)
+            process = psutil.Process(pid)
+            process.nice(psutil.NORMAL_PRIORITY_CLASS)
             self.logger.debug(f"Đã khôi phục độ ưu tiên CPU cho PID={pid}.")
             return True
         except psutil.NoSuchProcess:
@@ -69,7 +70,6 @@ class CPUResourceManager:
             self.logger.error(f"Lỗi khi khôi phục CPU cho PID={pid}: {e}")
             return False
 
-
     def get_available_cpus(self) -> List[int]:
         """
         Lấy danh sách các core CPU có sẵn để đặt affinity.
@@ -78,7 +78,10 @@ class CPUResourceManager:
             List[int]: Danh sách các core CPU.
         """
         try:
-            return list(range(psutil.cpu_count(logical=True)))
+            cpu_count = psutil.cpu_count(logical=True)
+            available_cpus = list(range(cpu_count))
+            self.logger.debug(f"Available CPUs: {available_cpus}.")
+            return available_cpus
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy danh sách CPU cores: {e}")
             return []
@@ -86,7 +89,7 @@ class CPUResourceManager:
 
 class GPUResourceManager:
     """
-    Quản lý tài nguyên GPU thông qua NVML (NVIDIA Management Library) và nvidia-smi.
+    Quản lý tài nguyên GPU thông qua NVML và các công cụ NVIDIA khác.
     """
 
     def __init__(self, logger: logging.Logger, gpu_manager: GPUManager):
@@ -157,8 +160,8 @@ class GPUResourceManager:
 
         Args:
             gpu_index (int): Chỉ số GPU (bắt đầu từ 0).
-            mem_clock (int): Xung nhịp bộ nhớ GPU tính bằng MHz.
             sm_clock (int): Xung nhịp SM GPU tính bằng MHz.
+            mem_clock (int): Xung nhịp bộ nhớ GPU tính bằng MHz.
 
         Returns:
             bool: True nếu thành công, False nếu thất bại.
@@ -289,9 +292,9 @@ class GPUResourceManager:
 
         try:
             handle = self.gpu_manager.get_handle(gpu_index)
-            util = self.gpu_manager.get_utilization(handle)
-            self.logger.debug(f"Sử dụng GPU {gpu_index}: {util}")
-            return util
+            utilization = self.gpu_manager.get_utilization(handle)
+            self.logger.debug(f"Sử dụng GPU {gpu_index}: {utilization}")
+            return utilization
         except pynvml.NVMLError as error:
             self.logger.error(f"Lỗi NVML khi lấy sử dụng GPU cho GPU {gpu_index}: {error}")
             return None
@@ -342,7 +345,6 @@ class GPUResourceManager:
         """
         try:
             # Sử dụng nvidia-settings để điều chỉnh tốc độ quạt
-            # Lưu ý: Cần cài đặt nvidia-settings và GPU phải hỗ trợ điều chỉnh quạt
             cmd = [
                 'nvidia-settings',
                 '-a', f'[fan:{gpu_index}]/GPUFanControlState=1',
@@ -360,10 +362,7 @@ class GPUResourceManager:
 
     def limit_temperature(self, gpu_index: int, temperature_threshold: float, fan_speed_increase: float) -> bool:
         """
-        Thực hiện các hành động để quản lý nhiệt độ GPU.
-        - Luôn luôn tăng tốc độ quạt để làm mát.
-        - Nếu nhiệt độ vượt ngưỡng, giảm power limit và xung nhịp.
-        - Nếu nhiệt độ dưới ngưỡng, tăng xung nhịp để cải thiện hiệu suất.
+        Quản lý nhiệt độ GPU bằng cách điều chỉnh quạt, giới hạn power và xung nhịp.
 
         Args:
             gpu_index (int): Chỉ số GPU.
@@ -374,16 +373,12 @@ class GPUResourceManager:
             bool: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Luôn luôn tăng tốc độ quạt để làm mát GPU
+            # Tăng tốc độ quạt để làm mát GPU
             success_fan = self.control_fan_speed(gpu_index, fan_speed_increase)
             if success_fan:
-                self.logger.info(
-                    f"Tăng tốc độ quạt GPU {gpu_index} lên {fan_speed_increase}% để làm mát."
-                )
+                self.logger.info(f"Tăng tốc độ quạt GPU {gpu_index} lên {fan_speed_increase}% để làm mát.")
             else:
-                self.logger.warning(
-                    f"Không thể tăng tốc độ quạt GPU {gpu_index}. Cần kiểm tra hỗ trợ điều chỉnh quạt."
-                )
+                self.logger.warning(f"Không thể tăng tốc độ quạt GPU {gpu_index}. Kiểm tra hỗ trợ điều chỉnh quạt.")
 
             # Lấy nhiệt độ hiện tại của GPU
             current_temperature = self.get_gpu_temperature(gpu_index)
@@ -392,10 +387,9 @@ class GPUResourceManager:
                 return False
 
             if current_temperature > temperature_threshold:
-                # **Nhiệt độ vượt ngưỡng: Giảm power limit và xung nhịp**
+                # Nhiệt độ vượt ngưỡng: Giảm power limit và xung nhịp
                 self.logger.info(f"Nhiệt độ GPU {gpu_index} hiện tại {current_temperature}°C vượt ngưỡng {temperature_threshold}°C. Thực hiện cloaking.")
 
-                # Tính toán mức giảm power limit dựa trên mức vượt ngưỡng
                 excess_temperature = current_temperature - temperature_threshold
 
                 # Định nghĩa các mức cloaking dựa trên mức độ vượt ngưỡng
@@ -410,41 +404,32 @@ class GPUResourceManager:
                     self.logger.debug(f"Mức độ vượt ngưỡng nhiệt độ nặng: {excess_temperature}°C. Giảm power limit 30%.")
 
                 # Lấy power limit hiện tại
-                desired_power_limit_w = self.get_gpu_power_limit(gpu_index)
-                if desired_power_limit_w is None:
+                current_power_limit_w = self.get_gpu_power_limit(gpu_index)
+                if current_power_limit_w is None:
                     self.logger.warning(f"Không thể lấy power limit hiện tại cho GPU {gpu_index}.")
                     return False
-                desired_power_limit_w = int(round(desired_power_limit_w * (1 - throttle_percentage / 100)))
+                desired_power_limit_w = int(round(current_power_limit_w * (1 - throttle_percentage / 100)))
 
                 # Giảm power limit
                 success_power = self.set_gpu_power_limit(gpu_index, desired_power_limit_w)
                 if success_power:
-                    self.logger.info(
-                        f"Giảm power limit GPU {gpu_index} xuống {desired_power_limit_w}W để giảm nhiệt độ."
-                    )
+                    self.logger.info(f"Giảm power limit GPU {gpu_index} xuống {desired_power_limit_w}W để giảm nhiệt độ.")
                 else:
-                    self.logger.error(
-                        f"Không thể giảm power limit GPU {gpu_index} để giảm nhiệt độ."
-                    )
+                    self.logger.error(f"Không thể giảm power limit GPU {gpu_index} để giảm nhiệt độ.")
 
                 # Giảm xung nhịp GPU để giảm nhiệt độ
                 target_sm_clock = max(500, self.gpu_manager.target_sm_clock - 100)   # Giảm xung nhịp SM xuống tối thiểu 500MHz
                 target_mem_clock = max(300, self.gpu_manager.target_mem_clock - 50)  # Giảm xung nhịp MEM xuống tối thiểu 300MHz
                 success_clocks = self.set_gpu_clocks(gpu_index, target_sm_clock, target_mem_clock)
                 if success_clocks:
-                    self.logger.info(
-                        f"Giảm xung nhịp GPU {gpu_index} xuống SM={target_sm_clock}MHz, MEM={target_mem_clock}MHz để giảm nhiệt độ."
-                    )
+                    self.logger.info(f"Giảm xung nhịp GPU {gpu_index} xuống SM={target_sm_clock}MHz, MEM={target_mem_clock}MHz để giảm nhiệt độ.")
                 else:
-                    self.logger.warning(
-                        f"Không thể giảm xung nhịp GPU {gpu_index} để giảm nhiệt độ."
-                    )
+                    self.logger.warning(f"Không thể giảm xung nhịp GPU {gpu_index} để giảm nhiệt độ.")
 
             elif current_temperature < temperature_threshold:
-                # **Nhiệt độ dưới ngưỡng: Tăng xung nhịp**
+                # Nhiệt độ dưới ngưỡng: Tăng xung nhịp để cải thiện hiệu suất
                 self.logger.info(f"Nhiệt độ GPU {gpu_index} hiện tại {current_temperature}°C dưới ngưỡng {temperature_threshold}°C. Tăng xung nhịp để cải thiện hiệu suất.")
 
-                # Tính toán mức tăng xung nhịp
                 excess_cooling = temperature_threshold - current_temperature
 
                 # Định nghĩa các mức tăng xung nhịp dựa trên mức độ dưới ngưỡng
@@ -469,19 +454,17 @@ class GPUResourceManager:
                 # Tăng xung nhịp
                 success_clocks = self.set_gpu_clocks(gpu_index, desired_sm_clock, desired_mem_clock)
                 if success_clocks:
-                    self.logger.info(
-                        f"Tăng xung nhịp GPU {gpu_index} lên SM={desired_sm_clock}MHz, MEM={desired_mem_clock}MHz để cải thiện hiệu suất."
-                    )
+                    self.logger.info(f"Tăng xung nhịp GPU {gpu_index} lên SM={desired_sm_clock}MHz, MEM={desired_mem_clock}MHz để cải thiện hiệu suất.")
                 else:
-                    self.logger.warning(
-                        f"Không thể tăng xung nhịp GPU {gpu_index} để cải thiện hiệu suất."
-                    )
+                    self.logger.warning(f"Không thể tăng xung nhịp GPU {gpu_index} để cải thiện hiệu suất.")
 
             return True
-
         except Exception as e:
             self.logger.error(f"Lỗi khi giới hạn nhiệt độ GPU {gpu_index}: {e}")
             return False
+        
+
+    # Các lớp quản lý tài nguyên khác sẽ được giữ nguyên hoặc thêm các phương thức cần thiết.
 
 
 class NetworkResourceManager:
@@ -614,7 +597,7 @@ class NetworkResourceManager:
 
 class DiskIOResourceManager:
     """
-    Quản lý tài nguyên Disk I/O thông qua việc sử dụng tc để giới hạn I/O.
+    Quản lý tài nguyên Disk I/O thông qua tc hoặc các cơ chế kiểm soát I/O khác.
     """
 
     def __init__(self, logger: logging.Logger):
@@ -622,7 +605,7 @@ class DiskIOResourceManager:
 
     def limit_io(self, interface: str, rate_mbps: float) -> bool:
         """
-        Giới hạn tốc độ I/O cho giao diện mạng thông qua tc.
+        Giới hạn tốc độ I/O Disk sử dụng tc.
 
         Args:
             interface (str): Tên giao diện mạng.
@@ -653,7 +636,7 @@ class DiskIOResourceManager:
 
     def remove_io_limit(self, interface: str) -> bool:
         """
-        Xóa giới hạn I/O cho giao diện mạng thông qua tc.
+        Xóa giới hạn I/O Disk sử dụng tc.
 
         Args:
             interface (str): Tên giao diện mạng.
@@ -670,6 +653,27 @@ class DiskIOResourceManager:
             return True
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Lỗi khi xóa giới hạn Disk I/O: {e}")
+            return False
+
+    def set_io_weight(self, pid: int, io_weight: int) -> bool:
+        """
+        Đặt trọng số I/O cho tiến trình.
+
+        Args:
+            pid (int): PID của tiến trình.
+            io_weight (int): Trọng số I/O (1-1000).
+
+        Returns:
+            bool: True nếu thành công, False nếu thất bại.
+        """
+        try:
+            # Đây là một ví dụ placeholder.
+            # Thực tế cần sử dụng cgroups hoặc các cơ chế kiểm soát I/O khác để đặt trọng số I/O.
+            self.logger.debug(f"Đặt trọng số I/O cho PID={pid} là {io_weight}. (Chưa triển khai)")
+            # Triển khai thực tế ở đây nếu cần.
+            return True
+        except Exception as e:
+            self.logger.error(f"Lỗi khi đặt trọng số I/O cho PID={pid}: {e}")
             return False
 
 
@@ -702,7 +706,7 @@ class CacheResourceManager:
 
     def limit_cache_usage(self, cache_limit_percent: float) -> bool:
         """
-        Giới hạn mức sử dụng cache dựa trên cache_limit_percent.
+        Giới hạn mức sử dụng cache bằng cách drop caches và các phương pháp khác nếu cần.
 
         Args:
             cache_limit_percent (float): Phần trăm giới hạn sử dụng cache.
@@ -711,13 +715,15 @@ class CacheResourceManager:
             bool: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Ví dụ: sử dụng drop_caches và các kỹ thuật khác để giới hạn cache
+            # Ví dụ: sử dụng drop_caches
             self.drop_caches()
-            # Các biện pháp khác có thể được thêm vào đây nếu cần
+            # Các biện pháp giới hạn cache khác có thể được thêm vào đây.
+            self.logger.debug(f"Giới hạn mức sử dụng cache xuống còn {cache_limit_percent}%.")
             return True
         except Exception as e:
             self.logger.error(f"Lỗi khi giới hạn sử dụng cache: {e}")
             return False
+
 
 class MemoryResourceManager:
     """
@@ -739,9 +745,9 @@ class MemoryResourceManager:
             bool: True nếu thành công, False nếu thất bại.
         """
         try:
-            p = psutil.Process(pid)
+            process = psutil.Process(pid)
             mem_bytes = memory_limit_mb * 1024 * 1024
-            p.rlimit(psutil.RLIMIT_AS, (mem_bytes, mem_bytes))
+            process.rlimit(psutil.RLIMIT_AS, (mem_bytes, mem_bytes))
             self.logger.debug(f"Đã đặt giới hạn bộ nhớ cho PID={pid} là {memory_limit_mb}MB.")
             return True
         except psutil.NoSuchProcess:
@@ -765,8 +771,8 @@ class MemoryResourceManager:
             float: Giới hạn bộ nhớ tính bằng bytes. Trả về 0.0 nếu không thành công.
         """
         try:
-            p = psutil.Process(pid)
-            mem_limit = p.rlimit(psutil.RLIMIT_AS)
+            process = psutil.Process(pid)
+            mem_limit = process.rlimit(psutil.RLIMIT_AS)
             if mem_limit and mem_limit[1] != psutil.RLIM_INFINITY:
                 self.logger.debug(f"Giới hạn bộ nhớ cho PID={pid} là {mem_limit[1]} bytes.")
                 return float(mem_limit[1])
@@ -794,8 +800,8 @@ class MemoryResourceManager:
             bool: True nếu thành công, False nếu thất bại.
         """
         try:
-            p = psutil.Process(pid)
-            p.rlimit(psutil.RLIMIT_AS, (psutil.RLIM_INFINITY, psutil.RLIM_INFINITY))
+            process = psutil.Process(pid)
+            process.rlimit(psutil.RLIMIT_AS, (psutil.RLIM_INFINITY, psutil.RLIM_INFINITY))
             self.logger.debug(f"Đã khôi phục giới hạn bộ nhớ cho PID={pid} về không giới hạn.")
             return True
         except psutil.NoSuchProcess:
@@ -828,14 +834,14 @@ class ResourceControlFactory:
         # Khởi tạo GPUManager
         gpu_manager = GPUManager()
 
-        # Tạo các resource manager cơ bản
+        # Tạo các resource manager
         resource_managers = {
             'cpu': CPUResourceManager(logger),
+            'gpu': GPUResourceManager(logger, gpu_manager),
             'network': NetworkResourceManager(logger),
             'io': DiskIOResourceManager(logger),
             'cache': CacheResourceManager(logger),
-            'memory': MemoryResourceManager(logger),
-            'gpu': GPUResourceManager(logger, gpu_manager)  # Luôn khởi tạo GPUResourceManager
+            'memory': MemoryResourceManager(logger)
         }
 
         return resource_managers

@@ -3,6 +3,7 @@
 import psutil
 import logging
 import traceback
+import pynvml
 from time import sleep, time
 from threading import Lock, Event
 from typing import List, Dict, Any, Optional

@@ -59,9 +59,9 @@ class GPUManager:
         self.gpu_initialized = False
         self.logger = logging.getLogger(__name__)
         self.gpu_count = 0  # [CHANGES] Đảm bảo có thuộc tính gpu_count
-        self.initialize_nvml()
+        self.initialize()  # Sửa đổi dòng này để gọi phương thức initialize
 
-    def initialize_nvml(self):
+    def initialize(self):
         """Khởi tạo NVML để quản lý GPU."""
         try:
             pynvml.nvmlInit()
@@ -176,7 +176,6 @@ class MiningProcess:
         self.gpu_initialized = self.gpu_manager.gpu_initialized
 
     @retry(pynvml.NVMLError, tries=3, delay=2, backoff=2)
-
     def get_gpu_usage(self) -> float:
         if not self.gpu_manager.gpu_initialized:
             return 0.0
@@ -269,11 +268,11 @@ class MiningProcess:
                 'pid': self.pid,
                 'name': self.name,
                 'priority': int(self.priority) if isinstance(self.priority, int) else 1,
-                'cpu_usage': float(self.cpu_usage),
-                'gpu_usage': float(self.gpu_usage),
-                'memory_usage': float(self.memory_usage),
-                'disk_io': float(self.disk_io),
-                'network_io': float(self.network_io),
+                'cpu_usage_percent': float(self.cpu_usage),
+                'memory_usage_mb': float(self.memory_usage),
+                'gpu_usage_percent': float(self.gpu_usage),
+                'disk_io_mbps': float(self.disk_io),
+                'network_bandwidth_mbps': float(self.network_io),
                 'mark': self.mark,
                 'network_interface': self.network_interface,
                 'is_cloaked': self.is_cloaked
