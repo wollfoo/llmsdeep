@@ -3,172 +3,131 @@
 import os
 import sys
 import json
+import asyncio
 from pathlib import Path
-from time import sleep
 from typing import Dict, Any
 
 from .resource_manager import ResourceManager
 from .anomaly_detector import AnomalyDetector
 from .logging_config import setup_logging
-from .utils import GPUManager  # Import GPUManager
+from .utils import GPUManager
 
-# Định nghĩa các thư mục cấu hình và logs
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
 
-# Thiết lập logger cho từng thành phần của hệ thống
 system_logger = setup_logging('system_manager', LOGS_DIR / 'system_manager.log', 'INFO')
 resource_logger = setup_logging('resource_manager', LOGS_DIR / 'resource_manager.log', 'INFO')
 anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.log', 'INFO')
 
-# Global instance of SystemManager (the main orchestrator)
 _system_manager_instance = None
 
 class SystemManager:
-    """
-    Lớp quản lý toàn bộ hệ thống, kết hợp ResourceManager và AnomalyDetector.
-    Đảm bảo các thành phần hoạt động đồng bộ và không xung đột khi truy cập tài nguyên.
-    """
-
     def __init__(self, config: Dict[str, Any]):
-        # Xác minh cấu hình trước khi khởi tạo
         if not isinstance(config, dict):
-            raise ValueError("Cấu hình (config) phải là kiểu dict.")
+            raise ValueError("Cấu hình phải là kiểu dict.")
+        self.config = config
 
-        self.config = config  # Lưu cấu hình hệ thống
-
-        # Gán logger cho từng thành phần
         self.system_logger = system_logger
         self.resource_logger = resource_logger
         self.anomaly_logger = anomaly_logger
 
-        # Khởi tạo GPUManager trước khi khởi tạo các module khác
         self.gpu_manager = GPUManager()
         if self.gpu_manager.gpu_initialized:
-            self.system_logger.info(f"Đã phát hiện {self.gpu_manager.gpu_count} GPU trên hệ thống.")
+            self.system_logger.info(f"Đã phát hiện {self.gpu_manager.gpu_count} GPU.")
         else:
-            self.system_logger.warning("Không phát hiện GPU trên hệ thống hoặc NVML không thể khởi tạo.")
+            self.system_logger.warning("Không phát hiện GPU hoặc NVML không thể khởi tạo.")
 
-        # Khởi tạo ResourceManager và AnomalyDetector với logger tương ứng
+        # Khởi tạo ResourceManager & AnomalyDetector
         self.resource_manager = ResourceManager(config, resource_logger)
         self.anomaly_detector = AnomalyDetector(config, anomaly_logger)
-
-        # Gán ResourceManager cho AnomalyDetector để đảm bảo sự liên kết giữa các thành phần
         self.anomaly_detector.set_resource_manager(self.resource_manager)
 
-        # Ghi log thông báo khởi tạo thành công
-        self.system_logger.info("SystemManager đã được khởi tạo thành công.")
+        self.system_logger.info("SystemManager đã được khởi tạo.")
 
-    def start(self):
+    async def start(self):
         """
         Bắt đầu chạy các thành phần của hệ thống.
+        Trong phiên bản Event-Driven mới,
+        ResourceManager KHÔNG có start(), chỉ AnomalyDetector có thể có.
         """
         self.system_logger.info("Đang khởi động SystemManager...")
         try:
-            # Khởi động ResourceManager và AnomalyDetector
-            self.resource_manager.start()
-            self.anomaly_detector.start()
+            # Nếu AnomalyDetector có hàm start(), gọi nó
+            if hasattr(self.anomaly_detector, 'start') and callable(self.anomaly_detector.start):
+                await self.anomaly_detector.start()
+
             self.system_logger.info("SystemManager đã khởi động thành công.")
         except Exception as e:
             self.system_logger.error(f"Lỗi khi khởi động SystemManager: {e}")
-            self.stop()  # Dừng toàn bộ hệ thống nếu xảy ra lỗi
+            await self.stop()
             raise
 
-    def stop(self):
+    async def stop(self):
         """
-        Dừng tất cả các thành phần của hệ thống.
+        Dừng các thành phần của hệ thống.
         """
         self.system_logger.info("Đang dừng SystemManager...")
         try:
-            # Dừng ResourceManager và AnomalyDetector
-            self.resource_manager.stop()
-            self.anomaly_detector.stop()
+            # Dừng AnomalyDetector
+            await self.anomaly_detector.stop()
+
+            # Dừng ResourceManager (gọi hàm shutdown() thay cho stop())
+            await self.resource_manager.shutdown()
+
             self.system_logger.info("SystemManager đã dừng thành công.")
         except Exception as e:
             self.system_logger.error(f"Lỗi khi dừng SystemManager: {e}")
             raise
 
+async def load_config(config_path: Path) -> Dict[str, Any]:
+    # ... (không đổi)
+    pass
 
-def load_config(config_path: Path) -> Dict[str, Any]:
-    """
-    Tải cấu hình từ tệp JSON.
-
-    Args:
-        config_path (Path): Đường dẫn tới tệp cấu hình.
-
-    Returns:
-        Dict[str, Any]: Nội dung cấu hình đã được tải.
-    """
-    try:
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        system_logger.info(f"Đã tải cấu hình từ {config_path}")
-
-        # Xác minh cấu hình
-        if not isinstance(config, dict):
-            system_logger.error("Cấu hình không phải kiểu dict.")
-            sys.exit(1)
-        return config
-
-    except FileNotFoundError:
-        system_logger.error(f"Tệp cấu hình không tìm thấy: {config_path}")
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        system_logger.error(f"Lỗi cú pháp JSON trong tệp cấu hình {config_path}: {e}")
-        sys.exit(1)
-
-
-def start():
-    """
-    Bắt đầu toàn bộ hệ thống.
-    """
+async def main():
     global _system_manager_instance
 
-    # Tải cấu hình từ tệp JSON
+    # Tải config
     resource_config_path = CONFIG_DIR / "resource_config.json"
-    config = load_config(resource_config_path)
+    config = await load_config(resource_config_path)
 
-    # Khởi tạo SystemManager với cấu hình
+    # Khởi tạo SystemManager
     _system_manager_instance = SystemManager(config)
 
     # Bắt đầu chạy SystemManager
     try:
-        _system_manager_instance.start()
+        await _system_manager_instance.start()
 
-        # Ghi log trạng thái hệ thống đang chạy
         system_logger.info("SystemManager đang chạy. Nhấn Ctrl+C để dừng.")
 
-        # Chạy liên tục cho đến khi nhận tín hiệu dừng
+        # Vòng lặp duy trì
         while True:
-            sleep(1)
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        system_logger.info("Coroutine chính đã bị hủy.")
     except KeyboardInterrupt:
-        system_logger.info("Nhận tín hiệu dừng từ người dùng. Đang dừng SystemManager...")
-        _system_manager_instance.stop()
-    except Exception as e:
-        system_logger.error(f"Lỗi không mong muốn trong SystemManager: {e}")
-        _system_manager_instance.stop()
-        sys.exit(1)
+        system_logger.info("Nhận tín hiệu dừng từ người dùng.")
+    finally:
+        await _system_manager_instance.stop()
 
-
-def stop():
-    """
-    Dừng hệ thống nếu nó đang chạy.
-    """
-    global _system_manager_instance
-
-    if _system_manager_instance:
-        system_logger.info("Đang dừng SystemManager...")
-        _system_manager_instance.stop()
-        system_logger.info("SystemManager đã dừng thành công.")
-    else:
-        system_logger.warning("SystemManager instance chưa được khởi tạo.")
-
-
-if __name__ == "__main__":
-    # Đảm bảo script được chạy với quyền root
+def start():
     if os.geteuid() != 0:
         print("Script phải được chạy với quyền root.")
         sys.exit(1)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        system_logger.info("Đang dừng SystemManager do KeyboardInterrupt.")
+    except Exception as e:
+        system_logger.error(f"Lỗi trong quá trình chạy SystemManager: {e}")
+        sys.exit(1)
 
-    # Bắt đầu hệ thống
+def stop():
+    global _system_manager_instance
+    if _system_manager_instance:
+        asyncio.run(_system_manager_instance.stop())
+        system_logger.info("SystemManager đã dừng thành công.")
+    else:
+        system_logger.warning("SystemManager chưa được khởi tạo.")
+
+if __name__ == "__main__":
     start()

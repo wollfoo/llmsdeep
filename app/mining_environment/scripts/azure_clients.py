@@ -2,41 +2,72 @@
 
 import os
 import logging
-import time
-import traceback
-import re  
-import pandas as pd
-from typing import Dict, Any, List
+import asyncio
+import re
+import functools
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional, Union, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import psutil
+import pynvml
 from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
-# Vẫn giữ import MetricsQueryClient, MetricAggregationType, LogsQueryClient (nếu sau này muốn sử dụng)
-from azure.monitor.query import MetricsQueryClient, MetricAggregationType, LogsQueryClient, LogsQueryResult
+from azure.monitor.query import (
+    MetricsQueryClient,
+    MetricAggregationType,
+    LogsQueryClient,
+    LogsQueryResult,
+)
 from azure.mgmt.security import SecurityCenter
 from azure.loganalytics import LogAnalyticsDataClient, models as logmodels
 from azure.loganalytics.models import QueryBody
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
-from azure.identity import ClientSecretCredential
+from azure.identity import ClientSecretCredential, DefaultAzureCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.resourcegraph.models import QueryRequest
-
-from azure.identity import DefaultAzureCredential
-
-# Import để quản trị Log Analytics (mới thêm)
 from azure.mgmt.loganalytics import LogAnalyticsManagementClient
 from azure.mgmt.loganalytics.models import Workspace
-
 from azure.ai.anomalydetector import AnomalyDetectorClient
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.anomalydetector.models import (
     TimeSeriesPoint,
     UnivariateDetectionOptions,
-    UnivariateEntireDetectionResult
-    # Đã lược bỏ MultivariateDetectionOptions, MultivariateEntireDetectionResult
+    UnivariateEntireDetectionResult,
 )
-
 from openai import AzureOpenAI
+
+
+def async_retry(exception_to_check: Any, tries: int = 4, delay: float = 3.0, backoff: float = 2.0):
+    """
+    Async decorator to retry a coroutine function if specified exceptions occur.
+
+    Args:
+        exception_to_check (Exception or tuple): The exception(s) to check.
+        tries (int): Number of attempts. Must be at least 1.
+        delay (float): Initial delay between retries in seconds.
+        backoff (float): Backoff multiplier for delay between retries.
+
+    Returns:
+        Callable: The decorated coroutine.
+    """
+    def decorator_retry(func: Any):
+        @functools.wraps(func)
+        async def wrapper_retry(*args, **kwargs):
+            mtries, mdelay = tries, delay
+            while mtries > 1:
+                try:
+                    return await func(*args, **kwargs)
+                except exception_to_check as e:
+                    logging.getLogger(__name__).warning(
+                        f"Lỗi '{e}' xảy ra trong '{func.__name__}'. Thử lại sau {mdelay} giây..."
+                    )
+                    await asyncio.sleep(mdelay)
+                    mtries -= 1
+                    mdelay *= backoff
+            return await func(*args, **kwargs)
+        return wrapper_retry
+    return decorator_retry
 
 
 class AzureBaseClient:
@@ -72,7 +103,7 @@ class AzureBaseClient:
             self.logger.error(f"Lỗi khi xác thực với Azure AD: {e}")
             raise e
 
-    def discover_resources(self, resource_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def discover_resources(self, resource_type: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
             query = "Resources"
             if resource_type:
@@ -84,7 +115,9 @@ class AzureBaseClient:
                 query=query
             )
 
-            response = self.resource_graph_client.resources(request)
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, self.resource_graph_client.resources, request)
+
             if not isinstance(response.data, list):
                 self.logger.warning("Dữ liệu trả về không phải là danh sách.")
                 return []
@@ -111,14 +144,12 @@ class AzureSentinelClient(AzureBaseClient):
         super().__init__(logger)
         self.security_client = SecurityCenter(self.credential, self.subscription_id)
 
-    def get_recent_alerts(self, days: int = 1) -> List[Any]:
+    async def get_recent_alerts(self, days: int = 1) -> List[Any]:
         try:
-            alerts = self.security_client.alerts.list()
+            loop = asyncio.get_event_loop()
+            alerts = await loop.run_in_executor(None, list, self.security_client.alerts.list())
             recent_alerts = []
             cutoff_time = datetime.utcnow() - timedelta(days=days)
-
-            if not isinstance(cutoff_time, datetime):
-                raise ValueError(f"cutoff_time không hợp lệ: {cutoff_time}.")
 
             for alert in alerts:
                 if (
@@ -143,11 +174,32 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 
         self.logs_client = LogsQueryClient(self.credential)
         self.log_analytics_mgmt_client = LogAnalyticsManagementClient(self.credential, self.subscription_id)
-        self.workspace_ids = self.get_workspace_ids()
+        self.workspace_ids: List[str] = []  # Khởi tạo danh sách workspace_ids
 
-    def get_workspace_ids(self) -> List[str]:
+    @classmethod
+    async def create(cls, logger: logging.Logger) -> 'AzureLogAnalyticsClient':
+        """
+        Async factory method để tạo và khởi tạo instance của AzureLogAnalyticsClient.
+
+        Args:
+            logger (logging.Logger): Đối tượng logger để ghi log.
+
+        Returns:
+            AzureLogAnalyticsClient: Instance đã được khởi tạo.
+        """
+        instance = cls(logger)
+        await instance.initialize()
+        return instance
+
+    async def initialize(self):
+        """
+        Phương thức async để khởi tạo các thuộc tính bất đồng bộ.
+        """
+        self.workspace_ids = await self.get_workspace_ids()
+
+    async def get_workspace_ids(self) -> List[str]:
         try:
-            resources = self.discover_resources('Microsoft.OperationalInsights/workspaces')
+            resources = await self.discover_resources('Microsoft.OperationalInsights/workspaces')
             if not resources:
                 self.logger.warning("Không tìm thấy tài nguyên Log Analytics Workspace nào.")
                 return []
@@ -174,15 +226,19 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             "workspace_name": match.group("ws")
         }
 
-    def get_workspace_details(self, resource_id: str) -> Optional[Workspace]:
+    async def get_workspace_details(self, resource_id: str) -> Optional[Workspace]:
         try:
             parsed = self.parse_log_analytics_id(resource_id)
             resource_group = parsed["resource_group"]
             workspace_name = parsed["workspace_name"]
 
-            ws = self.log_analytics_mgmt_client.workspaces.get(
-                resource_group_name=resource_group,
-                workspace_name=workspace_name
+            ws = await asyncio.get_event_loop().run_in_executor(
+                None,
+                functools.partial(
+                    self.log_analytics_mgmt_client.workspaces.get,
+                    resource_group_name=resource_group,
+                    workspace_name=workspace_name
+                )
             )
             self.logger.info(
                 f"Đã lấy thông tin workspace '{ws.name}' tại group '{resource_group}' (location={ws.location})."
@@ -192,7 +248,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.error(f"Không thể get workspace details cho resource_id={resource_id}: {e}")
             return None
 
-    def query_logs(self, query: str, days: int = 7) -> List[Dict[str, Any]]:
+    async def query_logs(self, query: str, days: int = 7) -> List[Dict[str, Any]]:
         results = []
         if days < 0:
             self.logger.error("Giá trị days phải >= 0.")
@@ -212,7 +268,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             timespan = (start_time, end_time)
 
             for resource_id in self.workspace_ids:
-                ws_details = self.get_workspace_details(resource_id)
+                ws_details = await self.get_workspace_details(resource_id)
                 if not ws_details:
                     continue
                 customer_id = ws_details.customer_id
@@ -221,10 +277,14 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                     continue
 
                 try:
-                    response = self.logs_client.query_workspace(
-                        workspace_id=customer_id,
-                        query=query,
-                        timespan=timespan
+                    response = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        functools.partial(
+                            self.logs_client.query_workspace,
+                            workspace_id=customer_id,
+                            query=query,
+                            timespan=timespan
+                        )
                     )
 
                     if not isinstance(response.tables, list):
@@ -258,7 +318,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.critical(f"Lỗi nghiêm trọng khi truy vấn logs: {e}", exc_info=True)
         return results
 
-    def query_logs_with_time_range(
+    async def query_logs_with_time_range(
         self, query: str, start_time: datetime, end_time: datetime
     ) -> List[Dict[str, Any]]:
         results = []
@@ -272,7 +332,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 
         try:
             for resource_id in self.workspace_ids:
-                ws_details = self.get_workspace_details(resource_id)
+                ws_details = await self.get_workspace_details(resource_id)
                 if not ws_details:
                     continue
                 customer_id = ws_details.customer_id
@@ -281,10 +341,14 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                     continue
 
                 try:
-                    response = self.logs_client.query_workspace(
-                        workspace_id=customer_id,
-                        query=query,
-                        timespan=(start_time, end_time)
+                    response = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        functools.partial(
+                            self.logs_client.query_workspace,
+                            workspace_id=customer_id,
+                            query=query,
+                            timespan=(start_time, end_time)
+                        )
                     )
 
                     for table in response.tables:
@@ -302,7 +366,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
             self.logger.critical(f"Lỗi nghiêm trọng khi truy vấn logs: {e}")
         return results
 
-    def query_aml_logs(self, days: int = 1) -> List[Dict[str, Any]]:
+    async def query_aml_logs(self, days: int = 1) -> List[Dict[str, Any]]:
         kql = f"""
         AzureDiagnostics
         | where TimeGenerated > ago({days}d)
@@ -311,7 +375,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
         | project TimeGenerated, ResourceId, Category, OperationName
         | limit 50
         """
-        return self.query_logs(kql, days=days)
+        return await self.query_logs(kql, days=days)
 
 
 class AzureNetworkWatcherClient(AzureBaseClient):
@@ -319,10 +383,18 @@ class AzureNetworkWatcherClient(AzureBaseClient):
         super().__init__(logger)
         self.network_client = NetworkManagementClient(self.credential, self.subscription_id)
 
-    def get_network_watcher_name(self, resource_group: str) -> Optional[str]:
+    async def get_network_watcher_name(self, resource_group: str) -> Optional[str]:
         try:
-            region = self.resource_management_client.resource_groups.get(resource_group).location
-            watchers = self.network_client.network_watchers.list_all()
+            region = await asyncio.get_event_loop().run_in_executor(
+                None,
+                functools.partial(
+                    self.resource_management_client.resource_groups.get,
+                    resource_group_name=resource_group
+                )
+            ).then(lambda rg: rg.location)
+
+            loop = asyncio.get_event_loop()
+            watchers = await loop.run_in_executor(None, list, self.network_client.network_watchers.list_all())
             for watcher in watchers:
                 if watcher.location.lower() == region.lower():
                     self.logger.info(f"Đã tìm thấy Network Watcher '{watcher.name}' cho vùng '{region}'.")
@@ -333,11 +405,15 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi tìm Network Watcher cho Resource Group '{resource_group}': {e}")
             return None
 
-    def get_flow_logs(self, network_watcher_resource_group: str, network_watcher_name: str, nsg_name: str) -> List[Any]:
+    async def get_flow_logs(self, network_watcher_resource_group: str, network_watcher_name: str, nsg_name: str) -> List[Any]:
         try:
-            flow_log_configurations = self.network_client.flow_logs.list(
-                resource_group_name=network_watcher_resource_group,
-                network_watcher_name=network_watcher_name
+            flow_log_configurations = await asyncio.get_event_loop().run_in_executor(
+                None,
+                functools.partial(
+                    self.network_client.flow_logs.list,
+                    resource_group_name=network_watcher_resource_group,
+                    network_watcher_name=network_watcher_name
+                )
             )
             flow_logs = [
                 log for log in flow_log_configurations
@@ -353,16 +429,20 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             )
             return []
 
-    def create_flow_log(
+    async def create_flow_log(
         self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str,
         params: Dict[str, Any]
     ) -> Optional[Any]:
         try:
-            flow_log = self.network_client.flow_logs.begin_create_or_update(
-                resource_group_name=resource_group,
-                network_security_group_name=nsg_name,
-                flow_log_name=flow_log_name,
-                parameters=params
+            flow_log = await asyncio.get_event_loop().run_in_executor(
+                None,
+                functools.partial(
+                    self.network_client.flow_logs.begin_create_or_update,
+                    resource_group_name=resource_group,
+                    network_security_group_name=nsg_name,
+                    flow_log_name=flow_log_name,
+                    parameters=params
+                )
             ).result()
             self.logger.info(
                 f"Đã tạo flow log {flow_log_name} cho NSG {nsg_name} trong Resource Group {resource_group}."
@@ -374,14 +454,18 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             )
             return None
 
-    def delete_flow_log(
+    async def delete_flow_log(
         self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str
     ) -> bool:
         try:
-            self.network_client.flow_logs.begin_delete(
-                resource_group_name=resource_group,
-                network_security_group_name=nsg_name,
-                flow_log_name=flow_log_name
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                functools.partial(
+                    self.network_client.flow_logs.begin_delete,
+                    resource_group_name=resource_group,
+                    network_security_group_name=nsg_name,
+                    flow_log_name=flow_log_name
+                )
             ).result()
             self.logger.info(
                 f"Đã xóa flow log {flow_log_name} từ NSG {nsg_name} trong Resource Group {resource_group}."
@@ -393,12 +477,16 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             )
             return False
 
-    def check_flow_log_status(self, network_watcher_resource_group: str, network_watcher_name: str, flow_log_name: str) -> Optional[Dict[str, Any]]:
+    async def check_flow_log_status(self, network_watcher_resource_group: str, network_watcher_name: str, flow_log_name: str) -> Optional[Dict[str, Any]]:
         try:
-            flow_log = self.network_client.flow_logs.get(
-                resource_group_name=network_watcher_resource_group,
-                network_watcher_name=network_watcher_name,
-                flow_log_name=flow_log_name
+            flow_log = await asyncio.get_event_loop().run_in_executor(
+                None,
+                functools.partial(
+                    self.network_client.flow_logs.get,
+                    resource_group_name=network_watcher_resource_group,
+                    network_watcher_name=network_watcher_name,
+                    flow_log_name=flow_log_name
+                )
             )
             self.logger.info(f"Trạng thái Flow Log {flow_log_name}: {flow_log.provisioning_state}")
             return {
@@ -411,12 +499,6 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi kiểm tra trạng thái Flow Log {flow_log_name}: {e}")
             return None
 
-
-#
-# ===========================
-# AzureAnomalyDetectorClient
-# ===========================
-#
 
 class AzureAnomalyDetectorClient(AzureBaseClient):
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
@@ -448,7 +530,7 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi kết nối với Azure Anomaly Detector: {e}")
             raise e
 
-    def detect_anomalies(self, metric_data: Dict[str, Any]) -> Dict[str, List[str]]:
+    async def detect_anomalies(self, metric_data: Dict[str, Any]) -> Dict[str, List[str]]:
         """
         Phát hiện bất thường (đơn biến) trong dữ liệu metrics và trả về
         các PID cùng với các metrics có bất thường.
@@ -475,14 +557,12 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
                     ...
                 }
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         anomalies = {}
         metrics_to_analyze = ['cpu_usage', 'gpu_usage', 'cache_usage', 'network_usage']
         min_data_points = 12
         max_workers = 10  # Số luồng tối đa cho ThreadPoolExecutor
 
-        def analyze_pid_metric(pid: str, metric_name: str, metric_values: List[float]) -> Optional[str]:
+        async def analyze_pid_metric(pid: str, metric_name: str, metric_values: List[float]) -> Optional[str]:
             """
             Phân tích một metric của một PID để phát hiện bất thường.
 
@@ -523,7 +603,13 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
                 )
 
                 # Gọi API detect_univariate_entire_series
-                response: UnivariateEntireDetectionResult = self.client.detect_univariate_entire_series(options=options)
+                response: UnivariateEntireDetectionResult = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        self.client.detect_univariate_entire_series,
+                        options=options
+                    )
+                )
 
                 # Nếu có bất kỳ điểm nào is_anomaly=True
                 if any(response.is_anomaly):
@@ -534,9 +620,9 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
                 self.logger.error(f"Lỗi khi phân tích PID {pid} cho {metric_name}: {e}")
             return None
 
+        tasks = []
+        loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_pid_metric = {}
-
             for pid, metrics in metric_data.items():
                 if not isinstance(metrics, dict):
                     self.logger.warning(f"Metric data cho PID {pid} không phải dict, bỏ qua.")
@@ -544,20 +630,20 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 
                 for metric_name in metrics_to_analyze:
                     metric_values = metrics.get(metric_name, [])
-                    future = executor.submit(analyze_pid_metric, pid, metric_name, metric_values)
-                    future_to_pid_metric[future] = (pid, metric_name)
+                    task = asyncio.ensure_future(analyze_pid_metric(pid, metric_name, metric_values))
+                    tasks.append(task)
 
-            for future in as_completed(future_to_pid_metric):
-                pid, metric_name = future_to_pid_metric[future]
-                try:
-                    result = future.result()
-                    if result:
-                        # Nếu phát hiện bất thường, lưu lại
-                        if pid not in anomalies:
-                            anomalies[pid] = []
-                        anomalies[pid].append(result)
-                except Exception as e:
-                    self.logger.error(f"Lỗi khi xử lý PID {pid} cho {metric_name}: {e}")
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for response in responses:
+                if isinstance(response, Exception):
+                    self.logger.error(f"Lỗi trong quá trình phân tích metric: {response}")
+                    continue
+                if response:
+                    pid, metric_name = response  # Assuming response returns (pid, metric_name)
+                    if pid not in anomalies:
+                        anomalies[pid] = []
+                    anomalies[pid].append(metric_name)
 
         return anomalies
 
@@ -577,11 +663,22 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
         self.logger.debug(f"Endpoint: {self.endpoint}")
         self.logger.debug(f"API Key: {'***' if self.api_key else None}")
 
-#
-# ===========================
-# AzureOpenAIClient
-# ===========================
-#
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ====================================
+# AzureOpenAIClient (Không thay đổi)
+# ====================================
 
 # class AzureOpenAIClient(AzureBaseClient):
 #     """
@@ -625,7 +722,7 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 #             self.logger.error(f"Lỗi khi cấu hình AzureOpenAI: {e}")
 #             raise e
 
-#     def get_optimization_suggestions(
+#     async def get_optimization_suggestions(
 #         self,
 #         server_config: Dict[str, Any],
 #         optimization_goals: Dict[str, str],
@@ -645,10 +742,15 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 #                 self.logger.error(
 #                     f"state_data không phải là dict. Dữ liệu nhận được: {state_data}"
 #                 )
-#                 return [0.0] * 7  # Trả về giá trị mặc định
-
-#             # Tạo prompt với cấu hình máy chủ và mục tiêu tối ưu hóa
-#             prompt = self.construct_prompt(server_config, optimization_goals, state_data)
+#                 # Gán các giá trị mặc định hoặc bỏ qua PID này
+#                 cpu = 0
+#                 ram = 0
+#                 gpu = 0
+#                 net_bw = 0
+#                 cache = 0
+#             else:
+#                 # Construct prompt
+#                 prompt = self.construct_prompt(server_config, optimization_goals, state_data)
 
 #             # Log độ dài prompt
 #             prompt_len = len(prompt)
@@ -682,11 +784,15 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 #             self.logger.debug(f"System message length = {system_msg_len}, User message length = {user_msg_len}.")
 
 #             # Gửi yêu cầu tới Azure OpenAI
-#             response = self.client.chat.completions.create(
-#                 model=self.deployment_name,  # Sử dụng deployment_name làm model
-#                 messages=messages,
-#                 max_tokens=70,  # Tăng max_tokens để đảm bảo nhận đủ 7 giá trị
-#                 temperature=0.0
+#             response = await asyncio.get_event_loop().run_in_executor(
+#                 None,
+#                 functools.partial(
+#                     self.client.chat.completions.create,
+#                     model=self.deployment_name,  # Sử dụng deployment_name làm model
+#                     messages=messages,
+#                     max_tokens=70,  # Tăng max_tokens để đảm bảo nhận đủ 7 giá trị
+#                     temperature=0.0
+#                 )
 #             )
 
 #             # Kiểm tra phản hồi có chứa choices hay không
@@ -736,73 +842,69 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 #             self.logger.info(f"Nhận được gợi ý tối ưu hóa từ Azure OpenAI (đã parse freq): {suggestions_raw}")
 #             return suggestions_raw
 
-#         except Exception as e:
-#             self.logger.error(f"Lỗi khi lấy gợi ý từ Azure OpenAI: {e}\n{traceback.format_exc()}")
-#             return [0.0] * 7  # Trả về giá trị mặc định trong trường hợp lỗi
+#         def construct_prompt(
+#             self,
+#             server_config: Dict[str, Any],
+#             optimization_goals: Dict[str, str],
+#             state_data: Dict[str, Any]
+#         ) -> str:
+#             """
+#             Xây dựng prompt dựa trên cấu hình máy chủ, mục tiêu tối ưu hóa và dữ liệu trạng thái hệ thống.
 
-#     def construct_prompt(
-#         self,
-#         server_config: Dict[str, Any],
-#         optimization_goals: Dict[str, str],
-#         state_data: Dict[str, Any]
-#     ) -> str:
-#         """
-#         Xây dựng prompt dựa trên cấu hình máy chủ, mục tiêu tối ưu hóa và dữ liệu trạng thái hệ thống.
+#             :param server_config: Thông tin cấu hình máy chủ (tĩnh).
+#             :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
+#             :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
+#             :return: Chuỗi prompt đầy đủ.
+#             """
+#             prompt = f"Current Server: {server_config.get('server_type', 'Standard_NC12s_v3')} on Azure Cloud\n"
+#             prompt += "Resource Limits:\n"
+#             resource_limits = server_config.get('resource_limits', {})
+#             prompt += f"- CPU Usage Limit: {resource_limits.get('cpu_usage_percent', 'N/A')}%\n"
+#             prompt += f"- RAM Usage Limit: {resource_limits.get('ram_usage_percent', 'N/A')}%\n"
+#             prompt += f"- GPU Usage Limit: {resource_limits.get('gpu_usage_percent', 'N/A')}%\n"
+#             prompt += f"- Network Bandwidth Limit: {resource_limits.get('network_bandwidth_mbps', 'N/A')} Mbps\n"
+#             prompt += f"- Storage Usage Limit: {resource_limits.get('storage_usage_percent', 'N/A')}%\n\n"
 
-#         :param server_config: Thông tin cấu hình máy chủ (tĩnh).
-#         :param optimization_goals: Mục tiêu tối ưu hóa cho từng tài nguyên.
-#         :param state_data: Dữ liệu trạng thái hệ thống hiện tại (động).
-#         :return: Chuỗi prompt đầy đủ.
-#         """
-#         prompt = f"Current Server: {server_config.get('server_type', 'Standard_NC12s_v3')} on Azure Cloud\n"
-#         prompt += "Resource Limits:\n"
-#         resource_limits = server_config.get('resource_limits', {})
-#         prompt += f"- CPU Usage Limit: {resource_limits.get('cpu_usage_percent', 'N/A')}%\n"
-#         prompt += f"- RAM Usage Limit: {resource_limits.get('ram_usage_percent', 'N/A')}%\n"
-#         prompt += f"- GPU Usage Limit: {resource_limits.get('gpu_usage_percent', 'N/A')}%\n"
-#         prompt += f"- Network Bandwidth Limit: {resource_limits.get('network_bandwidth_mbps', 'N/A')} Mbps\n"
-#         prompt += f"- Storage Usage Limit: {resource_limits.get('storage_usage_percent', 'N/A')}%\n\n"
+#             prompt += "Current System Parameters:\n"
+#             for pid, metrics_info in state_data.items():
+#                 if not isinstance(metrics_info, dict):
+#                     self.logger.error(
+#                         f"Metrics_info cho PID {pid} không phải là dict. Dữ liệu nhận được: {metrics_info}"
+#                     )
+#                     # Gán các giá trị mặc định hoặc bỏ qua PID này
+#                     cpu = 0
+#                     ram = 0
+#                     gpu = 0
+#                     net_bw = 0
+#                     cache = 0
+#                 else:
+#                     cpu = metrics_info.get('cpu_usage_percent', 0)
+#                     ram = metrics_info.get('memory_usage_mb', 0)
+#                     gpu = metrics_info.get('gpu_usage_percent', 0)
+#                     net_bw = metrics_info.get('network_bandwidth_mbps', 0)
+#                     cache = metrics_info.get('cache_limit_percent', 0)
 
-#         prompt += "Current System Parameters:\n"
-#         for pid, metrics_info in state_data.items():
-#             if not isinstance(metrics_info, dict):
-#                 self.logger.error(
-#                     f"Metrics_info cho PID {pid} không phải là dict. Dữ liệu nhận được: {metrics_info}"
+#                 prompt += (
+#                     f"PID {pid}: CPU={cpu}%, RAM={ram}MB, GPU={gpu}%, Net={net_bw}Mbps, Cache={cache}%.\n"
 #                 )
-#                 # Gán các giá trị mặc định hoặc bỏ qua PID này
-#                 cpu = 0
-#                 ram = 0
-#                 gpu = 0
-#                 net_bw = 0
-#                 cache = 0
+#             prompt += "\n"
+
+#             prompt += "Optimization Goals:\n"
+#             for key, description in optimization_goals.items():
+#                 prompt += f"- **{key}**: {description}\n"
+
+#             return prompt
+
+#         def _parse_frequency(self, freq_val: float) -> float:
+#             """
+#             Chuyển đổi tần số từ GHz sang MHz nếu cần thiết.
+
+#             :param freq_val: Giá trị tần số.
+#             :return: Giá trị tần số đã chuyển đổi.
+#             """
+#             if freq_val < 100:
+#                 mhz_val = freq_val * 1000.0
+#                 self.logger.debug(f"Converting {freq_val} GHz to {mhz_val} MHz")
+#                 return mhz_val
 #             else:
-#                 cpu = metrics_info.get('cpu_usage_percent', 0)
-#                 ram = metrics_info.get('memory_usage_mb', 0)
-#                 gpu = metrics_info.get('gpu_usage_percent', 0)
-#                 net_bw = metrics_info.get('network_bandwidth_mbps', 0)
-#                 cache = metrics_info.get('cache_limit_percent', 0)
-
-#             prompt += (
-#                 f"PID {pid}: CPU={cpu}%, RAM={ram}MB, GPU={gpu}%, Net={net_bw}Mbps, Cache={cache}%.\n"
-#             )
-#         prompt += "\n"
-
-#         prompt += "Optimization Goals:\n"
-#         for key, description in optimization_goals.items():
-#             prompt += f"- **{key}**: {description}\n"
-
-#         return prompt
-
-#     def _parse_frequency(self, freq_val: float) -> float:
-#         """
-#         Chuyển đổi tần số từ GHz sang MHz nếu cần thiết.
-
-#         :param freq_val: Giá trị tần số.
-#         :return: Giá trị tần số đã chuyển đổi.
-#         """
-#         if freq_val < 100:
-#             mhz_val = freq_val * 1000.0
-#             self.logger.debug(f"Converting {freq_val} GHz to {mhz_val} MHz")
-#             return mhz_val
-#         else:
-#             return freq_val
+#                 return freq_val
