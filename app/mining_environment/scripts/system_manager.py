@@ -6,6 +6,7 @@ import json
 import asyncio
 from pathlib import Path
 from typing import Dict, Any
+import aiofiles
 
 from .resource_manager import ResourceManager
 from .anomaly_detector import AnomalyDetector
