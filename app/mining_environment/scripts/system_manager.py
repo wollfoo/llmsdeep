@@ -80,8 +80,36 @@ class SystemManager:
             raise
 
 async def load_config(config_path: Path) -> Dict[str, Any]:
-    # ... (không đổi)
-    pass
+    """
+    Tải cấu hình từ tệp JSON.
+
+    Args:
+        config_path (Path): Đường dẫn tới tệp cấu hình.
+
+    Returns:
+        Dict[str, Any]: Nội dung cấu hình đã được tải.
+    """
+    try:
+        async with aiofiles.open(config_path, 'r') as f:
+            content = await f.read()
+            config = json.loads(content)
+        system_logger.info(f"Đã tải cấu hình từ {config_path}")
+
+        # Xác minh cấu hình
+        if not isinstance(config, dict):
+            system_logger.error("Cấu hình không phải kiểu dict.")
+            sys.exit(1)
+        return config
+
+    except FileNotFoundError:
+        system_logger.error(f"Tệp cấu hình không tìm thấy: {config_path}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        system_logger.error(f"Lỗi cú pháp JSON trong tệp cấu hình {config_path}: {e}")
+        sys.exit(1)
+    except Exception as e:
+        system_logger.error(f"Lỗi khi tải cấu hình: {e}")
+        sys.exit(1)
 
 async def main():
     global _system_manager_instance
