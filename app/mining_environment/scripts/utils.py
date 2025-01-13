@@ -11,19 +11,17 @@ import asyncio
 import functools
 from asyncio import Lock
 
+###############################################################################
+#                 HÀM DECORATOR: async_retry (EVENT-DRIVEN)                  #
+###############################################################################
+
 def async_retry(exception_to_check: Any, tries: int = 4, delay: float = 3.0, backoff: float = 2.0):
     """
-    Async decorator to retry a coroutine function if specified exceptions occur.
-
-    Args:
-        exception_to_check (Exception or tuple): The exception(s) to check.
-        tries (int): Number of attempts. Must be at least 1.
-        delay (float): Initial delay between retries in seconds.
-        backoff (float): Backoff multiplier for delay between retries.
-
-    Returns:
-        Callable: The decorated coroutine.
+    Decorator bất đồng bộ để retry một coroutine nếu xảy ra exception nhất định.
+    - Cơ chế này hữu ích khi gọi NVML hoặc nvidia-smi có thể bị lỗi tạm thời.
+    - Trong mô hình event-driven, ta chỉ retry khi hàm được gọi do sự kiện bên ngoài.
     """
+
     def decorator_retry(func: Callable):
         @functools.wraps(func)
         async def wrapper_retry(*args, **kwargs):
@@ -43,15 +41,25 @@ def async_retry(exception_to_check: Any, tries: int = 4, delay: float = 3.0, bac
     return decorator_retry
 
 
+###############################################################################
+#                      LỚP GPUManager (EVENT-DRIVEN)                          #
+###############################################################################
+
 class GPUManager:
     """
-    Lớp quản lý GPU, bao gồm việc khởi tạo NVML và thu thập thông tin GPU.
-    Singleton pattern để chia sẻ GPU info toàn cục.
+    Lớp quản lý GPU, hỗ trợ NVML để lấy và điều chỉnh trạng thái GPU:
+      - Không còn chạy vòng lặp polling bên trong,
+      - Thay vào đó, module chỉ kích hoạt khi có 'event' từ resource_manager, etc.
+    Singleton để chia sẻ GPU info.
     """
     _instance = None
     _lock = Lock()
 
     def __new__(cls):
+        """
+        Triển khai Singleton với lock async. 
+        Trong môi trường event-driven, ta vẫn đảm bảo chỉ tạo 1 instance duy nhất.
+        """
         async def create_instance():
             async with cls._lock:
                 if cls._instance is None:
@@ -69,29 +77,27 @@ class GPUManager:
 
         self.gpu_initialized = False
         self.logger = logging.getLogger(__name__)
-        self.gpu_count = 0  # Đảm bảo có thuộc tính gpu_count
-        # Không gọi initialize tại đây vì chúng ta sẽ gọi nó từ bên ngoài một cách bất đồng bộ
+        self.gpu_count = 0  # Số lượng GPU
+        # Không gọi initialize trực tiếp ở đây => ta để event bên ngoài gọi async self.initialize()
+
+    ###########################################################################
+    #             HÀM KHỞI TẠO / SHUTDOWN NVML (CALL BY EXTERNAL EVENT)       #
+    ###########################################################################
 
     async def initialize(self) -> bool:
         """
-        Khởi tạo NVML để quản lý GPU.
-
-        Returns:
-            bool: True nếu thành công, False nếu thất bại.
+        Khởi tạo NVML (call khi event “init GPU”). 
+        Trả về True nếu thành công, ngược lại False.
         """
         try:
             await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlInit)
-            self.gpu_count = await asyncio.get_event_loop().run_in_executor(
-                None, pynvml.nvmlDeviceGetCount
-            )
+            self.gpu_count = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetCount)
             self.gpu_initialized = True
-            self.logger.info(
-                f"NVML đã được khởi tạo thành công. Đã phát hiện {self.gpu_count} GPU."
-            )
+            self.logger.info(f"NVML khởi tạo thành công. Phát hiện {self.gpu_count} GPU.")
             return True
         except pynvml.NVMLError as e:
             self.gpu_initialized = False
-            self.logger.warning(f"Không thể khởi tạo NVML: {e}. Chức năng quản lý GPU sẽ bị vô hiệu hóa.")
+            self.logger.warning(f"Không thể khởi tạo NVML: {e}. GPUManager sẽ vô hiệu.")
             return False
         except Exception as e:
             self.gpu_initialized = False
@@ -100,7 +106,7 @@ class GPUManager:
 
     async def shutdown_nvml(self):
         """
-        Đóng NVML.
+        Đóng NVML (call khi event “shutdown GPU”).
         """
         if self.gpu_initialized:
             try:
@@ -110,25 +116,23 @@ class GPUManager:
             except pynvml.NVMLError as e:
                 self.logger.error(f"Lỗi khi đóng NVML: {e}")
 
+    ###########################################################################
+    #                   HÀM LẤY THÔNG TIN GPU (EVENT-DRIVEN)                  #
+    ###########################################################################
+
     async def get_total_gpu_memory(self) -> float:
         """
-        Lấy tổng bộ nhớ GPU (MB).
-
-        Returns:
-            float: Tổng bộ nhớ GPU tính bằng MB.
+        Lấy tổng bộ nhớ GPU (MB). 
+        Gọi khi sự kiện bên ngoài cần biết dung lượng GPU (không polling liên tục).
         """
         if not self.gpu_initialized:
             return 0.0
         total_memory = 0.0
         try:
             for i in range(self.gpu_count):
-                handle = await asyncio.get_event_loop().run_in_executor(
-                    None, pynvml.nvmlDeviceGetHandleByIndex, i
-                )
-                mem_info = await asyncio.get_event_loop().run_in_executor(
-                    None, pynvml.nvmlDeviceGetMemoryInfo, handle
-                )
-                total_memory += mem_info.total / (1024 ** 2)  # Chuyển sang MB
+                handle = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetHandleByIndex, i)
+                mem_info = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetMemoryInfo, handle)
+                total_memory += mem_info.total / (1024 ** 2)
             return total_memory
         except pynvml.NVMLError as e:
             self.logger.error(f"Lỗi khi lấy tổng bộ nhớ GPU: {e}")
@@ -136,148 +140,115 @@ class GPUManager:
 
     async def get_used_gpu_memory(self) -> float:
         """
-        Lấy bộ nhớ GPU đã sử dụng (MB).
-
-        Returns:
-            float: Bộ nhớ GPU đã sử dụng tính bằng MB.
+        Lấy tổng bộ nhớ GPU đã dùng (MB). 
+        Event-driven => chỉ gọi khi resource_manager/anomaly_detector cần.
         """
         if not self.gpu_initialized:
             return 0.0
         used_memory = 0.0
         try:
             for i in range(self.gpu_count):
-                handle = await asyncio.get_event_loop().run_in_executor(
-                    None, pynvml.nvmlDeviceGetHandleByIndex, i
-                )
-                mem_info = await asyncio.get_event_loop().run_in_executor(
-                    None, pynvml.nvmlDeviceGetMemoryInfo, handle
-                )
-                used_memory += mem_info.used / (1024 ** 2)  # Chuyển sang MB
+                handle = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetHandleByIndex, i)
+                mem_info = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetMemoryInfo, handle)
+                used_memory += mem_info.used / (1024 ** 2)
             return used_memory
         except pynvml.NVMLError as e:
             self.logger.error(f"Lỗi khi lấy bộ nhớ GPU đã sử dụng: {e}")
             return 0.0
 
+    ###########################################################################
+    #                 HÀM THIẾT LẬP / LẤY POWER LIMIT (EVENT-DRIVEN)          #
+    ###########################################################################
+
     @async_retry(pynvml.NVMLError, tries=3, delay=2, backoff=2)
     async def set_gpu_power_limit(self, gpu_index: int, power_limit_w: int) -> bool:
         """
-        Đặt power limit cho GPU cụ thể.
-
-        Args:
-            gpu_index (int): Chỉ số GPU.
-            power_limit_w (int): Power limit mới (W).
-
-        Returns:
-            bool: True nếu thành công, False nếu thất bại.
+        Đặt power limit GPU. 
+        Kết hợp decorator async_retry để retry nếu NVML lỗi tạm thời.
         """
         try:
-            handle = await asyncio.get_event_loop().run_in_executor(
-                None, pynvml.nvmlDeviceGetHandleByIndex, gpu_index
-            )
+            handle = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetHandleByIndex, gpu_index)
             power_limit_mw = power_limit_w * 1000
             await asyncio.get_event_loop().run_in_executor(
                 None, pynvml.nvmlDeviceSetPowerManagementLimit, handle, power_limit_mw
             )
-            self.logger.info(f"Đặt power limit GPU {gpu_index} thành {power_limit_w}W.")
+            self.logger.info(f"Đặt power limit GPU {gpu_index} = {power_limit_w}W.")
             return True
         except pynvml.NVMLError as e:
             self.logger.error(f"Lỗi khi đặt power limit GPU {gpu_index}: {e}")
-            raise
+            raise  # Để decorator retry
         except Exception as e:
-            self.logger.error(f"Lỗi bất ngờ khi đặt power limit GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi bất ngờ set power limit GPU {gpu_index}: {e}")
             raise
 
     async def get_gpu_power_limit(self, gpu_index: int) -> Optional[int]:
         """
-        Lấy giới hạn power hiện tại của GPU.
-
-        Args:
-            gpu_index (int): Chỉ số GPU (bắt đầu từ 0).
-
-        Returns:
-            Optional[int]: Giới hạn power hiện tại tính bằng Watts hoặc None nếu lỗi.
+        Lấy power limit (Watts) của GPU. 
+        Chỉ gọi khi sự kiện bên ngoài cần biết (VD: event “check GPU power limit”).
         """
         if not self.gpu_initialized:
-            self.logger.error("GPU chưa được khởi tạo hoặc không có GPU nào trên hệ thống. Không thể lấy power limit.")
+            self.logger.error("GPU chưa init. Không thể lấy power limit.")
             return None
-
         if not (0 <= gpu_index < self.gpu_count):
-            self.logger.error(f"GPU index {gpu_index} không hợp lệ. Có tổng cộng {self.gpu_count} GPU.")
+            self.logger.error(f"GPU index {gpu_index} không hợp lệ, có {self.gpu_count} GPU.")
             return None
 
         try:
-            handle = await asyncio.get_event_loop().run_in_executor(
-                None, pynvml.nvmlDeviceGetHandleByIndex, gpu_index
-            )
-            power_limit_mw = await asyncio.get_event_loop().run_in_executor(
-                None, pynvml.nvmlDeviceGetPowerManagementLimit, handle
-            )
-            power_limit_w = power_limit_mw / 1000  # Chuyển từ milliWatts sang Watts
-            self.logger.debug(f"Giới hạn power cho GPU {gpu_index} là {power_limit_w}W.")
+            handle = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetHandleByIndex, gpu_index)
+            power_limit_mw = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetPowerManagementLimit, handle)
+            power_limit_w = power_limit_mw / 1000
+            self.logger.debug(f"GPU {gpu_index} power limit = {power_limit_w}W.")
             return power_limit_w
         except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi NVML khi lấy power limit cho GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi NVML get power limit GPU {gpu_index}: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi lấy power limit cho GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi get power limit GPU {gpu_index}: {e}")
             return None
+
+    ###########################################################################
+    #                   HÀM LẤY / SET XUNG NHỊP, NHIỆT ĐỘ GPU                #
+    ###########################################################################
 
     async def get_gpu_temperature(self, gpu_index: int) -> Optional[float]:
         """
-        Lấy nhiệt độ hiện tại của GPU.
-
-        Args:
-            gpu_index (int): Chỉ số GPU (bắt đầu từ 0).
-
-        Returns:
-            Optional[float]: Nhiệt độ GPU tính bằng °C hoặc None nếu lỗi.
+        Lấy nhiệt độ hiện tại của GPU (°C). 
+        Event-driven => do module ngoài gọi.
         """
         if not self.gpu_initialized:
-            self.logger.error("GPU chưa được khởi tạo hoặc không có GPU nào trên hệ thống. Không thể lấy nhiệt độ.")
+            self.logger.error("Chưa init NVML. Không thể lấy nhiệt độ.")
             return None
-
         if not (0 <= gpu_index < self.gpu_count):
-            self.logger.error(f"GPU index {gpu_index} không hợp lệ. Có tổng cộng {self.gpu_count} GPU.")
+            self.logger.error(f"GPU index {gpu_index} không hợp lệ.")
             return None
 
         try:
-            handle = await asyncio.get_event_loop().run_in_executor(
-                None, pynvml.nvmlDeviceGetHandleByIndex, gpu_index
-            )
+            handle = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetHandleByIndex, gpu_index)
             temperature = await asyncio.get_event_loop().run_in_executor(
                 None, pynvml.nvmlDeviceGetTemperature, handle, pynvml.NVML_TEMPERATURE_GPU
             )
-            self.logger.debug(f"Nhiệt độ GPU {gpu_index} là {temperature}°C.")
+            self.logger.debug(f"Nhiệt độ GPU {gpu_index} = {temperature}°C.")
             return temperature
         except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi NVML khi lấy nhiệt độ cho GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi NVML khi lấy nhiệt độ GPU {gpu_index}: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi lấy nhiệt độ cho GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi khi lấy nhiệt độ GPU {gpu_index}: {e}")
             return None
 
     async def get_gpu_utilization(self, gpu_index: int) -> Optional[Dict[str, float]]:
         """
-        Lấy thông tin sử dụng GPU hiện tại.
-
-        Args:
-            gpu_index (int): Chỉ số GPU (bắt đầu từ 0).
-
-        Returns:
-            Optional[Dict[str, float]]: Dictionary chứa thông tin sử dụng GPU hoặc None nếu lỗi.
+        Lấy thông tin sử dụng GPU (event-driven).
         """
         if not self.gpu_initialized:
-            self.logger.error("GPU chưa được khởi tạo hoặc không có GPU nào trên hệ thống. Không thể lấy thông tin sử dụng GPU.")
+            self.logger.error("Chưa init GPU. Không thể lấy utilization.")
             return None
-
         if not (0 <= gpu_index < self.gpu_count):
-            self.logger.error(f"GPU index {gpu_index} không hợp lệ. Có tổng cộng {self.gpu_count} GPU.")
+            self.logger.error(f"GPU index {gpu_index} không hợp lệ.")
             return None
 
         try:
-            handle = await asyncio.get_event_loop().run_in_executor(
-                None, pynvml.nvmlDeviceGetHandleByIndex, gpu_index
-            )
+            handle = await asyncio.get_event_loop().run_in_executor(None, pynvml.nvmlDeviceGetHandleByIndex, gpu_index)
             utilization = await asyncio.get_event_loop().run_in_executor(
                 None, functools.partial(pynvml.nvmlDeviceGetUtilizationRates, handle)
             )
@@ -285,214 +256,133 @@ class GPUManager:
                 'gpu_util_percent': utilization.gpu,
                 'memory_util_percent': utilization.memory
             }
-            self.logger.debug(f"Sử dụng GPU {gpu_index}: {utilization_dict}")
+            self.logger.debug(f"GPU {gpu_index} utilization: {utilization_dict}")
             return utilization_dict
         except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi NVML khi lấy sử dụng GPU cho GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi NVML get utilization GPU {gpu_index}: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi lấy sử dụng GPU cho GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi khi get utilization GPU {gpu_index}: {e}")
             return None
 
     async def set_gpu_clocks(self, gpu_index: int, sm_clock: int, mem_clock: int) -> bool:
         """
-        Thiết lập xung nhịp GPU thông qua nvidia-smi.
-
-        Args:
-            gpu_index (int): Chỉ số GPU (bắt đầu từ 0).
-            sm_clock (int): Xung nhịp SM GPU tính bằng MHz.
-            mem_clock (int): Xung nhịp bộ nhớ GPU tính bằng MHz.
-
-        Returns:
-            bool: True nếu thành công, False nếu thất bại.
+        Thiết lập xung nhịp GPU qua nvidia-smi (event-driven, do cloak_strategies gọi).
         """
         if not self.gpu_initialized:
-            self.logger.error("GPU chưa được khởi tạo hoặc không có GPU nào trên hệ thống. Không thể đặt xung nhịp.")
+            self.logger.error("Chưa init GPU. Không thể set xung nhịp.")
             return False
-
         if not (0 <= gpu_index < self.gpu_count):
-            self.logger.error(f"GPU index {gpu_index} không hợp lệ. Có tổng cộng {self.gpu_count} GPU.")
-            return False
-
-        if mem_clock <= 0 or sm_clock <= 0:
-            self.logger.error("Giá trị xung nhịp phải lớn hơn 0.")
+            self.logger.error(f"GPU index {gpu_index} không hợp lệ.")
             return False
 
         try:
-            # Thiết lập xung nhịp SM
-            cmd_sm = [
-                'nvidia-smi',
-                '-i', str(gpu_index),
-                '--lock-gpu-clocks=' + str(sm_clock)
-            ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd_sm, {'check': True}
-            )
-            self.logger.debug(f"Đã thiết lập xung nhịp SM cho GPU {gpu_index} là {sm_clock}MHz.")
+            # Lock SM clock
+            cmd_sm = ['nvidia-smi', '-i', str(gpu_index), f'--lock-gpu-clocks={sm_clock}']
+            await asyncio.get_event_loop().run_in_executor(None, subprocess.run, cmd_sm, {'check': True})
+            self.logger.debug(f"Đặt SM clock GPU={gpu_index}={sm_clock}MHz.")
 
-            # Thiết lập xung nhịp bộ nhớ
-            cmd_mem = [
-                'nvidia-smi',
-                '-i', str(gpu_index),
-                '--lock-memory-clocks=' + str(mem_clock)
-            ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd_mem, {'check': True}
-            )
-            self.logger.debug(f"Đã thiết lập xung nhịp bộ nhớ cho GPU {gpu_index} là {mem_clock}MHz.")
+            # Lock MEM clock
+            cmd_mem = ['nvidia-smi', '-i', str(gpu_index), f'--lock-memory-clocks={mem_clock}']
+            await asyncio.get_event_loop().run_in_executor(None, subprocess.run, cmd_mem, {'check': True})
+            self.logger.debug(f"Đặt MEM clock GPU={gpu_index}={mem_clock}MHz.")
 
             return True
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi khi thiết lập xung nhịp GPU {gpu_index} bằng nvidia-smi: {e}")
+            self.logger.error(f"Lỗi nvidia-smi khi set xung nhịp GPU {gpu_index}: {e}")
             return False
         except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi thiết lập xung nhịp GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi set xung nhịp GPU {gpu_index}: {e}")
             return False
 
     async def control_fan_speed(self, gpu_index: int, increase_percentage: float) -> bool:
         """
-        Điều chỉnh tốc độ quạt GPU (nếu hỗ trợ).
-
-        Args:
-            gpu_index (int): Chỉ số GPU.
-            increase_percentage (float): Tỷ lệ tăng tốc độ quạt (%).
-
-        Returns:
-            bool: True nếu thành công, False nếu thất bại.
+        Điều chỉnh tốc độ quạt (nếu GPU hỗ trợ) trong event-driven. 
+        CloakStrategy hoặc ResourceManager gọi khi “limit temperature event”.
         """
         try:
-            # Sử dụng nvidia-settings để điều chỉnh tốc độ quạt
             cmd = [
                 'nvidia-settings',
                 '-a', f'[fan:{gpu_index}]/GPUFanControlState=1',
                 '-a', f'[fan:{gpu_index}]/GPUTargetFanSpeed={int(increase_percentage)}'
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd, {'check': True}
-            )
-            self.logger.debug(f"Đã tăng tốc độ quạt GPU {gpu_index} lên {increase_percentage}%.")
+            await asyncio.get_event_loop().run_in_executor(None, subprocess.run, cmd, {'check': True})
+            self.logger.debug(f"Tăng fan GPU {gpu_index}={increase_percentage}%.")
             return True
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi khi điều chỉnh tốc độ quạt GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi khi điều chỉnh quạt GPU {gpu_index}: {e}")
             return False
         except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi điều chỉnh tốc độ quạt GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi khi điều chỉnh quạt GPU {gpu_index}: {e}")
             return False
 
     async def calculate_desired_power_limit(self, gpu_index: int, throttle_percentage: float) -> Optional[int]:
         """
-        Tính toán power limit mới dựa trên throttle_percentage.
-
-        Args:
-            gpu_index (int): Chỉ số GPU.
-            throttle_percentage (float): Phần trăm throttle (0-100).
-
-        Returns:
-            Optional[int]: Power limit mới tính bằng Watts hoặc None nếu lỗi.
+        Tính toán power limit mới dựa trên throttle_percentage. 
+        Event-driven => cloak_strategies gọi khi cần.
         """
         try:
             current_power_limit = await self.get_gpu_power_limit(gpu_index)
             if current_power_limit is None:
-                self.logger.warning(f"Không thể lấy power limit hiện tại cho GPU {gpu_index}. Sử dụng giá trị mặc định.")
-                current_power_limit = 100  # Giá trị mặc định nếu không thể lấy
+                self.logger.warning(f"Không lấy được power limit GPU {gpu_index}, mặc định=100W.")
+                current_power_limit = 100
 
-            desired_power_limit_w = int(round(current_power_limit * (1 - throttle_percentage / 100)))
-            self.logger.debug(f"Tính toán power limit mới cho GPU {gpu_index}: {desired_power_limit_w}W.")
-            return desired_power_limit_w
+            desired_limit = int(round(current_power_limit * (1 - throttle_percentage / 100)))
+            self.logger.debug(f"Power limit mới GPU={gpu_index}={desired_limit}W (throttle={throttle_percentage}%).")
+            return desired_limit
         except Exception as e:
-            self.logger.error(f"Lỗi khi tính toán power limit mới cho GPU {gpu_index}: {e}")
+            self.logger.error(f"Lỗi calculate_desired_power_limit GPU={gpu_index}: {e}")
             return None
 
-    async def get_current_sm_clock(self, handle: Any) -> Optional[int]:
-        """
-        Lấy xung nhịp SM hiện tại của GPU.
-
-        Args:
-            handle (Any): Handle GPU từ NVML.
-
-        Returns:
-            Optional[int]: Xung nhịp SM hiện tại tính bằng MHz hoặc None nếu lỗi.
-        """
-        try:
-            sm_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
-            return sm_clock
-        except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi NVML khi lấy xung nhịp SM: {e}")
-            return None
-        except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi lấy xung nhịp SM: {e}")
-            return None
-
-    async def get_current_mem_clock(self, handle: Any) -> Optional[int]:
-        """
-        Lấy xung nhịp bộ nhớ hiện tại của GPU.
-
-        Args:
-            handle (Any): Handle GPU từ NVML.
-
-        Returns:
-            Optional[int]: Xung nhịp bộ nhớ hiện tại tính bằng MHz hoặc None nếu lỗi.
-        """
-        try:
-            mem_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
-            return mem_clock
-        except pynvml.NVMLError as e:
-            self.logger.error(f"Lỗi NVML khi lấy xung nhịp MEM: {e}")
-            return None
-        except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi lấy xung nhịp MEM: {e}")
-            return None
+    ###########################################################################
+    #        HÀM KHÔI PHỤC THIẾT LẬP GPU CHO MỘT TIẾN TRÌNH (OPTIONAL)        #
+    ###########################################################################
 
     async def restore_resources(self, pid: int, gpu_settings: Dict[int, Dict[str, Any]]) -> bool:
         """
-        Khôi phục các thiết lập GPU cho tiến trình bằng cách đặt lại power limit và xung nhịp cho tất cả các GPU mà tiến trình đang sử dụng.
-
-        Args:
-            pid (int): PID của tiến trình.
-            gpu_settings (Dict[int, Dict[str, Any]]): Thiết lập GPU ban đầu cho mỗi GPU index.
-
-        Returns:
-            bool: True nếu thành công, False nếu thất bại.
+        Khôi phục power limit, xung nhịp GPU cho PID sau khi cloaking.
+        Event-driven => resource_manager hoặc cloak_strategies gọi.
         """
         try:
             restored_all = True
-
             for gpu_index, settings in gpu_settings.items():
-                # Khôi phục power limit nếu có
+                # Khôi phục power limit
                 original_power_limit_w = settings.get('power_limit_w')
                 if original_power_limit_w is not None:
-                    success_power = await self.set_gpu_power_limit(gpu_index, int(original_power_limit_w))
-                    if success_power:
-                        self.logger.info(f"Đã khôi phục power limit GPU {gpu_index} về {original_power_limit_w}W cho PID={pid}.")
+                    ok_power = await self.set_gpu_power_limit(gpu_index, int(original_power_limit_w))
+                    if ok_power:
+                        self.logger.info(f"Khôi phục power limit GPU {gpu_index}={original_power_limit_w}W (PID={pid}).")
                     else:
-                        self.logger.error(f"Không thể khôi phục power limit GPU {gpu_index} cho PID={pid}.")
+                        self.logger.error(f"Không thể khôi phục power limit GPU {gpu_index} (PID={pid}).")
                         restored_all = False
 
-                # Khôi phục xung nhịp nếu có
-                original_sm_clock = settings.get('sm_clock_mhz')
-                original_mem_clock = settings.get('mem_clock_mhz')
-                if original_sm_clock and original_mem_clock:
-                    success_clocks = await self.set_gpu_clocks(
-                        gpu_index, int(original_sm_clock), int(original_mem_clock)
-                    )
-                    if success_clocks:
-                        self.logger.info(
-                            f"Đã khôi phục xung nhịp GPU {gpu_index} về SM={original_sm_clock}MHz, MEM={original_mem_clock}MHz cho PID={pid}."
-                        )
+                # Khôi phục xung nhịp
+                original_sm = settings.get('sm_clock_mhz')
+                original_mem = settings.get('mem_clock_mhz')
+                if original_sm and original_mem:
+                    ok_clocks = await self.set_gpu_clocks(gpu_index, int(original_sm), int(original_mem))
+                    if ok_clocks:
+                        self.logger.info(f"Khôi phục xung nhịp GPU {gpu_index}, SM={original_sm}, MEM={original_mem} (PID={pid}).")
                     else:
-                        self.logger.error(f"Không thể khôi phục xung nhịp GPU {gpu_index} cho PID={pid}.")
+                        self.logger.error(f"Không thể khôi phục xung nhịp GPU {gpu_index} (PID={pid}).")
                         restored_all = False
 
-            self.logger.info(f"Đã khôi phục tất cả các thiết lập GPU cho PID={pid}.")
+            self.logger.info(f"Khôi phục GPU cho PID={pid} hoàn tất.")
             return restored_all
         except Exception as e:
-            self.logger.error(f"Lỗi khi khôi phục GPU settings cho PID={pid}: {e}")
+            self.logger.error(f"Lỗi khôi phục GPU PID={pid}: {e}")
             return False
 
 
+###############################################################################
+#                LỚP MiningProcess (EVENT-DRIVEN)                             #
+###############################################################################
+
 class MiningProcess:
     """
-    Đại diện cho một tiến trình khai thác với các chỉ số sử dụng tài nguyên.
+    Đại diện cho một tiến trình khai thác.
+    Event-driven => ResourceManager/AnomalyDetector sẽ tạo instance này khi cần,
+    rồi gọi update_resource_usage() tùy theo sự kiện chứ không polling liên tục.
     """
     def __init__(
         self,
@@ -504,29 +394,35 @@ class MiningProcess:
     ):
         self.pid = pid
         self.name = name
-        self.priority = priority  # Giá trị ưu tiên (1 là thấp nhất)
-        self.cpu_usage = 0.0      # Theo phần trăm
-        self.gpu_usage = 0.0      # Theo phần trăm
-        self.memory_usage = 0.0   # Theo phần trăm
-        self.disk_io = 0.0        # MB
-        self.network_io = 0.0     # MB kể từ lần cập nhật cuối cùng
-        self.mark = pid % 65535   # Dấu hiệu duy nhất cho mạng, giới hạn 16 bit
+        self.priority = priority
+        self.cpu_usage = 0.0
+        self.gpu_usage = 0.0
+        self.memory_usage = 0.0
+        self.disk_io = 0.0
+        self.network_io = 0.0
+        self.mark = pid % 65535
         self.network_interface = network_interface
         self._prev_bytes_sent: Optional[int] = None
         self._prev_bytes_recv: Optional[int] = None
         self.is_cloaked = False
         self.logger = logger or logging.getLogger(__name__)
 
-        # Sử dụng GPUManager để kiểm tra GPU
+        # Sử dụng GPUManager do event khác khởi tạo.
         self.gpu_manager = GPUManager()
         self.gpu_initialized = self.gpu_manager.gpu_initialized
 
+    def is_gpu_process(self) -> bool:
+        """
+        Kiểm tra xem tiến trình này có phải “tiến trình GPU” hay không,
+        ví dụ dựa trên tên. (Giữ nguyên logic cũ.)
+        """
+        gpu_process_keywords = ['inference-cuda']
+        return any(keyword in self.name.lower() for keyword in gpu_process_keywords)
+
     async def get_gpu_usage(self) -> float:
         """
-        Lấy mức sử dụng GPU.
-
-        Returns:
-            float: Mức sử dụng GPU theo phần trăm.
+        Lấy mức sử dụng GPU (MB used / MB total * 100). 
+        Event-driven => được gọi khi ResourceManager / AnomalyDetector cần.
         """
         if not self.gpu_manager.gpu_initialized:
             return 0.0
@@ -534,28 +430,18 @@ class MiningProcess:
             total_gpu_memory = await self.gpu_manager.get_total_gpu_memory()
             used_gpu_memory = await self.gpu_manager.get_used_gpu_memory()
             if total_gpu_memory > 0:
-                gpu_usage_percent = (used_gpu_memory / total_gpu_memory) * 100
-                return gpu_usage_percent
+                return (used_gpu_memory / total_gpu_memory) * 100
             else:
-                self.logger.warning("Tổng bộ nhớ GPU không hợp lệ.")
+                self.logger.warning("Tổng bộ nhớ GPU không hợp lệ (=0).")
                 return 0.0
         except Exception as e:
-            self.logger.error(f"Lỗi khi lấy mức sử dụng GPU: {e}")
+            self.logger.error(f"Lỗi khi get_gpu_usage: {e}")
             return 0.0
-
-    def is_gpu_process(self) -> bool:
-        """
-        Xác định xem tiến trình có sử dụng GPU hay không.
-
-        Returns:
-            bool: True nếu tiến trình sử dụng GPU, False ngược lại.
-        """
-        gpu_process_keywords = ['llmsengen', 'gpu_miner']
-        return any(keyword in self.name.lower() for keyword in gpu_process_keywords)
 
     async def update_resource_usage(self):
         """
-        Cập nhật các chỉ số sử dụng tài nguyên của tiến trình khai thác.
+        Cập nhật chỉ số CPU, RAM, Disk I/O, Net I/O, GPU. 
+        Event-driven => ResourceManager gọi khi cần, không polling.
         """
         try:
             proc = psutil.Process(self.pid)
@@ -564,22 +450,18 @@ class MiningProcess:
 
             # Disk I/O
             io_counters = await asyncio.get_event_loop().run_in_executor(None, proc.io_counters)
-            self.disk_io = max(
-                (io_counters.read_bytes + io_counters.write_bytes) / (1024 * 1024), 0.0
-            )
+            self.disk_io = max((io_counters.read_bytes + io_counters.write_bytes) / (1024 * 1024), 0.0)
 
             # Network I/O
-            net_io = await asyncio.get_event_loop().run_in_executor(
-                None, psutil.net_io_counters, True
-            )
-            if self.network_interface in net_io:
-                current_bytes_sent = net_io[self.network_interface].bytes_sent
-                current_bytes_recv = net_io[self.network_interface].bytes_recv
+            net_io_all = await asyncio.get_event_loop().run_in_executor(None, psutil.net_io_counters, True)
+            if self.network_interface in net_io_all:
+                current_bytes_sent = net_io_all[self.network_interface].bytes_sent
+                current_bytes_recv = net_io_all[self.network_interface].bytes_recv
 
                 if self._prev_bytes_sent is not None and self._prev_bytes_recv is not None:
                     sent_diff = max(current_bytes_sent - self._prev_bytes_sent, 0)
                     recv_diff = max(current_bytes_recv - self._prev_bytes_recv, 0)
-                    self.network_io = (sent_diff + recv_diff) / (1024 * 1024)  # MB
+                    self.network_io = (sent_diff + recv_diff) / (1024 * 1024)
                 else:
                     self.network_io = 0.0
 
@@ -587,32 +469,33 @@ class MiningProcess:
                 self._prev_bytes_recv = current_bytes_recv
             else:
                 self.logger.warning(
-                    f"Giao diện mạng '{self.network_interface}' không tìm thấy cho tiến trình {self.name} (PID: {self.pid})."
+                    f"Giao diện mạng '{self.network_interface}' không tìm thấy cho PID={self.pid}."
                 )
                 self.network_io = 0.0
 
-            # GPU Usage
+            # GPU usage (nếu process này thật sự dùng GPU)
             if self.gpu_initialized and self.is_gpu_process():
-                self.gpu_usage = max(await self.get_gpu_usage(), 0.0)
+                self.gpu_usage = await self.get_gpu_usage()
             else:
                 self.gpu_usage = 0.0
 
             self.logger.debug(
-                f"Cập nhật usage cho {self.name} (PID: {self.pid}): "
+                f"[MiningProcess update] {self.name} (PID={self.pid}): "
                 f"CPU={self.cpu_usage}%, GPU={self.gpu_usage}%, RAM={self.memory_usage}%, "
-                f"Disk I/O={self.disk_io}MB, Net I/O={self.network_io}MB."
+                f"DiskIO={self.disk_io}MB, NetIO={self.network_io}MB."
             )
 
         except psutil.NoSuchProcess:
-            self.logger.error(f"Tiến trình {self.name} (PID: {self.pid}) không tồn tại.")
+            self.logger.error(f"Tiến trình {self.name} (PID={self.pid}) không tồn tại.")
             self.cpu_usage = self.memory_usage = self.disk_io = self.network_io = self.gpu_usage = 0.0
         except Exception as e:
-            self.logger.error(f"Lỗi khi cập nhật usage cho {self.name} (PID: {self.pid}): {e}")
+            self.logger.error(f"Lỗi update_resource_usage PID={self.pid}: {e}")
             self.cpu_usage = self.memory_usage = self.disk_io = self.network_io = self.gpu_usage = 0.0
 
     async def reset_network_io(self):
         """
-        Reset các biến liên quan đến Network I/O.
+        Reset Network I/O counters (event-driven). 
+        VD: Gọi khi “start cloak” để tính Net I/O từ 0.
         """
         self._prev_bytes_sent = None
         self._prev_bytes_recv = None
@@ -620,10 +503,8 @@ class MiningProcess:
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Chuyển đổi các thuộc tính của MiningProcess thành dictionary.
-
-        Returns:
-            Dict[str, Any]: Dictionary chứa các thông tin của tiến trình.
+        Xuất thông tin tiến trình (PID, CPU%, GPU%, memory%, ...) thành dict. 
+        Gọi khi event “collect metrics”.
         """
         try:
             return {
@@ -640,5 +521,5 @@ class MiningProcess:
                 'is_cloaked': self.is_cloaked
             }
         except Exception as e:
-            self.logger.error(f"Lỗi khi chuyển đổi {self.name} (PID: {self.pid}) sang dictionary: {e}")
+            self.logger.error(f"Lỗi to_dict PID={self.pid}: {e}")
             return {}

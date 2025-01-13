@@ -306,9 +306,17 @@ class ResourceManager(BaseManager, IResourceManager):
         # Bổ sung: Danh sách watchers
         self.watchers = []
 
+
     ##########################################################################
     #             KHỞI TẠO/SHUTDOWN & AZURE CLIENT LIÊN QUAN                 #
     ##########################################################################
+
+    async def is_gpu_initialized(self) -> bool:
+        """
+        Override phương thức trừu tượng trong IResourceManager.
+        """
+        return self.shared_resource_manager.is_gpu_initialized()
+
 
     def initialize_azure_clients(self):
         """

@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import asyncio
+import pynvml
 from pathlib import Path
 from typing import Dict, Any
 import aiofiles
