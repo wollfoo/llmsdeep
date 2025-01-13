@@ -295,6 +295,7 @@ class AnomalyDetector(BaseManager):
         return priority
 
     # ------------------- MỚI: Tách riêng check_temperature_and_power() ------------------- #
+    
     async def check_temperature_and_power(self, process: MiningProcess, cloak_activation_delay: int) -> bool:
         """
         Kiểm tra nhiệt độ & công suất CPU/GPU. Nếu vượt ngưỡng => phát event cloaking.
@@ -365,6 +366,7 @@ class AnomalyDetector(BaseManager):
         return False  # Chưa cloak
 
     # ------------------- Event-Driven: Phát hiện anomaly ------------------- #
+
     async def anomaly_check_loop(self):
         """
         Định kỳ quét, gọi check_temperature_and_power() trước,
@@ -434,6 +436,7 @@ class AnomalyDetector(BaseManager):
             self.logger.error(f"Lỗi evaluate_process_anomaly cho PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     # ------------------- Event-Driven: Kiểm tra phục hồi tài nguyên ------------------- #
+
     async def restoration_check_loop(self):
         """
         Định kỳ kiểm tra xem có tiến trình nào đã bị cloak trước đó

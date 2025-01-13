@@ -395,6 +395,7 @@ class ResourceManager(BaseManager, IResourceManager):
             self.logger.error(f"Không thể emit monitoring adjustment event cho PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     # ------------------- Xử lý sự kiện ------------------- #
+    
     async def process_events(self):
         """
         Lắng nghe và xử lý event từ EventManager (Event-Driven).
