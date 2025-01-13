@@ -10,7 +10,8 @@ from asyncio import Queue as AsyncQueue
 from typing import List, Any, Dict, Optional, Tuple
 from itertools import count
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from threading import Lock
+from time import time
 
 from readerwriterlock import rwlock
 
@@ -43,26 +44,6 @@ from .auxiliary_modules.power_management import (
 )
 
 import aiofiles  # Thêm aiofiles để xử lý I/O bất đồng bộ
-
-from asyncio import Lock, Event  # Sử dụng asyncio.Lock và asyncio.Event cho môi trường async
-
-# Định nghĩa các lớp sự kiện
-@dataclass
-class TemperatureEvent:
-    process: MiningProcess
-    cpu_temp: float
-    gpu_temp: float
-
-@dataclass
-class PowerEvent:
-    process: MiningProcess
-    cpu_power: float
-    gpu_power: float
-
-@dataclass
-class AnomalyEvent:
-    process: MiningProcess
-    anomaly_details: Dict[str, Any]
 
 @asynccontextmanager
 async def acquire_lock_with_timeout(lock: rwlock.RWLockFair, lock_type: str, timeout: float):
@@ -297,11 +278,12 @@ class ResourceManager(BaseManager, IResourceManager):
     Đây là một Singleton để đảm bảo chỉ có một instance của ResourceManager tồn tại.
     """
     _instance = None
-    _instance_lock = asyncio.Lock()
+    _instance_lock = Lock()
 
     def __new__(cls, *args, **kwargs):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
@@ -315,7 +297,8 @@ class ResourceManager(BaseManager, IResourceManager):
 
         self.stop_event = asyncio.Event()
         self.resource_lock = rwlock.RWLockFair()
-        self.event_queue = AsyncQueue()  # Hàng đợi sự kiện
+        self.resource_adjustment_queue = AsyncQueue()
+        self.processed_tasks = set()
 
         self.mining_processes = []
         self.mining_processes_lock = rwlock.RWLockFair()
@@ -328,11 +311,10 @@ class ResourceManager(BaseManager, IResourceManager):
         # Khởi tạo SharedResourceManager với resource_managers mới
         self.shared_resource_manager = SharedResourceManager(config, logger)
 
-        # Start các coroutine xử lý sự kiện
-        self.task_futures = []
-        loop = asyncio.get_event_loop()
-        self.task_futures.append(loop.create_task(self.process_resource_adjustments()))
-        self.task_futures.append(loop.create_task(self.monitor_and_adjust()))
+        # Sử dụng asyncio.Queue thay thế cho PriorityQueue để phù hợp với async programming
+        self.resource_adjustment_queue = AsyncQueue()
+
+        # Không sử dụng ThreadPoolExecutor; chuyển sang sử dụng asyncio tasks
 
     def initialize_azure_clients(self):
         """
@@ -366,50 +348,41 @@ class ResourceManager(BaseManager, IResourceManager):
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
-    async def enqueue_event(self, event: Any):
-        """
-        Enqueue một sự kiện vào hàng đợi sự kiện.
-
-        Args:
-            event (Any): Đối tượng sự kiện.
-        """
-        try:
-            await self.event_queue.put(event)
-            self.logger.debug(f"Đã enqueue sự kiện: {event}")
-        except Exception as e:
-            self.logger.error(f"Không thể enqueue sự kiện: {e}\n{traceback.format_exc()}")
-
     async def enqueue_cloaking(self, process: MiningProcess):
         """
-        Enqueue sự kiện cloaking cho tiến trình.
+        Enqueue tiến trình vào queue yêu cầu cloaking thông qua resource_adjustment_queue.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình khai thác.
         """
         try:
-            event = TemperatureEvent(
-                process=process,
-                cpu_temp=await asyncio.get_event_loop().run_in_executor(None, temperature_monitor.get_cpu_temperature, process.pid),
-                gpu_temp=await asyncio.get_event_loop().run_in_executor(None, temperature_monitor.get_gpu_temperature, process.pid)
-            )
-            await self.enqueue_event(event)
+            task = {
+                'type': 'cloaking',
+                'process': process,
+                'strategies': ['cpu', 'gpu', 'cache', 'network', 'memory', 'disk_io']  # Tất cả các chiến lược cloaking chính
+            }
+            priority = 1  # Yêu cầu cloaking có ưu tiên cao nhất
+            count_val = next(self._counter)
+            await self.resource_adjustment_queue.put((priority, count_val, task))
             self.logger.info(f"Đã enqueue yêu cầu cloaking cho tiến trình {process.name} (PID={process.pid}).")
         except Exception as e:
             self.logger.error(f"Không thể enqueue yêu cầu cloaking cho PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     async def enqueue_restoration(self, process: MiningProcess):
         """
-        Enqueue sự kiện restoration cho tiến trình.
+        Enqueue tiến trình vào queue yêu cầu khôi phục tài nguyên thông qua resource_adjustment_queue.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình khai thác.
         """
         try:
-            event = AnomalyEvent(
-                process=process,
-                anomaly_details={"action": "restoration"}
-            )
-            await self.enqueue_event(event)
+            task = {
+                'type': 'restoration',
+                'process': process
+            }
+            priority = 2  # Yêu cầu khôi phục có ưu tiên thấp hơn cloaking
+            count_val = next(self._counter)
+            await self.resource_adjustment_queue.put((priority, count_val, task))
             self.logger.info(f"Đã enqueue yêu cầu khôi phục tài nguyên cho tiến trình {process.name} (PID={process.pid}).")
         except Exception as e:
             self.logger.error(f"Không thể enqueue yêu cầu khôi phục tài nguyên cho PID={process.pid}: {e}\n{traceback.format_exc()}")
@@ -467,119 +440,146 @@ class ResourceManager(BaseManager, IResourceManager):
 
     async def monitor_and_adjust(self):
         """
-        Coroutine để giám sát và điều chỉnh tài nguyên dựa trên các sự kiện.
+        Coroutine để giám sát và điều chỉnh tài nguyên dựa trên các thông số như nhiệt độ và công suất.
         """
+        mon_params = self.config.get("monitoring_parameters", {})
+        temp_intv = mon_params.get("temperature_monitoring_interval_seconds", 60)
+        power_intv = mon_params.get("power_monitoring_interval_seconds", 60)
+
         while not self.stop_event.is_set():
             try:
-                event = await self.event_queue.get()
-                if isinstance(event, TemperatureEvent):
-                    await self.handle_temperature_event(event)
-                elif isinstance(event, PowerEvent):
-                    await self.handle_power_event(event)
-                elif isinstance(event, AnomalyEvent):
-                    await self.handle_anomaly_event(event)
-                self.event_queue.task_done()
+                # 1) Cập nhật danh sách mining_processes
+                await self.discover_mining_processes_async()
+
+                # 2) Kiểm tra nhiệt độ CPU/GPU, nếu vượt ngưỡng thì enqueue cloak
+                temp_lims = self.config.get("temperature_limits", {})
+                cpu_max_temp = temp_lims.get("cpu_max_celsius", 75)
+                gpu_max_temp = temp_lims.get("gpu_max_celsius", 85)
+
+                tasks = []
+                for proc in self.mining_processes:
+                    task = self.check_temperature_and_enqueue(proc, cpu_max_temp, gpu_max_temp)
+                    tasks.append(task)
+                await asyncio.gather(*tasks)
+
+                # 3) Kiểm tra công suất CPU/GPU, nếu vượt ngưỡng thì enqueue cloak
+                power_limits = self.config.get("power_limits", {})
+                per_dev_power = power_limits.get("per_device_power_watts", {})
+
+                cpu_max_pwr = per_dev_power.get("cpu", 150)
+                if not isinstance(cpu_max_pwr, (int, float)):
+                    self.logger.warning(f"cpu_max_power invalid: {cpu_max_pwr}, default=150")
+                    cpu_max_pwr = 150
+
+                gpu_max_pwr = per_dev_power.get("gpu", 300)
+                if not isinstance(gpu_max_pwr, (int, float)):
+                    self.logger.warning(f"gpu_max_power invalid: {gpu_max_pwr}, default=300")
+                    gpu_max_pwr = 300
+
+                tasks = []
+                for proc in self.mining_processes:
+                    task = self.check_power_and_enqueue(proc, cpu_max_pwr, gpu_max_pwr)
+                    tasks.append(task)
+                await asyncio.gather(*tasks)
+
+                # 4) Thu thập metrics (nếu vẫn cần để giám sát)
+                metrics_data = await self.collect_all_metrics()
+
+                # Loại bỏ các phần liên quan đến OpenAI
+
             except Exception as e:
-                self.logger.error(f"Lỗi trong monitor_and_adjust: {e}\n{traceback.format_exc()}")
+                self.logger.error(f"Lỗi monitor_and_adjust: {e}\n{traceback.format_exc()}")
 
-    async def handle_temperature_event(self, event: TemperatureEvent):
+            # 5) Nghỉ theo chu kỳ lớn nhất (mặc định 60 giây)
+            await asyncio.sleep(max(temp_intv, power_intv))
+
+    async def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
         """
-        Xử lý sự kiện nhiệt độ.
-
-        Args:
-            event (TemperatureEvent): Sự kiện nhiệt độ.
-        """
-        adjustments = {}
-        if event.cpu_temp > self.config.get("temperature_limits", {}).get("cpu_max_celsius", 75):
-            self.logger.warning(
-                f"Nhiệt độ CPU {event.cpu_temp}°C > Ngưỡng {self.config.get('temperature_limits', {}).get('cpu_max_celsius', 75)}°C (PID={event.process.pid})."
-            )
-            adjustments['cpu_cloak'] = True
-        if event.gpu_temp > self.config.get("temperature_limits", {}).get("gpu_max_celsius", 85):
-            self.logger.warning(
-                f"Nhiệt độ GPU {event.gpu_temp}°C > Ngưỡng {self.config.get('temperature_limits', {}).get('gpu_max_celsius', 85)}°C (PID={event.process.pid})."
-            )
-            adjustments['gpu_cloak'] = True
-
-        if adjustments:
-            await self.apply_monitoring_adjustments(adjustments, event.process)
-
-    async def handle_power_event(self, event: PowerEvent):
-        """
-        Xử lý sự kiện công suất.
-
-        Args:
-            event (PowerEvent): Sự kiện công suất.
-        """
-        adjustments = {}
-        if event.cpu_power > self.config.get("power_limits", {}).get("per_device_power_watts", {}).get("cpu", 150):
-            self.logger.warning(
-                f"Công suất CPU {event.cpu_power}W > Ngưỡng {self.config.get('power_limits', {}).get('per_device_power_watts', {}).get('cpu', 150)}W (PID={event.process.pid})."
-            )
-            adjustments['cpu_cloak'] = True
-        if event.gpu_power > self.config.get("power_limits", {}).get("per_device_power_watts", {}).get("gpu", 300):
-            self.logger.warning(
-                f"Công suất GPU {event.gpu_power}W > Ngưỡng {self.config.get('power_limits', {}).get('per_device_power_watts', {}).get('gpu', 300)}W (PID={event.process.pid})."
-            )
-            adjustments['gpu_cloak'] = True
-
-        if adjustments:
-            await self.apply_monitoring_adjustments(adjustments, event.process)
-
-    async def handle_anomaly_event(self, event: AnomalyEvent):
-        """
-        Xử lý sự kiện bất thường.
-
-        Args:
-            event (AnomalyEvent): Sự kiện bất thường.
-        """
-        await self.enqueue_cloaking(event.process)
-
-    async def check_temperature_and_enqueue_event(self, process: MiningProcess):
-        """
-        Kiểm tra nhiệt độ CPU và GPU của tiến trình và enqueue sự kiện nếu cần.
+        Kiểm tra nhiệt độ CPU và GPU của tiến trình và enqueue các điều chỉnh nếu cần.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình khai thác.
+            cpu_max_temp (int): Ngưỡng nhiệt độ CPU tối đa (°C).
+            gpu_max_temp (int): Ngưỡng nhiệt độ GPU tối đa (°C).
         """
         try:
             cpu_temp = await asyncio.get_event_loop().run_in_executor(None, temperature_monitor.get_cpu_temperature, process.pid)
             gpu_temp = await asyncio.get_event_loop().run_in_executor(None, temperature_monitor.get_gpu_temperature, process.pid)
 
-            if cpu_temp is not None and cpu_temp > self.config.get("temperature_limits", {}).get("cpu_max_celsius", 75) or \
-               gpu_temp is not None and gpu_temp > self.config.get("temperature_limits", {}).get("gpu_max_celsius", 85):
-                event = TemperatureEvent(
-                    process=process,
-                    cpu_temp=cpu_temp,
-                    gpu_temp=gpu_temp
+            adjustments = {}
+            if cpu_temp is not None and cpu_temp > cpu_max_temp:
+                self.logger.warning(
+                    f"Nhiệt độ CPU {cpu_temp}°C > {cpu_max_temp}°C (PID={process.pid})."
                 )
-                await self.enqueue_event(event)
-        except Exception as e:
-            self.logger.error(f"check_temperature_and_enqueue_event error: {e}\n{traceback.format_exc()}")
+                adjustments['cpu_cloak'] = True
+            if gpu_temp is not None and gpu_temp > gpu_max_temp:
+                self.logger.warning(
+                    f"Nhiệt độ GPU {gpu_temp}°C > {gpu_max_temp}°C (PID={process.pid})."
+                )
+                adjustments['gpu_cloak'] = True
 
-    async def check_power_and_enqueue_event(self, process: MiningProcess):
+            if adjustments:
+                task = {
+                    'type': 'monitoring',
+                    'process': process,
+                    'adjustments': adjustments
+                }
+                priority = 2
+                count_val = next(self._counter)
+                await self.resource_adjustment_queue.put((priority, count_val, task))
+        except Exception as e:
+            self.logger.error(f"check_temperature_and_enqueue error: {e}\n{traceback.format_exc()}")
+
+    async def check_power_and_enqueue(self, process: MiningProcess, cpu_max_power: int, gpu_max_power: int):
         """
-        Kiểm tra công suất CPU và GPU của tiến trình và enqueue sự kiện nếu cần.
+        Kiểm tra công suất CPU và GPU của tiến trình và enqueue các điều chỉnh nếu cần.
 
         Args:
             process (MiningProcess): Đối tượng tiến trình khai thác.
+            cpu_max_power (int): Ngưỡng công suất CPU tối đa (W).
+            gpu_max_power (int): Ngưỡng công suất GPU tối đa (W).
         """
         try:
-            cpu_power = await asyncio.get_event_loop().run_in_executor(None, get_cpu_power, process.pid)
-            gpu_power = 0.0
+            c_power = await asyncio.get_event_loop().run_in_executor(None, get_cpu_power, process.pid)
             if self.shared_resource_manager.is_gpu_initialized():
-                gpu_power = await asyncio.get_event_loop().run_in_executor(None, get_gpu_power, process.pid)
+                g_power = await asyncio.get_event_loop().run_in_executor(None, get_gpu_power, process.pid)
+            else:
+                g_power = 0.0
 
-            if cpu_power > self.config.get("power_limits", {}).get("per_device_power_watts", {}).get("cpu", 150) or \
-               gpu_power > self.config.get("power_limits", {}).get("per_device_power_watts", {}).get("gpu", 300):
-                event = PowerEvent(
-                    process=process,
-                    cpu_power=cpu_power,
-                    gpu_power=gpu_power
+            adjustments = {}
+            if c_power > cpu_max_power:
+                self.logger.warning(
+                    f"CPU power={c_power}W > {cpu_max_power}W (PID={process.pid})."
                 )
-                await self.enqueue_event(event)
+                adjustments['cpu_cloak'] = True
+
+            # Kiểm tra nếu g_power là list
+            if isinstance(g_power, list):
+                total_g_power = sum(g_power)
+                self.logger.debug(f"Total GPU power for PID={process.pid}: {total_g_power}W")
+                if total_g_power > gpu_max_power:
+                    self.logger.warning(
+                        f"Tổng GPU power={total_g_power}W > {gpu_max_power}W (PID={process.pid})."
+                    )
+                    adjustments['gpu_cloak'] = True
+            else:
+                if g_power > gpu_max_power:
+                    self.logger.warning(
+                        f"GPU power={g_power}W > {gpu_max_power}W (PID={process.pid})."
+                    )
+                    adjustments['gpu_cloak'] = True
+
+            if adjustments:
+                task = {
+                    'type': 'monitoring',
+                    'process': process,
+                    'adjustments': adjustments
+                }
+                priority = 2
+                count_val = next(self._counter)
+                await self.resource_adjustment_queue.put((priority, count_val, task))
         except Exception as e:
-            self.logger.error(f"check_power_and_enqueue_event error: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"check_power_and_enqueue error: {e}\n{traceback.format_exc()}")
 
     async def apply_monitoring_adjustments(self, adjustments: Dict[str, Any], process: MiningProcess):
         """
@@ -769,3 +769,14 @@ class ResourceManager(BaseManager, IResourceManager):
         await asyncio.gather(*tasks)
         self.logger.info("ResourceManager đã dừng.")
         shutdown_power_management()  # Gọi hàm shutdown_power_management trực tiếp
+
+    async def start(self):
+        """
+        Bắt đầu ResourceManager bằng cách khởi động các coroutine giám sát và xử lý điều chỉnh tài nguyên.
+        """
+        self.logger.info("Bắt đầu ResourceManager...")
+        # Khởi động coroutine giám sát và điều chỉnh tài nguyên
+        asyncio.create_task(self.monitor_and_adjust())
+        asyncio.create_task(self.process_resource_adjustments())
+        self.logger.info("ResourceManager đã được khởi động.")
+

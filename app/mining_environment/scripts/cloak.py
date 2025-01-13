@@ -7,7 +7,7 @@ import pynvml
 import asyncio
 from asyncio import Queue as AsyncQueue
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import time
 
 from .base_manager import BaseManager
@@ -18,33 +18,7 @@ from .auxiliary_modules.temperature_monitor import get_cpu_temperature, get_gpu_
 # Import Interface
 from .interfaces import IResourceManager
 
-# Định nghĩa các lớp sự kiện
-@dataclass
-class AnomalyDetectedEvent:
-    process: MiningProcess
-    anomaly_details: Dict[str, Any]
-
-@asynccontextmanager
-async def acquire_lock_with_timeout(lock: asyncio.Lock, lock_type: str, timeout: float):
-    """
-    Async context manager để chiếm khóa với timeout.
-
-    Args:
-        lock (asyncio.Lock): Đối tượng Lock.
-        lock_type (str): 'read' hoặc 'write'.
-        timeout (float): Thời gian chờ (giây).
-
-    Yields:
-        The acquired lock object nếu thành công, None nếu timeout.
-    """
-    try:
-        await asyncio.wait_for(lock.acquire(), timeout=timeout)
-        try:
-            yield lock
-        finally:
-            lock.release()
-    except asyncio.TimeoutError:
-        yield None
+from resource_manager import acquire_lock_with_timeout  # Import acquire_lock_with_timeout từ resource_manager.py
 
 class SafeRestoreEvaluator:
     """
@@ -249,16 +223,17 @@ class AnomalyDetector(BaseManager):
     Chịu trách nhiệm giám sát các chỉ số hệ thống và enqueue các tiến trình cần cloaking khi phát hiện bất thường.
     """
     _instance = None
-    _instance_lock = asyncio.Lock()
+    _instance_lock = Lock()
 
     def __new__(cls, *args, **kwargs):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super(AnomalyDetector, cls).__new__(cls)
         return cls._instance
 
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         BaseManager.__init__(self, config, logger)
-        if getattr(self, '_initialized', False):
+        if hasattr(self, '_initialized') and self._initialized:
             return
         self._initialized = True
 
@@ -434,27 +409,66 @@ class AnomalyDetector(BaseManager):
                     f"Phát hiện bất thường trong tiến trình {process.name} (PID={process.pid}) thông qua Azure Anomaly Detector. "
                     f"Sẽ kích hoạt cloaking sau {cloak_activation_delay} giây."
                 )
-                # Phát sinh sự kiện cloaking sau delay
                 await asyncio.sleep(cloak_activation_delay)
-                event = AnomalyDetectedEvent(
-                    process=process,
-                    anomaly_details={"detected_by": "AzureAnomalyDetector"}
-                )
-                await self.resource_manager.enqueue_event(event)
+                await self.enqueue_cloaking(process)
                 process.is_cloaked = True
                 return
 
-            # 2) Kiểm tra alerts từ Azure Sentinel (Đã bị loại bỏ hoặc có thể thêm lại)
-            # TODO: Thêm xử lý nếu cần
+            # 2) Kiểm tra alerts từ Azure Sentinel
+            # alerts = await asyncio.get_event_loop().run_in_executor(
+            #     None, self.resource_manager.azure_sentinel_client.get_recent_alerts, days=2
+            # )
+            # if isinstance(alerts, list) and len(alerts) > 0:
+            #     self.logger.warning(
+            #         f"Phát hiện {len(alerts)} cảnh báo từ Azure Sentinel cho PID: {process.pid}"
+            #     )
+            #     await self.enqueue_cloaking(process)
+            #     process.is_cloaked = True
+            #     return
 
-            # 3) Kiểm tra AML logs từ Azure Log Analytics (Đã bị loại bỏ hoặc có thể thêm lại)
-            # TODO: Thêm xử lý nếu cần
+            # 3) Kiểm tra AML logs từ Azure Log Analytics
+            # logs = await asyncio.get_event_loop().run_in_executor(
+            #     None, self.resource_manager.azure_log_analytics_client.query_aml_logs, days=2
+            # )
+            # if isinstance(logs, list) and len(logs) > 0:
+            #     self.logger.warning(
+            #         f"Phát hiện logs AML (AzureDiagnostics) => Cloaking process {process.name} (PID={process.pid})."
+            #     )
+            #     await self.enqueue_cloaking(process)
+            #     process.is_cloaked = True
+            #     return
 
         except psutil.NoSuchProcess:
             self.logger.warning(f"Tiến trình PID {process.pid} không tồn tại khi đánh giá bất thường.")
             return
         except Exception as e:
             self.logger.error(f"Lỗi trong evaluate_process_anomaly cho PID={process.pid}: {e}\n{traceback.format_exc()}")
+
+    async def enqueue_cloaking(self, process: MiningProcess):
+        """
+        Enqueue tiến trình vào queue yêu cầu cloaking thông qua ResourceManager.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình khai thác.
+        """
+        try:
+            await self.resource_manager.enqueue_cloaking(process)
+            self.logger.info(f"Đã enqueue yêu cầu cloaking cho tiến trình {process.name} (PID: {process.pid}).")
+        except Exception as e:
+            self.logger.error(f"Không thể enqueue yêu cầu cloaking cho PID={process.pid}: {e}\n{traceback.format_exc()}")
+
+    async def enqueue_restoration(self, process: MiningProcess):
+        """
+        Enqueue tiến trình vào queue yêu cầu khôi phục tài nguyên thông qua ResourceManager.
+
+        Args:
+            process (MiningProcess): Đối tượng tiến trình khai thác.
+        """
+        try:
+            await self.resource_manager.enqueue_restoration(process)
+            self.logger.info(f"Đã enqueue yêu cầu khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
+        except Exception as e:
+            self.logger.error(f"Không thể enqueue yêu cầu khôi phục tài nguyên cho PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     async def monitor_restoration(self):
         """
@@ -479,7 +493,7 @@ class AnomalyDetector(BaseManager):
                 for process, is_safe in zip(cloaked_processes, results):
                     if is_safe:
                         self.logger.info(f"Điều kiện đã đạt để khôi phục tài nguyên cho PID={process.pid}.")
-                        await self.resource_manager.enqueue_restoration(process)
+                        await self.enqueue_restoration(process)
                         process.is_cloaked = False
                         self.logger.info(f"Đã khôi phục tài nguyên cho tiến trình {process.name} (PID: {process.pid}).")
                     else:
@@ -503,3 +517,4 @@ class AnomalyDetector(BaseManager):
         # Chờ các task hoàn thành
         await asyncio.gather(*self.task_futures, return_exceptions=True)
         self.logger.info("AnomalyDetector đã dừng thành công.")
+
