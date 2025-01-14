@@ -18,8 +18,8 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 from logging_config import setup_logging
 
-# Import lớp GPUManager từ utils.py đã được cải tiến
-from utils import GPUManager
+# Import pynvml để quản lý GPU
+import pynvml
 
 # Thiết lập logging với logging_config.py
 logger = setup_logging('temperature_monitor', LOGS_DIR / 'temperature_monitor.log', 'INFO')
@@ -31,7 +31,6 @@ class TemperatureMonitor:
     """
     TemperatureMonitor là một singleton class chịu trách nhiệm giám sát nhiệt độ của CPU và GPU,
     cũng như quản lý các tài nguyên liên quan đến tiến trình khai thác.
-    Trong phiên bản này, GPU được quản lý thông qua lớp GPUManager từ utils.py.
     """
     _instance = None
     _lock = asyncio.Lock()
@@ -41,9 +40,9 @@ class TemperatureMonitor:
             return
         self._initialized = True
 
-        # Khởi tạo GPUManager để quản lý GPU
-        self.gpu_manager = GPUManager()
-        self.gpu_count = 0  # Số lượng GPU, sẽ được cập nhật sau khi khởi tạo GPUManager
+        # Quản lý pynvml
+        self._nvml_initialized = False
+        self.gpu_count = 0  # Số lượng GPU, sẽ được cập nhật sau khi khởi tạo pynvml
 
         # Cache limit percentage (có thể được cập nhật qua set_cache_limit)
         self.cache_limit_percent = 70.0
@@ -63,16 +62,35 @@ class TemperatureMonitor:
     async def initialize(self):
         """
         Phương thức async để khởi tạo các thuộc tính bất đồng bộ nếu cần thiết.
-        Trong trường hợp này, khởi tạo GPUManager.
+        Trong trường hợp này, khởi tạo pynvml.
         """
-        # Khởi tạo GPUManager
-        gpu_init_success = await self.gpu_manager.initialize()
-        if gpu_init_success:
-            self.gpu_count = self.gpu_manager.gpu_count
-            logger.info(f"TemperatureMonitor: Đã khởi tạo GPUManager thành công với {self.gpu_count} GPU.")
+        if not self._nvml_initialized:
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, pynvml.nvmlInit)
+                self.gpu_count = pynvml.nvmlDeviceGetCount()
+                self._nvml_initialized = True
+                logger.info(f"TemperatureMonitor: Đã khởi tạo pynvml thành công với {self.gpu_count} GPU.")
+            except pynvml.NVMLError as e:
+                logger.error(f"TemperatureMonitor: Lỗi khi khởi tạo pynvml: {e}")
+                self.gpu_count = 0
         else:
-            self.gpu_count = 0
-            logger.warning("TemperatureMonitor: GPUManager không được khởi tạo thành công.")
+            logger.debug("TemperatureMonitor: pynvml đã được khởi tạo trước đó.")
+
+    def _ensure_nvml_initialized(self):
+        """
+        Đảm bảo rằng pynvml đã được khởi tạo trước khi sử dụng.
+        Nếu chưa, thực hiện khởi tạo.
+        """
+        if not self._nvml_initialized:
+            try:
+                pynvml.nvmlInit()
+                self.gpu_count = pynvml.nvmlDeviceGetCount()
+                self._nvml_initialized = True
+                logger.info(f"TemperatureMonitor: Đã khởi tạo pynvml thành công với {self.gpu_count} GPU.")
+            except pynvml.NVMLError as e:
+                logger.error(f"TemperatureMonitor: Lỗi khi khởi tạo pynvml: {e}")
+                self.gpu_count = 0
 
     async def get_cpu_temperature(self, pid: Optional[int] = None) -> float:
         """
@@ -123,9 +141,13 @@ class TemperatureMonitor:
 
         gpu_temps = []
         try:
-            # Sử dụng phương thức từ GPUManager để lấy nhiệt độ từng GPU
+            self._ensure_nvml_initialized()
+            if not self._nvml_initialized:
+                return 0.0
+
+            loop = asyncio.get_event_loop()
             for i in range(self.gpu_count):
-                temp = await self.gpu_manager.get_gpu_temperature(i)
+                temp = await loop.run_in_executor(None, self._get_single_gpu_temperature, i)
                 if temp is not None:
                     gpu_temps.append(temp)
                     logger.debug(f"TemperatureMonitor: GPU {i} Temperature: {temp}°C")
@@ -141,6 +163,24 @@ class TemperatureMonitor:
         except Exception as e:
             logger.error(f"TemperatureMonitor: Lỗi khi lấy nhiệt độ GPU: {e}")
             return 0.0
+
+    def _get_single_gpu_temperature(self, gpu_index: int) -> Optional[float]:
+        """
+        Lấy nhiệt độ của một GPU cụ thể.
+
+        Args:
+            gpu_index (int): Chỉ số GPU.
+
+        Returns:
+            Optional[float]: Nhiệt độ GPU (°C) hoặc None nếu lỗi.
+        """
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            return float(temp)
+        except pynvml.NVMLError as e:
+            logger.error(f"TemperatureMonitor: Lỗi khi lấy nhiệt độ GPU {gpu_index}: {e}")
+            return None
 
     async def get_current_cpu_threads(self, pid: Optional[int] = None) -> int:
         """
@@ -431,7 +471,7 @@ class TemperatureMonitor:
                 lambda: subprocess.run(['tc', 'qdisc', 'del', 'dev', network_interface, 'root'], stderr=subprocess.DEVNULL)
             )
             # Thêm qdisc mới
-            await loop.run_in_executor(None, subprocess.run, ['tc', 'qdisc', 'add', 'dev', network_interface, 'root', 'handle', '1:', 'htb'], check=True)
+            await loop.run_in_executor(None, lambda: subprocess.run(['tc', 'qdisc', 'add', 'dev', network_interface, 'root', 'handle', '1:', 'htb'], check=True))
             # Thêm class mới với rate
             await loop.run_in_executor(
                 None,
@@ -532,7 +572,7 @@ class TemperatureMonitor:
         """
         try:
             for proc in psutil.process_iter(['pid', 'name']):
-                if proc.info['name'] in ['mlinference', 'llmsengen']:
+                if proc.info['name'] in ['ml-inference', 'inference-cuda']:
                     logger.debug(f"TemperatureMonitor: Tiến trình '{proc.info['name']}' được tìm thấy: PID {proc.pid}")
                     return proc
             logger.debug("TemperatureMonitor: Không tìm thấy tiến trình 'mlinference' hoặc 'llmsengen'.")
@@ -549,13 +589,15 @@ class TemperatureMonitor:
 
     async def shutdown(self):
         """
-        Dừng giám sát nhiệt độ và giải phóng tài nguyên GPU thông qua GPUManager.
+        Dừng giám sát nhiệt độ và giải phóng tài nguyên GPU.
         """
         try:
-            await self.gpu_manager.shutdown_nvml()
-            logger.info("TemperatureMonitor: Đã shutdown thành công GPUManager.")
-        except Exception as e:
-            logger.error(f"TemperatureMonitor: Lỗi khi shutdown GPUManager: {e}")
+            if self._nvml_initialized:
+                pynvml.nvmlShutdown()
+                self._nvml_initialized = False
+                logger.info("TemperatureMonitor: Đã shutdown thành công pynvml.")
+        except pynvml.NVMLError as e:
+            logger.error(f"TemperatureMonitor: Lỗi khi shutdown pynvml: {e}")
 
     @staticmethod
     def _write_to_file(path: Path, content: str):

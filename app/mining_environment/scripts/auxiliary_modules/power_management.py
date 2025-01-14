@@ -5,6 +5,7 @@ import sys
 import psutil
 import subprocess
 import asyncio
+import pynvml
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -19,9 +20,6 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 # Import hàm setup_logging từ logging_config.py
 from logging_config import setup_logging
 
-# Import lớp GPUManager từ utils.py đã được cải tiến
-from utils import GPUManager
-
 # Thiết lập logging với logging_config.py
 logger = setup_logging('power_management', LOGS_DIR / 'power_management.log', 'INFO')
 
@@ -33,7 +31,7 @@ class PowerManager:
     PowerManager là một singleton class chịu trách nhiệm quản lý năng lượng
     cho CPU và GPU. Nó cung cấp các phương thức để giám sát công suất tiêu thụ
     và điều chỉnh công suất khi cần thiết. 
-    Trong phiên bản này, GPU được quản lý thông qua lớp GPUManager từ utils.py.
+    Trong phiên bản này, GPU được quản lý trực tiếp thông qua pynvml.
     """
     _instance = None
     _lock = asyncio.Lock()
@@ -43,9 +41,11 @@ class PowerManager:
             return
         self._initialized = True
 
-        # Khởi tạo GPUManager để quản lý GPU
-        self.gpu_manager = GPUManager()
-        self.gpu_count = 0  # Số lượng GPU, sẽ được cập nhật sau khi khởi tạo GPUManager
+        # Khởi tạo pynvml nếu chưa được khởi tạo
+        self._initialize_pynvml()
+
+        # Lấy số lượng GPU hiện có
+        self.gpu_count = self._get_gpu_count()
 
         # Tham số ước lượng CPU (tùy thuộc hệ thống)
         self.cpu_base_power_watts = 10.0   # Công suất cơ bản khi CPU idle (W)
@@ -63,33 +63,77 @@ class PowerManager:
                 await cls._instance.initialize()
             return cls._instance
 
+    def _initialize_pynvml(self):
+        """
+        Khởi tạo pynvml nếu chưa được khởi tạo.
+        """
+        try:
+            pynvml.nvmlInit()
+            logger.info("PowerManager: Đã khởi tạo pynvml thành công.")
+        except pynvml.NVMLError as e:
+            logger.error(f"PowerManager: Lỗi khi khởi tạo pynvml: {e}")
+            self.pynvml_initialized = False
+            return
+        self.pynvml_initialized = True
+
+    def _check_pynvml_initialized(self) -> bool:
+        """
+        Kiểm tra xem pynvml đã được khởi tạo chưa.
+        
+        Returns:
+            bool: True nếu đã khởi tạo, False ngược lại.
+        """
+        try:
+            state = pynvml.nvmlSystemGetDriverVersion()
+            logger.debug(f"PowerManager: pynvml đã được khởi tạo. Phiên bản driver: {state}")
+            return True
+        except pynvml.NVMLError_NotInitialized:
+            logger.warning("PowerManager: pynvml chưa được khởi tạo. Đang khởi tạo lại...")
+            try:
+                pynvml.nvmlInit()
+                logger.info("PowerManager: Đã khởi tạo pynvml thành công.")
+                return True
+            except pynvml.NVMLError as e:
+                logger.error(f"PowerManager: Lỗi khi khởi tạo pynvml: {e}")
+                return False
+
+    def _get_gpu_count(self) -> int:
+        """
+        Lấy số lượng GPU hiện có trên hệ thống.
+        
+        Returns:
+            int: Số lượng GPU.
+        """
+        if not self._check_pynvml_initialized():
+            return 0
+        try:
+            count = pynvml.nvmlDeviceGetCount()
+            logger.info(f"PowerManager: Tìm thấy {count} GPU trên hệ thống.")
+            return count
+        except pynvml.NVMLError as e:
+            logger.error(f"PowerManager: Lỗi khi lấy số lượng GPU: {e}")
+            return 0
+
     async def initialize(self):
         """
         Phương thức async để khởi tạo các thuộc tính bất đồng bộ nếu cần thiết.
-        Trong trường hợp này, khởi tạo GPUManager.
         """
-        # Khởi tạo GPUManager
-        gpu_init_success = await self.gpu_manager.initialize()
-        if gpu_init_success:
-            self.gpu_count = self.gpu_manager.gpu_count
-            logger.info(f"PowerManager: Đã khởi tạo GPUManager thành công với {self.gpu_count} GPU.")
-        else:
-            self.gpu_count = 0
-            logger.warning("PowerManager: GPUManager không được khởi tạo thành công.")
+        # Có thể thêm các khởi tạo khác nếu cần
+        pass
 
-    async def get_gpu_count(self) -> int:
+    async def get_gpu_count_async(self) -> int:
         """
-        Lấy số lượng GPU hiện có trên hệ thống thông qua GPUManager.
-
+        Async method để lấy số lượng GPU hiện có trên hệ thống.
+        
         Returns:
             int: Số lượng GPU.
         """
         return self.gpu_count
 
-    async def get_gpu_usage_percentages(self) -> List[float]:
+    async def get_gpu_utilization_percentages(self) -> List[float]:
         """
         Lấy danh sách phần trăm sử dụng của tất cả GPU trên hệ thống.
-
+        
         Returns:
             List[float]: Danh sách phần trăm sử dụng GPU cho từng GPU.
         """
@@ -97,28 +141,103 @@ class PowerManager:
             logger.warning("PowerManager: Không có GPU nào được phát hiện để giám sát công suất.")
             return []
         try:
-            # Sử dụng phương thức từ GPUManager để lấy utilization
             utilization = []
             for i in range(self.gpu_count):
-                util = await self.gpu_manager.get_gpu_utilization(i)
-                if util and 'gpu_util_percent' in util:
-                    utilization.append(util['gpu_util_percent'])
-                else:
-                    utilization.append(0.0)
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                utilization.append(util.gpu)  # Phần trăm sử dụng GPU
             logger.debug(f"PowerManager: Lấy utilization GPU: {utilization}")
             return utilization
-        except Exception as e:
+        except pynvml.NVMLError as e:
             logger.error(f"PowerManager: Lỗi khi lấy utilization GPU: {e}")
             return []
+
+    async def get_gpu_power_limits(self) -> List[float]:
+        """
+        Lấy danh sách giới hạn công suất của tất cả GPU trên hệ thống.
+        
+        Returns:
+            List[float]: Danh sách giới hạn công suất GPU (W) cho từng GPU.
+        """
+        if self.gpu_count == 0:
+            logger.warning("PowerManager: Không có GPU nào được phát hiện để giám sát công suất.")
+            return []
+        try:
+            power_limits = []
+            for i in range(self.gpu_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000.0  # chuyển từ mW sang W
+                power_limits.append(power_limit)
+            logger.debug(f"PowerManager: Lấy giới hạn công suất GPU: {power_limits}")
+            return power_limits
+        except pynvml.NVMLError as e:
+            logger.error(f"PowerManager: Lỗi khi lấy giới hạn công suất GPU: {e}")
+            return []
+
+    async def set_gpu_power_limit(self, gpu_index: int, power_limit_watts: float) -> bool:
+        """
+        Thiết lập giới hạn công suất cho GPU cụ thể.
+        
+        Args:
+            gpu_index (int): Chỉ số GPU (0-based).
+            power_limit_watts (float): Giới hạn công suất mới (W).
+        
+        Returns:
+            bool: True nếu thành công, False ngược lại.
+        """
+        if not self._check_pynvml_initialized():
+            logger.error("PowerManager: Không thể thiết lập giới hạn công suất vì pynvml chưa được khởi tạo.")
+            return False
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+            power_limit_mw = int(power_limit_watts * 1000)  # chuyển từ W sang mW
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit_mw)
+            logger.info(f"PowerManager: Đã thiết lập giới hạn công suất GPU {gpu_index} thành {power_limit_watts}W.")
+            return True
+        except pynvml.NVMLError as e:
+            logger.error(f"PowerManager: Lỗi khi thiết lập giới hạn công suất GPU {gpu_index}: {e}")
+            return False
+
+    async def calculate_desired_power_limit(self, gpu_index: int, usage_percentage: float) -> Optional[float]:
+        """
+        Tính toán giới hạn công suất mới dựa trên phần trăm sử dụng mong muốn.
+        
+        Args:
+            gpu_index (int): Chỉ số GPU (0-based).
+            usage_percentage (float): Phần trăm sử dụng mong muốn (0-100).
+        
+        Returns:
+            Optional[float]: Giới hạn công suất mới (W) nếu thành công, None ngược lại.
+        """
+        if not (0 <= usage_percentage <= 100):
+            logger.error(f"PowerManager: usage_percentage phải nằm trong khoảng [0, 100], nhận được: {usage_percentage}")
+            return None
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+            power_max = pynvml.nvmlDeviceGetPowerManagementLimitMax(handle) / 1000.0  # W
+            power_min = pynvml.nvmlDeviceGetPowerManagementLimitMin(handle) / 1000.0  # W
+
+            # Giới hạn mong muốn dựa trên usage_percentage
+            desired_power = power_min + (power_max - power_min) * (usage_percentage / 100.0)
+            desired_power = round(desired_power, 2)  # làm tròn đến 2 chữ số thập phân
+
+            # Đảm bảo giới hạn nằm trong khoảng [power_min, power_max]
+            desired_power = max(power_min, min(desired_power, power_max))
+
+            logger.debug(f"PowerManager: Tính toán giới hạn công suất mới cho GPU {gpu_index}: {desired_power}W dựa trên {usage_percentage}% sử dụng.")
+            return desired_power
+        except pynvml.NVMLError as e:
+            logger.error(f"PowerManager: Lỗi khi tính toán giới hạn công suất GPU {gpu_index}: {e}")
+            return None
 
     async def get_cpu_power(self, pid: Optional[int] = None) -> float:
         """
         Ước tính công suất tiêu thụ hiện tại của CPU dựa trên tải CPU.
         Tham số `pid` chỉ để tương thích, hiện chưa dùng.
-
+    
         Args:
             pid (Optional[int]): PID của tiến trình (không sử dụng).
-
+    
         Returns:
             float: Công suất CPU hiện tại (W).
         """
@@ -135,37 +254,22 @@ class PowerManager:
             logger.error(f"PowerManager: Lỗi khi ước tính công suất CPU: {e}")
             return 0.0
 
-    async def get_gpu_power(self, pid: Optional[int] = None) -> List[float]:
+    async def get_gpu_power_async(self, pid: Optional[int] = None) -> List[float]:
         """
-        Lấy công suất tiêu thụ hiện tại của từng GPU bằng GPUManager.
-
+        Lấy công suất tiêu thụ hiện tại của từng GPU bằng pynvml.
+    
         Args:
             pid (Optional[int]): PID của tiến trình (không sử dụng).
-
+    
         Returns:
             List[float]: Danh sách công suất GPU (W) cho từng GPU.
         """
-        if self.gpu_count == 0:
-            logger.warning("PowerManager: Không có GPU nào để giám sát công suất.")
-            return []
-        try:
-            gpu_powers = []
-            for i in range(self.gpu_count):
-                power = await self.gpu_manager.get_gpu_power_limit(i)
-                if power is not None:
-                    gpu_powers.append(power)
-                else:
-                    gpu_powers.append(0.0)
-            logger.debug(f"PowerManager: Lấy công suất GPU: {gpu_powers}")
-            return gpu_powers
-        except Exception as e:
-            logger.error(f"PowerManager: Lỗi khi lấy công suất GPU: {e}")
-            return []
+        return await self.get_gpu_power_limits()
 
     async def reduce_cpu_power(self, pid: Optional[int] = None, reduction_percentage: float = 20.0):
         """
         Giảm công suất CPU bằng cách giảm tần số CPU.
-
+    
         Args:
             pid (Optional[int]): PID của tiến trình (không sử dụng).
             reduction_percentage (float): Tỷ lệ giảm tần số CPU (%).
@@ -215,8 +319,8 @@ class PowerManager:
 
     async def reduce_gpu_power(self, pid: Optional[int] = None, reduction_percentage: float = 20.0):
         """
-        Giảm công suất GPU bằng cách giảm giới hạn công suất qua GPUManager.
-
+        Giảm công suất GPU bằng cách giảm giới hạn công suất thông qua pynvml.
+    
         Args:
             pid (Optional[int]): PID của tiến trình (không sử dụng).
             reduction_percentage (float): Tỷ lệ giảm công suất (%).
@@ -228,9 +332,9 @@ class PowerManager:
         try:
             for i in range(self.gpu_count):
                 # Tính toán power limit mới dựa trên reduction_percentage
-                desired_power = await self.gpu_manager.calculate_desired_power_limit(i, reduction_percentage)
+                desired_power = await self.calculate_desired_power_limit(i, reduction_percentage)
                 if desired_power is not None:
-                    success = await self.gpu_manager.set_gpu_power_limit(i, desired_power)
+                    success = await self.set_gpu_power_limit(i, desired_power)
                     if success:
                         logger.info(f"PowerManager: Đã giảm giới hạn công suất GPU {i} xuống {desired_power}W ({reduction_percentage}% giảm).")
                     else:
@@ -242,8 +346,8 @@ class PowerManager:
 
     async def set_gpu_usage(self, usage_percentages: List[float], pid: Optional[int] = None):
         """
-        Điều chỉnh mức sử dụng GPU bằng cách thiết lập giới hạn công suất thông qua GPUManager.
-
+        Điều chỉnh mức sử dụng GPU bằng cách thiết lập giới hạn công suất thông qua pynvml.
+    
         Args:
             usage_percentages (List[float]): % sử dụng cho từng GPU.
             pid (Optional[int]): PID của tiến trình (không sử dụng trong ví dụ này).
@@ -275,9 +379,9 @@ class PowerManager:
                     logger.error(f"PowerManager: Phần trăm sử dụng GPU {i} không hợp lệ: {usage}%. [0..100].")
                     continue
 
-                desired_power = await self.gpu_manager.calculate_desired_power_limit(i, usage)
+                desired_power = await self.calculate_desired_power_limit(i, usage)
                 if desired_power is not None:
-                    success = await self.gpu_manager.set_gpu_power_limit(i, desired_power)
+                    success = await self.set_gpu_power_limit(i, desired_power)
                     if success:
                         logger.info(f"PowerManager: Đã thiết lập giới hạn công suất GPU {i} thành {desired_power}W ({usage}%).")
                     else:
@@ -289,13 +393,22 @@ class PowerManager:
 
     async def shutdown(self):
         """
-        Dừng quản lý năng lượng và giải phóng tài nguyên GPU thông qua GPUManager.
+        Dừng quản lý năng lượng và giải phóng tài nguyên GPU thông qua pynvml.
         """
         try:
-            await self.gpu_manager.shutdown_nvml()
-            logger.info("PowerManager: Đã shutdown thành công GPUManager.")
+            if self._check_pynvml_initialized():
+                pynvml.nvmlShutdown()
+                logger.info("PowerManager: Đã shutdown thành công pynvml.")
+            else:
+                logger.warning("PowerManager: pynvml chưa được khởi tạo hoặc đã bị shutdown.")
+        except pynvml.NVMLError as e:
+            logger.error(f"PowerManager: Lỗi khi shutdown pynvml: {e}")
         except Exception as e:
-            logger.error(f"PowerManager: Lỗi khi shutdown GPUManager: {e}")
+            logger.error(f"PowerManager: Lỗi khi shutdown pynvml: {e}")
+
+###############################################################################
+#                          Singleton Instance                                #
+###############################################################################
 
 # Singleton instance của PowerManager sẽ được tạo thông qua async factory method
 _power_manager_instance: Optional[PowerManager] = None
@@ -304,7 +417,7 @@ _power_manager_lock = asyncio.Lock()
 async def get_power_manager() -> PowerManager:
     """
     Lấy singleton instance của PowerManager một cách bất đồng bộ.
-
+    
     Returns:
         PowerManager: Instance của PowerManager.
     """
@@ -320,10 +433,10 @@ async def get_power_manager() -> PowerManager:
 async def get_cpu_power(pid: Optional[int] = None) -> float:
     """
     Trả về công suất CPU hiện tại (W).
-
+    
     Args:
         pid (Optional[int]): PID của tiến trình (không sử dụng).
-
+    
     Returns:
         float: Công suất CPU hiện tại (W).
     """
@@ -333,20 +446,20 @@ async def get_cpu_power(pid: Optional[int] = None) -> float:
 async def get_gpu_power(pid: Optional[int] = None) -> List[float]:
     """
     Trả về danh sách công suất GPU (W) cho từng GPU.
-
+    
     Args:
         pid (Optional[int]): PID của tiến trình (không sử dụng).
-
+    
     Returns:
         List[float]: Danh sách công suất GPU (W) cho từng GPU.
     """
     power_manager = await get_power_manager()
-    return await power_manager.get_gpu_power(pid)
+    return await power_manager.get_gpu_power_async(pid)
 
 async def reduce_cpu_power(pid: Optional[int] = None, reduction_percentage: float = 20.0):
     """
     Giảm công suất CPU.
-
+    
     Args:
         pid (Optional[int]): PID của tiến trình (không sử dụng).
         reduction_percentage (float): Tỷ lệ giảm tần số CPU (%).
@@ -357,7 +470,7 @@ async def reduce_cpu_power(pid: Optional[int] = None, reduction_percentage: floa
 async def reduce_gpu_power(pid: Optional[int] = None, reduction_percentage: float = 20.0):
     """
     Giảm công suất GPU.
-
+    
     Args:
         pid (Optional[int]): PID của tiến trình (không sử dụng).
         reduction_percentage (float): Tỷ lệ giảm công suất (%).
@@ -368,7 +481,7 @@ async def reduce_gpu_power(pid: Optional[int] = None, reduction_percentage: floa
 async def set_gpu_usage(usage_percentages: List[float], pid: Optional[int] = None):
     """
     Thiết lập mức sử dụng GPU (giới hạn công suất).
-
+    
     Args:
         usage_percentages (List[float]): % sử dụng cho từng GPU.
         pid (Optional[int]): PID của tiến trình (không sử dụng trong ví dụ này).
