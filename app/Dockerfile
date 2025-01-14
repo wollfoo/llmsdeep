@@ -45,10 +45,10 @@ RUN set -eux; \
         pciutils openssl lm-sensors powerstat stress-ng bash \
         htop locales iptables powertop tzdata \
         pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg locales \
-        libuv1 libudev1 libssl3 cgroup-tools libcgroup1; \
+        libuv1 libudev1 libssl3 cgroup-tools libcgroup1 libcap2-bin nvidia-container-toolkit && \
     rm -rf /var/lib/apt/lists/*
     
-
+    
 # Thiết lập múi giờ và locale
 RUN set -eux; \
     ln -fs /usr/share/zoneinfo/UTC /etc/localtime; \  

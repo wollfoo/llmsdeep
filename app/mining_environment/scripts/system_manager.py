@@ -11,9 +11,12 @@ import aiofiles
 from .resource_manager import ResourceManager
 from .anomaly_detector import AnomalyDetector
 from .logging_config import setup_logging
+from .resource_control import ResourceControlFactory
+from .utils import GPUManager
+
 
 ###############################################################################
-#                        KHAI BÁO BIẾN VÀ LOGGER CƯ BẢN                       #
+#                        KHAI BÁO BIẾN VÀ LOGGER CƠ BẢN                       #
 ###############################################################################
 
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
@@ -26,15 +29,35 @@ anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.
 _system_manager_instance = None  # Singleton cho SystemManager
 
 ###############################################################################
-#                           LỚp CHÍNH: SystemManager                          #
+#                          HỖ TRỢ TẠO ResourceManager                        #
 ###############################################################################
+
+
+async def create_resource_manager(config, resource_logger):
+    gpu_manager = GPUManager()
+    await gpu_manager.initialize()  # Đảm bảo coroutine được await
+    resource_managers = await ResourceControlFactory.create_resource_managers(
+        logger=resource_logger,
+        gpu_manager=gpu_manager,
+    )
+    return ResourceManager(
+        config=config,
+        logger=resource_logger,
+        resource_managers=resource_managers,  # Không truyền gpu_manager nếu không cần
+    )
+
+
+###############################################################################
+#                          LỚp CHÍNH: SystemManager                          #
+###############################################################################
+
 
 class SystemManager:
     """
     Lớp quản lý chính cho hệ thống, bao gồm:
-      - Khởi tạo ResourceManager và AnomalyDetector
-      - Xử lý luồng khởi động (start) và dừng (stop)
-      - Quản lý vòng đời toàn bộ hệ thống
+      - Khởi tạo ResourceManager và AnomalyDetector.
+      - Xử lý luồng khởi động (start) và dừng (stop).
+      - Quản lý vòng đời toàn bộ hệ thống.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -56,13 +79,23 @@ class SystemManager:
         self.resource_logger = resource_logger
         self.anomaly_logger = anomaly_logger
 
-        # Khởi tạo ResourceManager (event-driven & async) 
-        self.resource_manager = ResourceManager(config, resource_logger)
-
-        # Khởi tạo AnomalyDetector (phát hiện bất thường) với DI
-        self.anomaly_detector = AnomalyDetector(config, anomaly_logger, self.resource_manager)
+        # Khởi tạo placeholder cho ResourceManager và AnomalyDetector
+        self.resource_manager = None
+        self.anomaly_detector = None
 
         self.system_logger.info("SystemManager đã được khởi tạo.")
+
+    async def initialize(self):
+        """
+        Khởi tạo các thành phần bất đồng bộ của SystemManager.
+        """
+        # Khởi tạo ResourceManager
+        self.resource_manager = await create_resource_manager(self.config, self.resource_logger)
+
+        # Khởi tạo AnomalyDetector (phát hiện bất thường) với DI
+        self.anomaly_detector = AnomalyDetector(self.config, self.anomaly_logger, self.resource_manager)
+
+        self.system_logger.info("SystemManager đã hoàn tất khởi tạo bất đồng bộ.")
 
     async def start(self):
         """
@@ -106,6 +139,7 @@ class SystemManager:
 #                        HÀM HỖ TRỢ TẢI CẤU HÌNH Từ JSON                      #
 ###############################################################################
 
+
 async def load_config(config_path: Path) -> Dict[str, Any]:
     """
     Tải cấu hình từ tệp JSON (bất đồng bộ).
@@ -144,6 +178,7 @@ async def load_config(config_path: Path) -> Dict[str, Any]:
 #               HÀM main() CHÍNH SỨ DỤNG asyncio.run() ĐỂ KHỞi TẠO           #
 ###############################################################################
 
+
 async def main():
     """
     Hàm chính bất đồng bộ.
@@ -154,6 +189,7 @@ async def main():
     config = await load_config(resource_config_path)
 
     _system_manager_instance = SystemManager(config)
+    await _system_manager_instance.initialize()  # Thêm bước khởi tạo bất đồng bộ
 
     try:
         await _system_manager_instance.start()
@@ -169,9 +205,11 @@ async def main():
     finally:
         await _system_manager_instance.stop()
 
+
 ###############################################################################
 #                     HÀM start() VÀ stop() DÙNG CHO ENTRYPOINT               #
 ###############################################################################
+
 
 def start():
     """
@@ -188,6 +226,7 @@ def start():
         system_logger.error(f"Lỗi trong quá trình chạy SystemManager: {e}")
         sys.exit(1)
 
+
 def stop():
     """
     Hàm dừng SystemManager nếu nó đã được khởi tạo.
@@ -198,6 +237,7 @@ def stop():
         system_logger.info("SystemManager đã dừng thành công.")
     else:
         system_logger.warning("SystemManager chưa được khởi tạo.")
+
 
 if __name__ == "__main__":
     start()

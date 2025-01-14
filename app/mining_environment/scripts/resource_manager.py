@@ -280,7 +280,10 @@ class ResourceManager(BaseManager, IResourceManager):
                 cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_managers: Dict[str, Any], gpu_manager: Optional[GPUManager] = None):
+        """
+        Khởi tạo ResourceManager với các thành phần tài nguyên và GPUManager.
+        """
         BaseManager.__init__(self, config, logger)
         if getattr(self, '_initialized', False):
             return
@@ -288,26 +291,17 @@ class ResourceManager(BaseManager, IResourceManager):
 
         self.config = config
         self.logger = logger
+        self.resource_managers = resource_managers
+        self.gpu_manager = gpu_manager  # Lưu GPUManager nếu được cung cấp
 
-        # Sự kiện để dừng ResourceManager
+        # Các thuộc tính khác
         self.stop_event = Event()
-
-        # Lock bảo vệ shared data
         self.resource_lock = aiorwlock.RWLock()
-
-        # Hàng đợi chính để nhận các event điều chỉnh tài nguyên
         self.resource_adjustment_queue = AsyncQueue()
-
-        # Set lưu task đã xử lý (tránh trùng lặp)
         self.processed_tasks = set()
-
-        # Danh sách các tiến trình khai thác
         self.mining_processes = []
         self.mining_processes_lock = aiorwlock.RWLock()
         self._counter = count()
-
-
-        # Bổ sung: Danh sách watchers
         self.watchers = []
 
 
@@ -751,39 +745,40 @@ class ResourceManager(BaseManager, IResourceManager):
 
     async def start(self):
         """
-        Coroutine để khởi động ResourceManager, bao gồm khởi tạo GPUManager và các watchers.
+        Coroutine để khởi động ResourceManager.
         """
         self.logger.info("Bắt đầu khởi động ResourceManager...")
 
         try:
-            # 1. Khởi tạo và gọi initialize cho GPUManager
+            # Khởi tạo GPUManager
             self.gpu_manager = GPUManager()
             initialized = await self.gpu_manager.initialize()
             if not initialized:
                 self.logger.warning("GPUManager không được khởi tạo - vô hiệu hoá tính năng GPU.")
 
-            # 2. Khởi tạo SharedResourceManager sau khi GPUManager đã được khởi tạo
+            # Tạo các resource managers
             resource_managers = await ResourceControlFactory.create_resource_managers(
                 logger=self.logger,
-                gpu_manager=self.gpu_manager
+                gpu_manager=self.gpu_manager,
             )
             self.shared_resource_manager = SharedResourceManager(
                 self.config,
                 self.logger,
-                resource_managers=resource_managers
+                gpu_manager=self.gpu_manager,
+                resource_managers=resource_managers,
             )
 
-            # 3. Khởi tạo Azure Clients
+            # Khởi tạo các Azure clients
             self.initialize_azure_clients()
 
-            # 4. Khám phá các tài nguyên Azure
+            # Khám phá tài nguyên Azure
             await self.discover_azure_resources()
 
-            # 5. Khởi chạy các watcher
+            # Bắt đầu các watchers
             await self.start_watchers()
 
             self.logger.info("ResourceManager đã khởi động thành công.")
         except Exception as e:
             self.logger.error(f"Lỗi khi khởi động ResourceManager: {e}\n{traceback.format_exc()}")
-            await self.shutdown()  # Dừng nếu có lỗi khi start
+            await self.shutdown()
             raise
