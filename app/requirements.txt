@@ -15,6 +15,7 @@ torch
 torchvision
 torchaudio
 aiofiles
+aiorwlock
 pynvml==11.4.1
 readerwriterlock
 ratelimiter

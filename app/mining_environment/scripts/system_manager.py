@@ -13,7 +13,7 @@ from .anomaly_detector import AnomalyDetector
 from .logging_config import setup_logging
 
 ###############################################################################
-#                        KHAI BÁO BIẾN VÀ LOGGER CƠ BẢN                       #
+#                        KHAI BÁO BIẾN VÀ LOGGER CƯ BẢN                       #
 ###############################################################################
 
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
@@ -26,7 +26,7 @@ anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.
 _system_manager_instance = None  # Singleton cho SystemManager
 
 ###############################################################################
-#                           LỚP CHÍNH: SystemManager                          #
+#                           LỚp CHÍNH: SystemManager                          #
 ###############################################################################
 
 class SystemManager:
@@ -36,7 +36,17 @@ class SystemManager:
       - Xử lý luồng khởi động (start) và dừng (stop)
       - Quản lý vòng đời toàn bộ hệ thống
     """
+
     def __init__(self, config: Dict[str, Any]):
+        """
+        Khởi tạo SystemManager.
+
+        Args:
+            config (Dict[str, Any]): Cấu hình hệ thống.
+
+        Raises:
+            ValueError: Nếu cấu hình không phải là kiểu dict.
+        """
         if not isinstance(config, dict):
             raise ValueError("Cấu hình phải là kiểu dict.")
         self.config = config
@@ -49,7 +59,7 @@ class SystemManager:
         # Khởi tạo ResourceManager (event-driven & async) 
         self.resource_manager = ResourceManager(config, resource_logger)
 
-        # Khởi tạo AnomalyDetector (để phát hiện bất thường) với DI
+        # Khởi tạo AnomalyDetector (phát hiện bất thường) với DI
         self.anomaly_detector = AnomalyDetector(config, anomaly_logger, self.resource_manager)
 
         self.system_logger.info("SystemManager đã được khởi tạo.")
@@ -57,9 +67,6 @@ class SystemManager:
     async def start(self):
         """
         Bắt đầu chạy các thành phần của hệ thống theo kiểu async.
-        Tối ưu để tích hợp với kiến trúc event-driven:
-          1) Gọi resource_manager.start() để khởi tạo ResourceManager (bao gồm GPUManager, Azure Clients, và watchers).
-          2) Gọi anomaly_detector.start() nếu cần giám sát bất thường bổ sung.
         """
         self.system_logger.info("Đang khởi động SystemManager...")
 
@@ -79,9 +86,7 @@ class SystemManager:
 
     async def stop(self):
         """
-        Dừng các thành phần của hệ thống theo thứ tự an toàn:
-          1) Dừng AnomalyDetector
-          2) Dừng ResourceManager (shutdown watchers và restore tài nguyên)
+        Dừng các thành phần của hệ thống theo thứ tự an toàn.
         """
         self.system_logger.info("Đang dừng SystemManager...")
         try:
@@ -89,7 +94,7 @@ class SystemManager:
             if hasattr(self.anomaly_detector, 'stop') and callable(self.anomaly_detector.stop):
                 await self.anomaly_detector.stop()
 
-            # 2. Dừng ResourceManager (gọi hàm shutdown() để tắt watchers)
+            # 2. Dừng ResourceManager
             await self.resource_manager.shutdown()
 
             self.system_logger.info("SystemManager đã dừng thành công.")
@@ -98,12 +103,21 @@ class SystemManager:
             raise
 
 ###############################################################################
-#                        HÀM HỖ TRỢ TẢI CẤU HÌNH TỪ JSON                      #
+#                        HÀM HỖ TRỢ TẢI CẤU HÌNH Từ JSON                      #
 ###############################################################################
 
 async def load_config(config_path: Path) -> Dict[str, Any]:
     """
     Tải cấu hình từ tệp JSON (bất đồng bộ).
+
+    Args:
+        config_path (Path): Đường dẫn đến tệp JSON cấu hình.
+
+    Returns:
+        Dict[str, Any]: Dữ liệu cấu hình đã tải.
+
+    Raises:
+        SystemExit: Nếu có lỗi khi tải cấu hình.
     """
     try:
         async with aiofiles.open(config_path, 'r') as f:
@@ -111,7 +125,6 @@ async def load_config(config_path: Path) -> Dict[str, Any]:
             config = json.loads(content)
         system_logger.info(f"Đã tải cấu hình từ {config_path}")
 
-        # Xác minh cấu hình phải là dict
         if not isinstance(config, dict):
             system_logger.error("Cấu hình không phải kiểu dict.")
             sys.exit(1)
@@ -128,40 +141,32 @@ async def load_config(config_path: Path) -> Dict[str, Any]:
         sys.exit(1)
 
 ###############################################################################
-#               HÀM main() CHÍNH SỬ DỤNG asyncio.run() ĐỂ KHỞI TẠO           #
+#               HÀM main() CHÍNH SỨ DỤNG asyncio.run() ĐỂ KHỞi TẠO           #
 ###############################################################################
 
 async def main():
     """
-    Hàm chính bất đồng bộ:
-      - Tải config
-      - Khởi tạo và start SystemManager
-      - Duy trì vòng lặp cho đến khi nhận tín hiệu dừng
+    Hàm chính bất đồng bộ.
     """
     global _system_manager_instance
 
-    # 1) Tải config
     resource_config_path = CONFIG_DIR / "resource_config.json"
     config = await load_config(resource_config_path)
 
-    # 2) Khởi tạo SystemManager
     _system_manager_instance = SystemManager(config)
 
-    # 3) Bắt đầu chạy SystemManager
     try:
         await _system_manager_instance.start()
         system_logger.info("SystemManager đang chạy. Nhấn Ctrl+C để dừng.")
 
-        # Vòng lặp duy trì vô hạn, chờ tín hiệu
         while True:
-            await asyncio.sleep(3600)  # Ngủ 1h, sau đó lặp
+            await asyncio.sleep(3600)
 
     except asyncio.CancelledError:
         system_logger.info("Coroutine chính đã bị hủy.")
     except KeyboardInterrupt:
         system_logger.info("Nhận tín hiệu dừng từ người dùng.")
     finally:
-        # Dừng SystemManager khi thoát vòng lặp
         await _system_manager_instance.stop()
 
 ###############################################################################
@@ -171,7 +176,6 @@ async def main():
 def start():
     """
     Hàm entrypoint để chạy SystemManager dưới dạng script.
-    Đảm bảo chạy với quyền root, sau đó gọi asyncio.run(main()).
     """
     if os.geteuid() != 0:
         print("Script phải được chạy với quyền root.")
