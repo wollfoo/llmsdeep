@@ -47,46 +47,29 @@ def async_retry(exception_to_check: Any, tries: int = 4, delay: float = 3.0, bac
 
 class GPUManager:
     """
-    Lớp quản lý GPU, hỗ trợ NVML để lấy và điều chỉnh trạng thái GPU:
-      - Không còn chạy vòng lặp polling bên trong,
-      - Thay vào đó, module chỉ kích hoạt khi có 'event' từ resource_manager, etc.
+    Lớp quản lý GPU, hỗ trợ NVML để lấy và điều chỉnh trạng thái GPU.
     Singleton để chia sẻ GPU info.
     """
     _instance = None
-    _lock = Lock()
+    _lock = asyncio.Lock()
 
     def __new__(cls):
-        """
-        Triển khai Singleton với lock async. 
-        Trong môi trường event-driven, ta vẫn đảm bảo chỉ tạo 1 instance duy nhất.
-        """
-        async def create_instance():
-            async with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super(GPUManager, cls).__new__(cls)
-                    cls._instance._initialized = False
-            return cls._instance
-
-        return super(GPUManager, cls).__new__(cls)
+        if cls._instance is None:
+            cls._instance = super(GPUManager, cls).__new__(cls)
+        return cls._instance
 
     def __init__(self):
-        # Nếu đã khởi tạo trước, bỏ qua
-        if getattr(self, '_initialized', False):
+        if hasattr(self, '_initialized') and self._initialized:
             return
         self._initialized = True
-
         self.gpu_initialized = False
         self.logger = logging.getLogger(__name__)
-        self.gpu_count = 0  # Số lượng GPU
-        # Không gọi initialize trực tiếp ở đây => ta để event bên ngoài gọi async self.initialize()
-
-    ###########################################################################
-    #             HÀM KHỞI TẠO / SHUTDOWN NVML (CALL BY EXTERNAL EVENT)       #
-    ###########################################################################
+        self.gpu_count = 0
+        # Không gọi initialize trực tiếp ở đây => gọi từ bên ngoài
 
     async def initialize(self) -> bool:
         """
-        Khởi tạo NVML (call khi event “init GPU”). 
+        Khởi tạo NVML (call khi event “init GPU”).
         Trả về True nếu thành công, ngược lại False.
         """
         try:

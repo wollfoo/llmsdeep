@@ -3,13 +3,12 @@
 import psutil
 import logging
 import traceback
-import pynvml
 import asyncio
 from asyncio import Event
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Union
 from threading import Lock
 from .base_manager import BaseManager
-from .utils import MiningProcess, GPUManager
+from .utils import MiningProcess
 from .auxiliary_modules.power_management import get_cpu_power, get_gpu_power
 from .auxiliary_modules.temperature_monitor import get_cpu_temperature, get_gpu_temperature
 
@@ -74,7 +73,7 @@ class SafeRestoreEvaluator:
 
         # 3) Kiểm tra nhiệt độ GPU
         try:
-            if self.resource_manager.is_gpu_initialized():
+            if await self.resource_manager.is_gpu_initialized():
                 gpu_temps = await asyncio.get_event_loop().run_in_executor(None, get_gpu_temperature, process.pid)
                 if gpu_temps and any(temp >= self.gpu_max_temp for temp in gpu_temps):
                     self.logger.info(f"Nhiệt độ GPU {gpu_temps}°C vẫn cao (PID={process.pid}).")
@@ -95,7 +94,7 @@ class SafeRestoreEvaluator:
 
         # 5) Kiểm tra công suất GPU
         try:
-            if self.resource_manager.is_gpu_initialized():
+            if await self.resource_manager.is_gpu_initialized():
                 gpu_power = await asyncio.get_event_loop().run_in_executor(None, get_gpu_power, process.pid)
                 # Nếu gpu_power là list => check tổng
                 if isinstance(gpu_power, list):
@@ -189,15 +188,15 @@ class AnomalyDetector(BaseManager):
     _instance = None
     _instance_lock = Lock()
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, config: Dict[str, Any], logger: logging.Logger, resource_manager: IResourceManager):
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = super(AnomalyDetector, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_manager: IResourceManager):
         BaseManager.__init__(self, config, logger)
-        if hasattr(self, '_initialized') and self._initialized:
+        if getattr(self, '_initialized', False):
             return
         self._initialized = True
 
@@ -210,36 +209,23 @@ class AnomalyDetector(BaseManager):
         self.mining_processes: List[MiningProcess] = []
         self.mining_processes_lock = asyncio.Lock()
 
-        self.gpu_manager = GPUManager()
-        self.gpu_initialized = self.gpu_manager.gpu_initialized
-        if self.gpu_initialized:
-            self.logger.info("GPUManager đã được khởi tạo thành công.")
-        else:
-            self.logger.warning("GPUManager không được khởi tạo - vô hiệu hoá tính năng GPU.")
-
-        self.resource_manager: Optional[IResourceManager] = None
-        self.safe_restore_evaluator: Optional[SafeRestoreEvaluator] = None
-
-        # Chứa các task chạy ngầm
-        self.task_futures = []
-
-    def set_resource_manager(self, resource_manager: IResourceManager):
-        """
-        Thiết lập ResourceManager cho AnomalyDetector.
-        Tạo SafeRestoreEvaluator và khởi chạy các coroutine chính.
-        """
-        self.resource_manager = resource_manager
-        self.logger.info("ResourceManager đã được gán cho AnomalyDetector.")
-
+        # Được truyền qua constructor
+        self.resource_manager: IResourceManager = resource_manager
         self.safe_restore_evaluator = SafeRestoreEvaluator(
             self.config,
             self.logger,
             self.resource_manager
         )
 
+        # Chứa các task chạy ngầm
+        self.task_futures = []
+
+        # Khởi chạy các coroutine chính
         loop = asyncio.get_event_loop()
         self.task_futures.append(loop.create_task(self.anomaly_detection()))
         self.task_futures.append(loop.create_task(self.monitor_restoration()))
+
+        self.logger.info("AnomalyDetector đã được khởi tạo với ResourceManager.")
 
     async def start(self):
         """
@@ -304,7 +290,7 @@ class AnomalyDetector(BaseManager):
         để tránh spam.
         """
         detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 3600)
-        cloak_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
+        cloak_activation_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
 
         while not self.stop_event.is_set():
             try:
@@ -320,7 +306,7 @@ class AnomalyDetector(BaseManager):
 
                     tasks = []
                     for process in processes:
-                        tasks.append(self.evaluate_process_anomaly(process, cloak_delay))
+                        tasks.append(self.evaluate_process_anomaly(process, cloak_activation_delay))
                     await asyncio.gather(*tasks)
 
             except Exception as e:
@@ -381,7 +367,7 @@ class AnomalyDetector(BaseManager):
     ##########################################################################
     #                 GIÁM SÁT ĐIỀU KIỆN VÀ KHÔI PHỤC TÀI NGUYÊN            #
     ##########################################################################
-    
+
     async def monitor_restoration(self):
         """
         Coroutine để xử lý phục hồi tài nguyên cho các tiến trình đã cloaked.

@@ -4,7 +4,6 @@ import os
 import sys
 import json
 import asyncio
-import pynvml
 from pathlib import Path
 from typing import Dict, Any
 import aiofiles
@@ -12,7 +11,6 @@ import aiofiles
 from .resource_manager import ResourceManager
 from .anomaly_detector import AnomalyDetector
 from .logging_config import setup_logging
-from .utils import GPUManager
 
 ###############################################################################
 #                        KHAI BÁO BIẾN VÀ LOGGER CƠ BẢN                       #
@@ -48,22 +46,11 @@ class SystemManager:
         self.resource_logger = resource_logger
         self.anomaly_logger = anomaly_logger
 
-        # Kiểm tra GPU
-        self.gpu_manager = GPUManager()
-        if self.gpu_manager.gpu_initialized:
-            self.system_logger.info(f"Đã phát hiện {self.gpu_manager.gpu_count} GPU.")
-        else:
-            self.system_logger.warning("Không phát hiện GPU hoặc NVML không thể khởi tạo.")
-
         # Khởi tạo ResourceManager (event-driven & async) 
         self.resource_manager = ResourceManager(config, resource_logger)
 
-        # Khởi tạo AnomalyDetector (để phát hiện bất thường)
-        self.anomaly_detector = AnomalyDetector(config, anomaly_logger)
-
-        # Thiết lập ResourceManager cho AnomalyDetector
-        # => Giúp AnomalyDetector enqueue cloaking/restoration
-        self.anomaly_detector.set_resource_manager(self.resource_manager)
+        # Khởi tạo AnomalyDetector (để phát hiện bất thường) với DI
+        self.anomaly_detector = AnomalyDetector(config, anomaly_logger, self.resource_manager)
 
         self.system_logger.info("SystemManager đã được khởi tạo.")
 
@@ -71,17 +58,16 @@ class SystemManager:
         """
         Bắt đầu chạy các thành phần của hệ thống theo kiểu async.
         Tối ưu để tích hợp với kiến trúc event-driven:
-          1) Gọi resource_manager.start_watchers() để kích hoạt các watcher 
-             (nhiệt độ, công suất, ...) và tiêu thụ sự kiện cloaking/restoration.
+          1) Gọi resource_manager.start() để khởi tạo ResourceManager (bao gồm GPUManager, Azure Clients, và watchers).
           2) Gọi anomaly_detector.start() nếu cần giám sát bất thường bổ sung.
         """
         self.system_logger.info("Đang khởi động SystemManager...")
 
         try:
-            # 1) Khởi chạy các watcher trong ResourceManager (event-driven)
-            await self.resource_manager.start_watchers()
+            # 1. Khởi động ResourceManager
+            await self.resource_manager.start()
 
-            # 2) Khởi chạy AnomalyDetector (nếu có hàm start)
+            # 2. Khởi chạy AnomalyDetector (nếu có hàm start)
             if hasattr(self.anomaly_detector, 'start') and callable(self.anomaly_detector.start):
                 await self.anomaly_detector.start()
 
@@ -99,10 +85,11 @@ class SystemManager:
         """
         self.system_logger.info("Đang dừng SystemManager...")
         try:
-            # 1) Dừng AnomalyDetector
-            await self.anomaly_detector.stop()
+            # 1. Dừng AnomalyDetector
+            if hasattr(self.anomaly_detector, 'stop') and callable(self.anomaly_detector.stop):
+                await self.anomaly_detector.stop()
 
-            # 2) Dừng ResourceManager (gọi hàm shutdown() để tắt watchers)
+            # 2. Dừng ResourceManager (gọi hàm shutdown() để tắt watchers)
             await self.resource_manager.shutdown()
 
             self.system_logger.info("SystemManager đã dừng thành công.")

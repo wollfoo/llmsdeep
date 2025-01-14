@@ -122,9 +122,9 @@ class AzureBaseClient:
             self.logger.error(f"Lỗi khi xác thực với Azure AD: {e}")
             raise e
 
-    async def discover_resources(self, resource_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    def discover_resources(self, resource_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Khám phá resource thông qua Resource Graph.  
+        Khám phá resource thông qua Resource Graph.
         *Event-driven*: Gọi khi “cần xem resource” (VD: do `resource_manager.py` trigger).
         """
         try:
@@ -138,8 +138,8 @@ class AzureBaseClient:
                 query=query
             )
 
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self.resource_graph_client.resources, request)
+            # Gọi trực tiếp mà không sử dụng asyncio
+            response = self.resource_graph_client.resources(request)
 
             if not isinstance(response.data, list):
                 self.logger.warning("Dữ liệu trả về không phải là list.")

