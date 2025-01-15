@@ -62,45 +62,51 @@ class AnomalyDetector:
     _instance_lock = asyncio.Lock()
 
     def __new__(cls, config: ConfigModel, event_bus: EventBus, logger: logging.Logger, resource_manager: IResourceManager):
-        if not hasattr(cls, '_instance'):
+        if not hasattr(cls, '_instance') or cls._instance is None:
             cls._instance = super(AnomalyDetector, cls).__new__(cls)
         return cls._instance
 
     def __init__(self, config: ConfigModel, event_bus: EventBus, logger: logging.Logger, resource_manager: IResourceManager):
-        if hasattr(self, '_initialized') and self._initialized:
+        if getattr(self, '_initialized', False):
             return
-        self._initialized = True
 
+        self._initialized = True
         self.config = config
         self.event_bus = event_bus
         self.logger = logger
         self.resource_manager = resource_manager
 
         self.stop_event = asyncio.Event()
-        self.mining_processes: List[MiningProcess] = []
+        self.mining_processes = []
         self.mining_processes_lock = asyncio.Lock()
-
-        # Lớp hỗ trợ đánh giá khi nào an toàn để khôi phục
         self.safe_restore_evaluator = SafeRestoreEvaluator(config, logger, resource_manager)
 
-        # Danh sách các task chạy ngầm
         self.task_futures = []
+        self.logger.info("AnomalyDetector đã được khởi tạo thành công.")
+
+    async def start(self):
+        """
+        Khởi động AnomalyDetector.
+        """
+        self.logger.info("Đang khởi động AnomalyDetector...")
+
+        # Kiểm tra trạng thái ResourceManager
+        if not self.resource_manager:
+            raise RuntimeError("ResourceManager chưa được thiết lập.")
+
+        # Đảm bảo NVML đã khởi tạo
+        if not is_nvml_initialized():
+            initialize_nvml()
+            self.logger.info("NVML đã được khởi tạo.")
+
+        # Khởi động các coroutine cần thiết
         loop = asyncio.get_event_loop()
         self.task_futures.append(loop.create_task(self.anomaly_detection()))
         self.task_futures.append(loop.create_task(self.monitor_restoration()))
 
-        self.logger.info("AnomalyDetector đã được khởi tạo với ResourceManager.")
-
-        # Đăng ký lắng nghe sự kiện từ EventBus nếu cần thiết
-        # self.event_bus.subscribe('some_event', self.handle_some_event)
-
-    async def start(self):
-        """
-        Khởi động AnomalyDetector. Gọi discover_mining_processes_async() ban đầu.
-        """
-        self.logger.info("Đang khởi động AnomalyDetector...")
+        # Phát hiện tiến trình khai thác ban đầu
         await self.discover_mining_processes_async()
-        self.logger.info("AnomalyDetector khởi động thành công.")
+        self.logger.info("AnomalyDetector đã khởi động thành công.")
 
     async def discover_mining_processes_async(self):
         """
@@ -140,31 +146,26 @@ class AnomalyDetector:
 
     async def anomaly_detection(self):
         """
-        Coroutine chính để phát hiện bất thường cho các tiến trình.
+        Coroutine chính để phát hiện bất thường.
         """
         detection_interval = self.config.monitoring_parameters.get("detection_interval_seconds", 3600)
-        cloak_delay = self.config.monitoring_parameters.get("cloak_activation_delay_seconds", 5)
 
         while not self.stop_event.is_set():
             try:
                 await self.discover_mining_processes_async()
-
-                if not self.resource_manager:
-                    self.logger.error("ResourceManager chưa được thiết lập.")
-                else:
-                    async with self.mining_processes_lock:
-                        processes = list(self.mining_processes)
-
+                async with self.mining_processes_lock:
                     tasks = [
-                        self.evaluate_process_anomaly(proc, cloak_delay)
-                        for proc in processes
+                        self.evaluate_process_anomaly(proc, cloak_delay=5)
+                        for proc in self.mining_processes
                     ]
-                    await asyncio.gather(*tasks)
+                await asyncio.gather(*tasks)
 
+            except asyncio.CancelledError:
+                self.logger.info("Anomaly detection coroutine bị hủy.")
+                break
             except Exception as e:
-                self.logger.error(f"Lỗi anomaly_detection: {e}\n{traceback.format_exc()}")
+                self.logger.error(f"Lỗi trong anomaly_detection: {e}\n{traceback.format_exc()}")
 
-            # Nghỉ cho đến lần quét tiếp theo
             await asyncio.sleep(detection_interval)
 
     async def evaluate_process_anomaly(self, process: MiningProcess, cloak_delay: int):
@@ -236,12 +237,16 @@ class AnomalyDetector:
             await asyncio.sleep(interval)
 
     async def stop(self):
-        """Dừng AnomalyDetector, hủy các task ngầm."""
+        """
+        Dừng AnomalyDetector.
+        """
         self.logger.info("Đang dừng AnomalyDetector...")
         self.stop_event.set()
 
-        for t in self.task_futures:
-            t.cancel()
+        for task in self.task_futures:
+            task.cancel()
+
+        # Thu thập kết quả của các coroutine đã bị hủy
         await asyncio.gather(*self.task_futures, return_exceptions=True)
 
         self.logger.info("AnomalyDetector đã dừng thành công.")

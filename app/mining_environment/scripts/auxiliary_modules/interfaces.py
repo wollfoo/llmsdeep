@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
-from .app.mining_environment.scripts.utils import MiningProcess
+from mining_environment.scripts.utils import MiningProcess
 
 class IResourceManager(ABC):
     @abstractmethod

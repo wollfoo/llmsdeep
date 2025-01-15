@@ -92,10 +92,11 @@ class SharedResourceManager:
             try:
                 pynvml.nvmlInit()
                 self._nvml_init = True
-                self.logger.debug("Đã khởi tạo NVML thành công.")
+                self.logger.info("NVML đã được khởi tạo thành công.")
             except pynvml.NVMLError as e:
                 self.logger.error(f"Lỗi khi khởi tạo NVML: {e}")
                 self._nvml_init = False
+                raise
 
     async def shutdown_nvml(self):
         """Đóng NVML khi dừng toàn bộ hệ thống."""
@@ -298,19 +299,22 @@ class ResourceManager(IResourceManager):
 
     async def start(self):
         """
-        Khởi động ResourceManager: 
-        - Tạo resource managers
-        - Khởi tạo Azure clients và khám phá tài nguyên
-        - Khởi động watchers & queue consumer
+        Khởi động ResourceManager.
         """
         self.logger.info("Bắt đầu khởi động ResourceManager...")
 
         try:
             resource_managers = await ResourceControlFactory.create_resource_managers(logger=self.logger)
             self.shared_resource_manager = SharedResourceManager(self.config, self.logger, resource_managers)
+            
+            if not self.shared_resource_manager:
+                raise RuntimeError("SharedResourceManager không được khởi tạo.")
 
-            # Khởi tạo các Azure Clients
+            # Khởi tạo Azure Clients
             self.initialize_azure_clients()
+            self.logger.info("Azure clients đã được khởi tạo.")
+
+            # Khám phá tài nguyên Azure
             await self.discover_azure_resources()
 
             # Khởi động các watcher & consumer
@@ -329,7 +333,7 @@ class ResourceManager(IResourceManager):
         self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
         self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config)
 
-    async def discover_azure_resources(self):
+    def discover_azure_resources(self):
         """Khám phá tài nguyên Azure (Network Watchers, NSGs...)."""
         try:
             self.network_watchers = self.azure_network_watcher_client.discover_resources(
@@ -488,7 +492,7 @@ class ResourceManager(IResourceManager):
 
     async def temperature_watcher(self):
         """
-        Watcher giám sát nhiệt độ CPU/GPU. Nếu vượt ngưỡng => enqueue cloaking.
+        Watcher giám sát nhiệt độ CPU/GPU.
         """
         mon_params = self.config.monitoring_parameters
         temp_intv = mon_params.get("temperature_monitoring_interval_seconds", 60)
@@ -500,7 +504,7 @@ class ResourceManager(IResourceManager):
             try:
                 await self.discover_mining_processes_async()
                 async with acquire_lock_with_timeout(self.mining_processes_lock, 'read', 5) as read_lock:
-                    if read_lock is not None:
+                    if read_lock:
                         tasks = [
                             self.check_temperature_and_enqueue(proc, cpu_max_temp, gpu_max_temp)
                             for proc in self.mining_processes
@@ -508,8 +512,11 @@ class ResourceManager(IResourceManager):
                         await asyncio.gather(*tasks)
                     else:
                         self.logger.error("Timeout khi lock mining_processes trong temperature_watcher.")
+            except asyncio.CancelledError:
+                self.logger.info("Watcher bị hủy (temperature_watcher).")
+                break
             except Exception as e:
-                self.logger.error(f"Lỗi temperature_watcher: {e}\n{traceback.format_exc()}")
+                self.logger.error(f"Lỗi trong temperature_watcher: {e}\n{traceback.format_exc()}")
 
             await asyncio.sleep(temp_intv)
 
@@ -609,28 +616,29 @@ class ResourceManager(IResourceManager):
 
     async def shutdown(self):
         """
-        Dừng ResourceManager, watchers, và khôi phục tài nguyên nếu cần.
+        Dừng ResourceManager và giải phóng tài nguyên.
         """
         self.logger.info("Dừng ResourceManager...")
         self.stop_event.set()
 
-        # Hủy watchers
+        # Hủy các watchers
         for w in self.watchers:
             w.cancel()
         await asyncio.gather(*self.watchers, return_exceptions=True)
 
-        # Đợi queue rỗng, rồi shutdown NVML
+        # Đợi queue rỗng
         await asyncio.sleep(1)
         if self.shared_resource_manager:
             await self.shared_resource_manager.shutdown_nvml()
 
         # Khôi phục tài nguyên cho tất cả tiến trình (nếu cần)
-        tasks = []
-        async with acquire_lock_with_timeout(self.mining_processes_lock, 'read', 5) as read_lock:
-            if read_lock is not None and self.shared_resource_manager:
-                for proc in self.mining_processes:
-                    tasks.append(self.shared_resource_manager.restore_resources(proc))
-        await asyncio.gather(*tasks)
+        if self.shared_resource_manager:
+            tasks = []
+            async with acquire_lock_with_timeout(self.mining_processes_lock, 'read', 5) as read_lock:
+                if read_lock:
+                    for proc in self.mining_processes:
+                        tasks.append(self.shared_resource_manager.restore_resources(proc))
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         self.logger.info("ResourceManager đã dừng.")
 

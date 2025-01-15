@@ -96,7 +96,7 @@ class ObfuscatedEncryptedFileHandler(logging.Handler):
 #                           FUNCTION: setup_logging                         #
 ###############################################################################
 
-def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO') -> Logger:
+def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO', **kwargs) -> Logger:
     """
     Thiết lập logger cho module, hỗ trợ mã hóa log bằng ObfuscatedEncryptedFileHandler
     và thêm Correlation ID vào mỗi bản ghi log.

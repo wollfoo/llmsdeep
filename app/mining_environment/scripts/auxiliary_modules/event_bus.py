@@ -29,9 +29,15 @@ class EventBus:
 
     async def start_listening(self):
         """
-        Bắt đầu lắng nghe và xử lý các sự kiện từ queue.
+        Lắng nghe các sự kiện từ queue.
         """
-        while True:
-            event_type, data = await self.queue.get()
-            await self.publish(event_type, data)
-            self.queue.task_done()
+        try:
+            while True:
+                event_type, data = await self.queue.get()
+                await self.publish(event_type, data)
+                self.queue.task_done()
+        except asyncio.CancelledError:
+            # Log và thoát khỏi vòng lặp khi bị hủy
+            print("EventBus đã dừng lắng nghe.")
+        except Exception as e:
+            print(f"Lỗi trong EventBus: {e}")

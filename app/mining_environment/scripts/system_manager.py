@@ -31,11 +31,9 @@ from .auxiliary_modules.models import ConfigModel
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
 
-system_logger = setup_logging(
-    logger_name='system_manager',
-    log_file=str(LOGS_DIR / 'system_manager.log'),
-    level='INFO'
-)
+
+system_logger = setup_logging('system_manager', LOGS_DIR / 'system_manager.log', 'INFO')
+
 
 ###############################################################################
 #                      HÀM HỖ TRỢ TẢI CẤU HÌNH TỪ TỆP JSON                    #
@@ -115,34 +113,47 @@ class SystemManager:
     async def start_async(self):
         """
         Bắt đầu chạy hệ thống:
-          - Bắt đầu EventBus.
-          - Bắt đầu các module thông qua Facade.
         """
         self.logger.info("Đang khởi động SystemManager...")
 
-        # Bắt đầu lắng nghe EventBus
-        asyncio.create_task(self.event_bus.start_listening())
+        try:
+            # Kiểm tra trạng thái Facade trước khi bắt đầu
+            if not self.facade:
+                raise RuntimeError("SystemFacade chưa được khởi tạo.")
 
-        # Bắt đầu các module
-        await self.facade.start()
+            # Bắt đầu lắng nghe EventBus
+            asyncio.create_task(self.event_bus.start_listening())
+            self.logger.info("EventBus đã bắt đầu lắng nghe.")
 
-        self.logger.info("SystemManager đã khởi động thành công.")
+            # Bắt đầu các module thông qua Facade
+            await self.facade.start()
+            self.logger.info("SystemManager đã khởi động thành công.")
+
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khởi động SystemManager: {e}")
+            raise
+
 
     async def stop_async(self):
         """
-        Dừng hệ thống:
-          - Dừng các module thông qua Facade.
-          - Dừng EventBus.
+        Dừng SystemManager:
         """
         self.logger.info("Đang dừng SystemManager...")
 
-        # Dừng các module
-        await self.facade.stop()
+        try:
+            if not self.facade:
+                raise RuntimeError("SystemFacade chưa được khởi tạo.")
 
-        # Dừng EventBus
-        await self.event_bus.stop()
+            # Dừng Facade
+            await self.facade.stop()
+            self.logger.info("SystemFacade đã dừng.")
 
-        self.logger.info("SystemManager đã dừng thành công.")
+            # Dừng EventBus
+            await self.event_bus.stop()
+            self.logger.info("EventBus đã dừng.")
+
+        except Exception as e:
+            self.logger.error(f"Lỗi khi dừng SystemManager: {e}")
 
 ###############################################################################
 #                              HÀM run_system_manager()                        #
@@ -179,7 +190,11 @@ async def listen_for_shutdown(system_manager: SystemManager):
         await system_manager.stop_async()
         system_manager.stop_event.set()
 
-    system_manager.event_bus.subscribe('shutdown', shutdown_handler)
+    try:
+        system_manager.event_bus.subscribe('shutdown', shutdown_handler)
+        system_manager.logger.info("Đã đăng ký sự kiện shutdown.")
+    except Exception as e:
+        system_manager.logger.error(f"Lỗi khi đăng ký sự kiện shutdown: {e}")
 
 ###############################################################################
 #                              HÀM start() và stop()                           #
@@ -191,33 +206,25 @@ _system_manager_loop = None
 
 def start():
     """
-    Bắt đầu toàn bộ hệ thống bằng cách khởi chạy SystemManager trong thread hiện tại.
-    Đây là hàm blocking và nên được chạy trong một thread riêng nếu không muốn chặn thread chính.
+    Khởi động SystemManager trong vòng lặp sự kiện hiện tại.
     """
-    global _system_manager_instance, _system_manager_loop
+    global _system_manager_instance
 
     if _system_manager_instance:
         system_logger.warning("SystemManager đã được khởi động.")
         return
 
     try:
-        # Tải cấu hình từ tệp JSON duy nhất
         resource_config_path = CONFIG_DIR / "resource_config.json"
         config = asyncio.run(load_config(resource_config_path))
 
-        # Khởi tạo SystemManager với cấu hình
         _system_manager_instance = SystemManager(config, system_logger)
-
-        # Tạo một event loop mới cho thread này
-        _system_manager_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_system_manager_loop)
-
-        # Chạy coroutine run_system_manager
-        _system_manager_loop.run_until_complete(run_system_manager(_system_manager_instance))
+        asyncio.run(run_system_manager(_system_manager_instance))
 
     except Exception as e:
         system_logger.error(f"Lỗi khi khởi động SystemManager: {e}")
         sys.exit(1)
+
 
 def stop():
     """
