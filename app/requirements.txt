@@ -21,6 +21,12 @@ readerwriterlock
 ratelimiter
 openai
 pandas
+pydantic
+grpcio 
+grpcio-tools
+dependency-injector
+uvicorn
+aiohttp
 azure-identity
 azure-mgmt-resource
 azure-mgmt-resourcegraph
@@ -32,3 +38,4 @@ azure-monitor-query
 azure-mgmt-machinelearningservices
 azure-ai-ml
 azure-ai-anomalydetector
+
