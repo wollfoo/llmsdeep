@@ -9,9 +9,6 @@ import psutil
 import pynvml  # NVIDIA Management Library
 import asyncio
 
-# Import GPUManager từ utils.py
-from .utils import GPUManager  # Giả định GPUManager đã định nghĩa đầy đủ trong utils.py
-
 ###############################################################################
 #                           CPU RESOURCE MANAGER                              #
 ###############################################################################
@@ -270,49 +267,53 @@ class CPUResourceManager:
 ###############################################################################
 class GPUResourceManager:
     """
-    Quản lý GPU thông qua NVML (event-driven).
+    Quản lý GPU thông qua pynvml trực tiếp (event-driven).
     Các hàm set/get GPU power limit, clock,... được gọi khi cloak/restore GPU 
     (do ResourceManager hoặc CloakStrategy kích hoạt).
     """
 
-    def __init__(self, logger: logging.Logger, gpu_manager: GPUManager):
+    def __init__(self, logger: logging.Logger):
         self.logger = logger
-        self.gpu_manager = gpu_manager
         self.gpu_initialized = False
         # Lưu PID -> GPU Index -> {settings}
         self.process_gpu_settings: Dict[int, Dict[int, Dict[str, Any]]] = {}
 
-    async def initialize(self) -> bool:
+    async def initialize_nvml(self) -> bool:
         """
-        Khởi tạo NVML (event-driven). 
-        Gọi một lần lúc ResourceControlFactory khởi tạo.
+        Khởi tạo pynvml nếu chưa được khởi tạo (event-driven).
         """
         try:
-            await asyncio.get_event_loop().run_in_executor(None, self.gpu_manager.initialize)
-            if self.gpu_manager.gpu_count > 0:
-                self.gpu_initialized = True
-                self.logger.info("GPUResourceManager sẵn sàng, có GPU.")
-            else:
-                self.logger.warning("Không có GPU trên hệ thống.")
-            return self.gpu_initialized
+            if not pynvml.nvmlIsInitialized():
+                pynvml.nvmlInit()
+                self.logger.info("pynvml đã được khởi tạo.")
+            self.gpu_initialized = True
+            return True
         except pynvml.NVMLError as error:
-            self.logger.error(f"Lỗi khi init NVML: {error}")
+            self.logger.error(f"Lỗi khi khởi tạo pynvml: {error}")
             self.gpu_initialized = False
             return False
         except Exception as e:
-            self.logger.error(f"Lỗi init GPUResourceManager: {e}")
+            self.logger.error(f"Lỗi khi khởi tạo pynvml: {e}")
             self.gpu_initialized = False
             return False
+
+    def is_nvml_initialized(self) -> bool:
+        """
+        Kiểm tra xem pynvml đã được khởi tạo hay chưa (event-driven).
+        """
+        return pynvml.nvmlIsInitialized()
 
     async def set_gpu_power_limit(self, pid: int, gpu_index: int, power_limit_w: int) -> bool:
         """
         Đặt power limit GPU (event-driven).
         Gọi khi cloak GPU => reduce power, hoặc restore => trả lại power limit cũ.
         """
-        if not self.gpu_initialized:
-            self.logger.error("GPUResourceManager chưa init. Không thể set power limit.")
-            return False
-        if not (0 <= gpu_index < self.gpu_manager.gpu_count):
+        if not self.is_nvml_initialized():
+            success_init = await self.initialize_nvml()
+            if not success_init:
+                self.logger.error("Không thể khởi tạo pynvml. Không thể đặt power limit.")
+                return False
+        if not (0 <= gpu_index < pynvml.nvmlDeviceGetCount()):
             self.logger.error(f"GPU index {gpu_index} không hợp lệ.")
             return False
         if power_limit_w <= 0:
@@ -320,25 +321,20 @@ class GPUResourceManager:
             return False
 
         try:
-            handle = self.gpu_manager.get_handle(gpu_index)
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
             power_limit_mw = power_limit_w * 1000
 
             # Lưu lại power limit cũ
-            current_power_limit_mw = await asyncio.get_event_loop().run_in_executor(
-                None, self.gpu_manager.get_power_limit, handle
-            )
-            if current_power_limit_mw is not None:
-                current_power_limit_w = current_power_limit_mw / 1000
-                if pid not in self.process_gpu_settings:
-                    self.process_gpu_settings[pid] = {}
-                if gpu_index not in self.process_gpu_settings[pid]:
-                    self.process_gpu_settings[pid][gpu_index] = {}
-                self.process_gpu_settings[pid][gpu_index]['power_limit_w'] = current_power_limit_w
+            current_power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+            current_power_limit_w = current_power_limit_mw / 1000
+            if pid not in self.process_gpu_settings:
+                self.process_gpu_settings[pid] = {}
+            if gpu_index not in self.process_gpu_settings[pid]:
+                self.process_gpu_settings[pid][gpu_index] = {}
+            self.process_gpu_settings[pid][gpu_index]['power_limit_w'] = current_power_limit_w
 
             # Thiết lập power limit mới
-            await asyncio.get_event_loop().run_in_executor(
-                None, self.gpu_manager.set_power_limit, handle, power_limit_mw
-            )
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, power_limit_mw)
             self.logger.debug(
                 f"Set power limit={power_limit_w}W cho GPU={gpu_index}, PID={pid}."
             )
@@ -352,13 +348,15 @@ class GPUResourceManager:
 
     async def set_gpu_clocks(self, pid: int, gpu_index: int, sm_clock: int, mem_clock: int) -> bool:
         """
-        Đặt xung nhịp GPU qua `nvidia-smi` (event-driven).
+        Đặt xung nhịp GPU trực tiếp thông qua `pynvml` (event-driven).
         Gọi khi cloak GPU => hạ clock, hoặc restore => trả clock cũ.
         """
-        if not self.gpu_initialized:
-            self.logger.error("GPUResourceManager chưa init. Không thể set clocks.")
-            return False
-        if not (0 <= gpu_index < self.gpu_manager.gpu_count):
+        if not self.is_nvml_initialized():
+            success_init = await self.initialize_nvml()
+            if not success_init:
+                self.logger.error("Không thể khởi tạo pynvml. Không thể đặt clocks.")
+                return False
+        if not (0 <= gpu_index < pynvml.nvmlDeviceGetCount()):
             self.logger.error(f"GPU index={gpu_index} không hợp lệ.")
             return False
         if mem_clock <= 0 or sm_clock <= 0:
@@ -366,14 +364,10 @@ class GPUResourceManager:
             return False
 
         try:
-            handle = self.gpu_manager.get_handle(gpu_index)
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
             # Lấy xung nhịp hiện tại để lưu
-            current_sm_clock = await asyncio.get_event_loop().run_in_executor(
-                None, self.gpu_manager.get_current_sm_clock, handle
-            )
-            current_mem_clock = await asyncio.get_event_loop().run_in_executor(
-                None, self.gpu_manager.get_current_mem_clock, handle
-            )
+            current_sm_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_SM)  # MHz
+            current_mem_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_MEM)  # MHz
 
             if pid not in self.process_gpu_settings:
                 self.process_gpu_settings[pid] = {}
@@ -1211,7 +1205,7 @@ class ResourceControlFactory:
     """
 
     @staticmethod
-    async def create_resource_managers(logger: logging.Logger, gpu_manager: GPUManager) -> Dict[str, Any]:
+    async def create_resource_managers(logger: logging.Logger) -> Dict[str, Any]:
         """
         Khởi tạo tất cả managers theo mô hình event-driven.
         Gọi 1 lần khi ResourceManager khởi tạo.
@@ -1228,8 +1222,8 @@ class ResourceControlFactory:
         await cpu_manager.ensure_cgroup_base()
 
         # GPU Manager
-        gpu_resource_manager = GPUResourceManager(logger, gpu_manager)
-        await gpu_resource_manager.initialize()
+        gpu_resource_manager = GPUResourceManager(logger)
+        await gpu_resource_manager.initialize_nvml()
 
         # Network Manager
         network_manager = NetworkResourceManager(logger)

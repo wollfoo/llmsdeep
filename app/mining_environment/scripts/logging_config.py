@@ -8,22 +8,69 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 import random
 import string
+from contextvars import ContextVar
+
+###############################################################################
+#                           ĐỊNH NGHĨA CORRELATION ID                        #
+###############################################################################
+
+# Định nghĩa một ContextVar để lưu trữ Correlation ID cho mỗi ngữ cảnh.
+correlation_id: ContextVar[str] = ContextVar('correlation_id', default='unknown')
+
+###############################################################################
+#                           CLASS: CorrelationIdFilter                       #
+###############################################################################
+
+class CorrelationIdFilter(logging.Filter):
+    """
+    Bộ lọc logging để thêm Correlation ID vào mỗi bản ghi log.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        """
+        Thêm Correlation ID vào bản ghi log.
+        
+        Args:
+            record (logging.LogRecord): Bản ghi log hiện tại.
+        
+        Returns:
+            bool: Luôn trả về True để cho phép bản ghi log được xử lý.
+        """
+        record.correlation_id = correlation_id.get()
+        return True
+
+###############################################################################
+#                           CLASS: ObfuscatedEncryptedFileHandler          #
+###############################################################################
 
 class ObfuscatedEncryptedFileHandler(logging.Handler):
     """
     Custom logging handler để mã hóa và làm rối các log trước khi ghi vào tệp.
     """
     def __init__(self, filename: str, fernet: Fernet, level=logging.NOTSET):
+        """
+        Khởi tạo ObfuscatedEncryptedFileHandler.
+        
+        Args:
+            filename (str): Đường dẫn đến tệp log.
+            fernet (Fernet): Đối tượng Fernet để mã hóa log.
+            level (int, optional): Mức độ log để xử lý. Mặc định là NOTSET.
+        """
         super().__init__(level)
         self.filename = filename
         self.fernet = fernet
-        # [CHANGES] Kiểm tra đường dẫn cha, tạo nếu chưa có
+        # Kiểm tra và tạo thư mục cha nếu chưa tồn tại
         file_parent = Path(filename).parent
         file_parent.mkdir(parents=True, exist_ok=True)
         # Mở file ở chế độ 'ab' (append-binary)
         self.file = open(filename, 'ab')
 
     def emit(self, record: logging.LogRecord):
+        """
+        Xử lý và ghi bản ghi log vào tệp sau khi mã hóa và làm rối.
+        
+        Args:
+            record (logging.LogRecord): Bản ghi log cần xử lý.
+        """
         try:
             msg = self.format(record)
             # Thêm chuỗi ngẫu nhiên để làm rối
@@ -38,25 +85,32 @@ class ObfuscatedEncryptedFileHandler(logging.Handler):
             self.handleError(record)
 
     def close(self):
+        """
+        Đóng tệp log khi handler được đóng.
+        """
         if not self.file.closed:
             self.file.close()
         super().close()
 
+###############################################################################
+#                           FUNCTION: setup_logging                         #
+###############################################################################
 
 def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO') -> Logger:
     """
-    Thiết lập logger cho module, hỗ trợ mã hóa log bằng ObfuscatedEncryptedFileHandler.
+    Thiết lập logger cho module, hỗ trợ mã hóa log bằng ObfuscatedEncryptedFileHandler
+    và thêm Correlation ID vào mỗi bản ghi log.
     
     Args:
-        module_name (str): Tên module (logger name).
-        log_file (str): Đường dẫn file log.
-        log_level (str): Mức log (DEBUG, INFO, WARN, ERROR...).
+        module_name (str): Tên module (tên logger).
+        log_file (str): Đường dẫn đến tệp log.
+        log_level (str, optional): Mức log (DEBUG, INFO, WARN, ERROR...). Mặc định là 'INFO'.
     
     Returns:
         Logger: Đối tượng logger đã được thiết lập.
     """
     logger = logging.getLogger(module_name)
-    # [CHANGES] Lấy log_level bằng getattr an toàn
+    # Lấy log_level an toàn bằng getattr
     safe_log_level = getattr(logging, log_level.upper(), logging.INFO)
     logger.setLevel(safe_log_level)
     
@@ -75,7 +129,7 @@ def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO') -> L
             print("Skip adding StreamHandler due to testing mode.")
             return logger
 
-        # [CHANGES] Đảm bảo thư mục log tồn tại
+        # Đảm bảo thư mục log tồn tại
         log_path = Path(log_file).parent
         log_path.mkdir(parents=True, exist_ok=True)
 
@@ -95,14 +149,19 @@ def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO') -> L
         # Tạo handler mã hóa
         encrypted_handler = ObfuscatedEncryptedFileHandler(log_file, fernet)
         encrypted_handler.setLevel(safe_log_level)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s')
         encrypted_handler.setFormatter(formatter)
+        # Thêm CorrelationIdFilter vào handler
+        encrypted_handler.addFilter(CorrelationIdFilter())
         logger.addHandler(encrypted_handler)
 
         # Thêm StreamHandler (log ra console) nếu không phải testing
         stream_handler = logging.StreamHandler(sys.stdout)
         stream_handler.setLevel(safe_log_level)
-        stream_handler.setFormatter(formatter)
+        stream_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s')
+        stream_handler.setFormatter(stream_formatter)
+        # Thêm CorrelationIdFilter vào handler
+        stream_handler.addFilter(CorrelationIdFilter())
         logger.addHandler(stream_handler)
 
     return logger

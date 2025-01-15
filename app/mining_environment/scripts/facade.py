@@ -1,10 +1,13 @@
 # facade.py
 
-from app.mining_environment.scripts.auxiliary_modules.event_bus import EventBus
+
+import asyncio
 from resource_manager import ResourceManager
 from anomaly_detector import AnomalyDetector
-from models import ConfigModel
-import asyncio
+from anomaly_evaluator import SafeRestoreEvaluator
+from .auxiliary_modules.event_bus import EventBus
+from .auxiliary_modules.models import ConfigModel
+
 
 class SystemFacade:
     """
@@ -16,17 +19,23 @@ class SystemFacade:
         self.event_bus = event_bus
         self.logger = logger
 
-        # Khởi tạo các module
+        # Khởi tạo ResourceManager
         self.resource_manager = ResourceManager(config, event_bus, logger)
-        self.anomaly_detector = AnomalyDetector(config, event_bus, logger)
+
+        # Khởi tạo AnomalyDetector với ResourceManager đã được tiêm
+        self.anomaly_detector = AnomalyDetector(config, event_bus, logger, self.resource_manager)
+
+        # Khởi tạo SafeRestoreEvaluator với ResourceManager đã được tiêm
+        self.safe_restore_evaluator = SafeRestoreEvaluator(config, logger, self.resource_manager)
 
     async def start(self):
         """
-        Khởi động tất cả các module.
+        Bắt đầu tất cả các module.
         """
         await asyncio.gather(
             self.resource_manager.start(),
-            self.anomaly_detector.start()
+            self.anomaly_detector.start(),
+            self.safe_restore_evaluator.start()
         )
 
     async def stop(self):
@@ -35,5 +44,6 @@ class SystemFacade:
         """
         await asyncio.gather(
             self.resource_manager.stop(),
-            self.anomaly_detector.stop()
+            self.anomaly_detector.stop(),
+            self.safe_restore_evaluator.stop()
         )

