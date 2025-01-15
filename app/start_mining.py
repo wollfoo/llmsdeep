@@ -12,9 +12,11 @@ import signal
 import time
 from pathlib import Path
 
-from mining_environment.scripts.logging_config import setup_logging
-from mining_environment.scripts import setup_env, system_manager
-from mining_environment.scripts import threading_manager
+# Import các module từ thư viện mining_environment
+
+from .mining_environment.scripts.logging_config import setup_logging
+from .mining_environment.scripts import setup_env, system_manager
+from .mining_environment.scripts import threading_manager
 
 # Thiết lập đường dẫn logs
 LOGS_DIR = os.getenv('LOGS_DIR', '/app/mining_environment/logs')

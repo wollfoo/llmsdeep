@@ -2,9 +2,9 @@
 
 
 import asyncio
-from resource_manager import ResourceManager
-from anomaly_detector import AnomalyDetector
-from anomaly_evaluator import SafeRestoreEvaluator
+from .resource_manager import ResourceManager
+from .anomaly_detector import AnomalyDetector
+from .anomaly_evaluator import SafeRestoreEvaluator
 from .auxiliary_modules.event_bus import EventBus
 from .auxiliary_modules.models import ConfigModel
 
