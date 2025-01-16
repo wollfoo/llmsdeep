@@ -23,23 +23,27 @@ class SystemFacade:
             if not self.resource_manager:
                 raise RuntimeError("ResourceManager khởi tạo không thành công.")
             self.logger.info("ResourceManager được khởi tạo thành công.")
-
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khởi tạo ResourceManager: {e}")
+            raise RuntimeError("Không thể khởi tạo ResourceManager.") from e
+        try:
             # Khởi tạo AnomalyDetector
             self.anomaly_detector = AnomalyDetector(config, event_bus, logger, self.resource_manager)
             if not self.anomaly_detector:
                 raise RuntimeError("AnomalyDetector khởi tạo không thành công.")
             self.logger.info("AnomalyDetector được khởi tạo thành công.")
-
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khởi tạo AnomalyDetector: {e}")
+            raise RuntimeError("Không thể khởi tạo AnomalyDetector.") from e
+        try:
             # Khởi tạo SafeRestoreEvaluator
             self.safe_restore_evaluator = SafeRestoreEvaluator(config, logger, self.resource_manager)
             if not hasattr(self.safe_restore_evaluator, 'start'):
                 self.logger.warning("SafeRestoreEvaluator không có phương thức start().")
-
             self.logger.info("SafeRestoreEvaluator được khởi tạo thành công.")
-
         except Exception as e:
-            self.logger.error(f"Lỗi khi khởi tạo các module trong SystemFacade: {e}")
-            raise
+            self.logger.error(f"Lỗi khi khởi tạo SafeRestoreEvaluator: {e}")
+            raise RuntimeError("Không thể khởi tạo SafeRestoreEvaluator.") from e
 
     async def start(self):
         self.logger.info("Bắt đầu các module trong SystemFacade...")

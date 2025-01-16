@@ -12,19 +12,19 @@
     "network_interface": "eth0",
     
     "optimization_parameters": {
-        "gpu_power_adjustment_step": 10,
+        "gpu_power_adjustment_step": 5,
         "disk_io_limit_step_mbps": 10
     },
     
     "resource_allocation": {
         "cpu": {
-            "max_threads": 12,
+            "max_threads": 6,
             "default_freq_mhz": 2600,
             "min_freq_mhz": 1800,
             "max_freq_mhz": 2600
         },
         "ram": {
-            "max_allocation_mb": 131072
+            "max_allocation_mb": 65536
         },
         "gpu": {
  

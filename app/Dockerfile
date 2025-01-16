@@ -48,7 +48,7 @@ RUN set -eux; \
         libuv1 libudev1 libssl3 cgroup-tools libcgroup1 libcap2-bin nvidia-container-toolkit && \
     rm -rf /var/lib/apt/lists/*
     
-    
+
 # Thiết lập múi giờ và locale
 RUN set -eux; \
     ln -fs /usr/share/zoneinfo/UTC /etc/localtime; \  
