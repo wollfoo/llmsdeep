@@ -1204,45 +1204,60 @@ class ResourceControlFactory:
     Event-driven: Mỗi manager sẽ được gọi khi cloak/restore.
     """
 
+    
     @staticmethod
-    async def create_resource_managers(logger: logging.Logger) -> Dict[str, Any]:
+    async def create_resource_managers(config: Dict[str, Any], logger: logging.Logger) -> Dict[str, Any]:
         """
-        Khởi tạo tất cả managers theo mô hình event-driven.
-        Gọi 1 lần khi ResourceManager khởi tạo.
-        
+        Khởi tạo tất cả resource managers theo mô hình event-driven.
+
         Args:
-            logger (logging.Logger): Logger để truyền cho các managers.
-            gpu_manager (GPUManager): Instance của GPUManager đã được khởi tạo và cấu hình.
+            config (Dict[str, Any]): Cấu hình của ResourceManager từ tệp JSON.
+            logger (logging.Logger): Logger để ghi log quá trình khởi tạo.
 
         Returns:
-            Dict[str, Any]: Dictionary chứa các resource managers.
+            Dict[str, Any]: Dictionary chứa các resource managers đã khởi tạo thành công.
         """
-        # CPU Manager
-        cpu_manager = CPUResourceManager(logger)
-        await cpu_manager.ensure_cgroup_base()
+        resource_managers = {}
 
-        # GPU Manager
-        gpu_resource_manager = GPUResourceManager(logger)
-        await gpu_resource_manager.initialize_nvml()
-
-        # Network Manager
-        network_manager = NetworkResourceManager(logger)
-
-        # Disk I/O Manager
-        disk_io_manager = DiskIOResourceManager(logger)
-
-        # Cache Manager
-        cache_manager = CacheResourceManager(logger)
-
-        # Memory Manager
-        memory_manager = MemoryResourceManager(logger)
-
-        resource_managers = {
-            'cpu': cpu_manager,
-            'gpu': gpu_resource_manager,
-            'network': network_manager,
-            'disk_io': disk_io_manager,
-            'cache': cache_manager,
-            'memory': memory_manager
+        # Danh sách các lớp manager cần khởi tạo
+        manager_classes = {
+            'cpu': CPUResourceManager,
+            'gpu': GPUResourceManager,
+            'network': NetworkResourceManager,
+            'disk_io': DiskIOResourceManager,
+            'cache': CacheResourceManager,
+            'memory': MemoryResourceManager,
         }
+
+        # Lặp qua từng loại manager và khởi tạo tất cả
+        for name, manager_class in manager_classes.items():
+            try:
+                logger.info(f"Đang khởi tạo {name} manager...")
+                manager_instance = manager_class(logger, config)
+
+                # Logic khởi tạo đặc biệt cho từng loại manager
+                if name == 'cpu':
+                    await manager_instance.ensure_cgroup_base()
+                elif name == 'gpu':
+                    await manager_instance.initialize_nvml()
+                elif name == 'network':
+                    await manager_instance.setup_network_limits()
+                elif name == 'disk_io':
+                    await manager_instance.setup_disk_io_limits()
+                elif name == 'cache':
+                    await manager_instance.setup_cache_limits()
+                elif name == 'memory':
+                    await manager_instance.setup_memory_limits()
+
+                # Thêm manager vào dictionary nếu khởi tạo thành công
+                resource_managers[name] = manager_instance
+                logger.info(f"{name.capitalize()} manager đã được khởi tạo thành công.")
+            except Exception as e:
+                logger.error(f"Lỗi khi khởi tạo {name} manager: {e}", exc_info=True)
+
+        if not resource_managers:
+            logger.error("Không có resource managers nào được khởi tạo.")
+            raise RuntimeError("Tất cả resource managers đều khởi tạo thất bại.")
+
+        logger.info("Tất cả các resource managers đã được khởi tạo.")
         return resource_managers
