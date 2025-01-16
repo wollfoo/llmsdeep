@@ -1,6 +1,6 @@
 {
     "_comment": "Cấu hình tài nguyên dành cho ResourceManager...",
-    
+
     "processes": {
         "CPU": "ml-inference",
         "GPU": "inference-cuda"
@@ -10,12 +10,12 @@
         "inference-cuda": 3
     },
     "network_interface": "eth0",
-    
+
     "optimization_parameters": {
         "gpu_power_adjustment_step": 10,
         "disk_io_limit_step_mbps": 10
     },
-    
+
     "resource_allocation": {
         "cpu": {
             "max_threads": 12,
@@ -27,7 +27,6 @@
             "max_allocation_mb": 131072
         },
         "gpu": {
- 
             "max_usage_percent": [90]
         },
         "disk_io": {
@@ -41,19 +40,19 @@
             "limit_percent": 50
         }
     },
-    
+
     "monitoring_parameters": {
         "temperature_monitoring_interval_seconds": 15,
         "power_monitoring_interval_seconds": 15,
         "azure_monitor_interval_seconds": 300,
         "optimization_interval_seconds": 30
     },
-    
+
     "temperature_limits": {
         "cpu_max_celsius": 85,
         "gpu_max_celsius": 85
     },
-    
+
     "power_limits": {
         "total_power_watts": {
             "max": 400
@@ -63,7 +62,7 @@
             "gpu": 250
         }
     },
-    
+
     "baseline_thresholds": {
         "cpu_usage_percent": 90,
         "gpu_usage_percent": 90,
@@ -71,7 +70,7 @@
         "disk_io_usage_mbps": 90,
         "network_usage_mbps": 90
     },
-    
+
     "safe_restore_parameters": {
         "enable_safe_restore": true,
         "max_retry_attempts": 3,
@@ -83,7 +82,7 @@
             "check_traffic_anomalies": true
         }
     },
-    
+
     "azure_integration": {
         "sentinel": {
             "alert_check_days": 1
@@ -98,12 +97,12 @@
             "check_interval_minutes": 10
         }
     },
-    
+
     "azure_anomaly_detector": {
         "api_base": "https://eastus2.api.cognitive.microsoft.com/",
         "key_vault_url": "https://llmsskeyvault.vault.azure.net/"
     },
-    
+
     "azure_openai": {
         "api_base": "https://interchangeczz.openai.azure.com/",
         "deployment_name": "gpt-4o",
@@ -122,7 +121,7 @@
             "storage_usage_percent": 90.0
         }
     },
-    
+
     "optimization_goals": {
         "cpu_threads": "Optimize to balance CPU load.",
         "frequency": "Maximize performance while reducing energy consumption.",
@@ -136,25 +135,25 @@
         "cpu": {
             "strategy_name": "cpu_cloaking",
             "parameters": {
-                "max_usage_percent": 80
+                "throttle_percentage": 80
             }
         },
         "gpu": {
             "strategy_name": "gpu_cloaking",
             "parameters": {
-                "max_usage_percent": 80
+                "throttle_percentage": 80
             }
         },
         "network": {
             "strategy_name": "network_cloaking",
             "parameters": {
-                "bandwidth_limit_mbps": 7000
+                "bandwidth_reduction_mbps": 7000
             }
         },
         "disk_io": {
             "strategy_name": "disk_io_cloaking",
             "parameters": {
-                "disk_io_limit_mbps": 400
+                "io_weight": 400
             }
         },
         "cache": {
@@ -164,17 +163,17 @@
             }
         }
     },
-    
+
     "ai_driven_monitoring": {
         "enabled": false
     },
-    
+
     "log_analytics": {
         "enabled": false,
         "log_level": "INFO",
         "log_destination": "/app/mining_environment/logs/resource_manager.log"
     },
-    
+
     "alert_thresholds": {
         "cpu_usage_percent": 90,
         "gpu_usage_percent": 90,

