@@ -930,7 +930,7 @@ class MemoryResourceManager:
 
 
 ###############################################################################
-#                     RESOURCE CONTROL FACTORY                                #
+#                     RESOURCE CONTROL FACTORY                                # 
 ###############################################################################
 class ResourceControlFactory:
     """

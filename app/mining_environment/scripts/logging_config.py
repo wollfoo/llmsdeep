@@ -1,14 +1,18 @@
 # logging_config.py
 
-import logging
+
 import os
 import sys
+import logging
 from logging import Logger
 from pathlib import Path
 from cryptography.fernet import Fernet
 import random
 import string
 from contextvars import ContextVar
+from typing import Optional
+
+
 
 ###############################################################################
 #                           ĐỊNH NGHĨA CORRELATION ID                        #
@@ -166,40 +170,64 @@ class ObfuscatedEncryptedFileHandler(logging.Handler):
 
 #     return logger
 
-def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO', **kwargs) -> Logger:
+
+def setup_logging(module_name: str, log_file: str, log_level: str = 'ERROR', **kwargs) -> Logger:
     """
-    Thiết lập logger đơn giản, không sử dụng mã hóa hoặc làm rối log.
+    Thiết lập logger với mức log linh hoạt và chi tiết hơn.
 
     Args:
         module_name (str): Tên module (tên logger).
         log_file (str): Đường dẫn đến tệp log.
-        log_level (str, optional): Mức log (DEBUG, INFO, WARN, ERROR...). Mặc định là 'INFO'.
+        log_level (str, optional): Mức log (DEBUG, INFO, WARN, ERROR...). Mặc định là 'ERROR'.
+        **kwargs: Các tham số bổ sung (tùy chọn cho các handlers khác, chẳng hạn như log_format, log_rotation...).
 
     Returns:
         Logger: Đối tượng logger đã được thiết lập.
     """
+    # Mức độ log từ chuỗi (log_level) chuyển sang giá trị của logging
+    log_levels = {
+        'DEBUG': logging.DEBUG,
+        'INFO': logging.INFO,
+        'WARNING': logging.WARNING,
+        'ERROR': logging.ERROR,
+        'CRITICAL': logging.CRITICAL,
+    }
+
+    # Nếu mức log không hợp lệ, mặc định là ERROR
+    level = log_levels.get(log_level.upper(), logging.ERROR)
+
+    # Thiết lập logger
     logger = logging.getLogger(module_name)
-    safe_log_level = getattr(logging, log_level.upper(), logging.INFO)
-    logger.setLevel(safe_log_level)
+    logger.setLevel(level)
 
-    # Đảm bảo thư mục log tồn tại
-    log_path = Path(log_file).parent
-    log_path.mkdir(parents=True, exist_ok=True)
+    # Kiểm tra nếu logger đã có handler để tránh duplicate
+    if not logger.handlers:
+        # Đảm bảo thư mục log tồn tại
+        log_path = Path(log_file).parent
+        log_path.mkdir(parents=True, exist_ok=True)
 
-    # Tạo file handler (ghi log vào file)
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(safe_log_level)
-    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s')
-    file_handler.setFormatter(file_formatter)
-    file_handler.addFilter(CorrelationIdFilter())
-    logger.addHandler(file_handler)
+        # Lấy các tham số bổ sung từ kwargs (nếu có), ví dụ: log_format, log_rotation...
+        log_format = kwargs.get('log_format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        datefmt = kwargs.get('datefmt', '%Y-%m-%d %H:%M:%S')
 
-    # Tạo stream handler (ghi log ra console)
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(safe_log_level)
-    stream_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s')
-    stream_handler.setFormatter(stream_formatter)
-    stream_handler.addFilter(CorrelationIdFilter())
-    logger.addHandler(stream_handler)
+        # Formatter chi tiết
+        formatter = logging.Formatter(log_format, datefmt=datefmt)
+
+        # File handler: Ghi log vào file
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(level)  # Ghi log theo mức độ được chỉ định
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(CorrelationIdFilter())  # Nếu cần sử dụng CorrelationIdFilter
+        logger.addHandler(file_handler)
+
+        # Stream handler: Ghi log ra console
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setLevel(logging.DEBUG)  # Console có thể ghi cả DEBUG (chi tiết hơn)
+        stream_handler.setFormatter(formatter)
+        stream_handler.addFilter(CorrelationIdFilter())
+        logger.addHandler(stream_handler)
+
+        # Có thể thêm các handler khác tại đây (ví dụ, ghi vào một service log ngoài như ELK, Sentry...)
+        # Ví dụ về handler gửi log qua HTTP, Kafka, hoặc các hệ thống phân tán khác.
 
     return logger

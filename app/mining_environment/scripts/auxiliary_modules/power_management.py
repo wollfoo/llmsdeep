@@ -131,26 +131,28 @@ class PowerManager:
         return self.gpu_count
 
     async def get_gpu_utilization_percentages(self) -> List[float]:
-        """
-        Lấy danh sách phần trăm sử dụng của tất cả GPU trên hệ thống.
-        
-        Returns:
-            List[float]: Danh sách phần trăm sử dụng GPU cho từng GPU.
-        """
-        if self.gpu_count == 0:
-            logger.warning("PowerManager: Không có GPU nào được phát hiện để giám sát công suất.")
+        if not self.pynvml_initialized:
+            logger.warning("PowerManager: NVML chưa được khởi tạo, không thể lấy utilization GPU.")
             return []
         try:
-            utilization = []
-            for i in range(self.gpu_count):
-                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                utilization.append(util.gpu)  # Phần trăm sử dụng GPU
-            logger.debug(f"PowerManager: Lấy utilization GPU: {utilization}")
-            return utilization
-        except pynvml.NVMLError as e:
+            loop = asyncio.get_event_loop()
+            utilization = await asyncio.gather(
+                *(loop.run_in_executor(None, self._get_single_gpu_utilization, i) for i in range(self.gpu_count))
+            )
+            logger.debug(f"PowerManager: GPU utilizations: {utilization}")
+            return [u for u in utilization if u is not None]
+        except Exception as e:
             logger.error(f"PowerManager: Lỗi khi lấy utilization GPU: {e}")
             return []
+
+    def _get_single_gpu_utilization(self, gpu_index: int) -> Optional[float]:
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            return util.gpu
+        except pynvml.NVMLError as e:
+            logger.error(f"PowerManager: Lỗi khi lấy utilization GPU {gpu_index}: {e}")
+            return None
 
     async def get_gpu_power_limits(self) -> List[float]:
         """
@@ -267,82 +269,46 @@ class PowerManager:
         return await self.get_gpu_power_limits()
 
     async def reduce_cpu_power(self, pid: Optional[int] = None, reduction_percentage: float = 20.0):
-        """
-        Giảm công suất CPU bằng cách giảm tần số CPU.
-    
-        Args:
-            pid (Optional[int]): PID của tiến trình (không sử dụng).
-            reduction_percentage (float): Tỷ lệ giảm tần số CPU (%).
-        """
         try:
             if not (0 < reduction_percentage < 100):
                 logger.error("PowerManager: Reduction percentage phải nằm trong khoảng (0, 100).")
                 return
+            if not shutil.which("cpufreq-set"):
+                logger.error("PowerManager: Lệnh 'cpufreq-set' không được cài đặt trên hệ thống.")
+                return
 
             loop = asyncio.get_event_loop()
             cpu_freq = await loop.run_in_executor(None, lambda: psutil.cpu_freq().current)  # MHz
-            new_freq = cpu_freq * (1 - reduction_percentage / 100.0)
-
-            min_freq = 1800  # MHz, có thể điều chỉnh tùy hệ thống
-            new_freq = max(new_freq, min_freq)
+            new_freq = max(cpu_freq * (1 - reduction_percentage / 100.0), 1800)  # Đảm bảo không thấp hơn min_freq
 
             for cpu in range(psutil.cpu_count(logical=True)):
-                # Đặt governor thành 'userspace' trước khi thiết lập tần số
-                result = await loop.run_in_executor(
-                    None,
-                    lambda: subprocess.run(['cpufreq-set', '-c', str(cpu), '-g', 'userspace'],
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                )
-                if result.returncode != 0:
-                    logger.error(f"PowerManager: Lỗi khi đặt governor cho CPU {cpu}: {result.stderr.strip()}")
-                    continue  # Tiếp tục với CPU tiếp theo
-
-                logger.info(f"PowerManager: Đặt governor của CPU {cpu} thành 'userspace'.")
-
-                # Thiết lập tần số CPU
-                result = await loop.run_in_executor(
+                await loop.run_in_executor(
                     None,
                     lambda: subprocess.run(['cpufreq-set', '-c', str(cpu), '-f', f"{int(new_freq)}MHz"],
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 )
-                if result.returncode != 0:
-                    logger.error(f"PowerManager: Lỗi khi thiết lập tần số CPU {cpu}: {result.stderr.strip()}")
-                    continue  # Tiếp tục với CPU tiếp theo
-
             logger.info(f"PowerManager: Đã giảm tần số CPU xuống {int(new_freq)}MHz ({reduction_percentage}% giảm).")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"PowerManager: Lỗi khi giảm tần số CPU: {e}")
-        except FileNotFoundError:
-            logger.error("PowerManager: cpufreq-set không được cài đặt trên hệ thống.")
         except Exception as e:
-            logger.error(f"PowerManager: Lỗi không mong muốn khi giảm tần số CPU: {e}")
+            logger.error(f"PowerManager: Lỗi khi giảm tần số CPU: {e}")
 
     async def reduce_gpu_power(self, pid: Optional[int] = None, reduction_percentage: float = 20.0):
-        """
-        Giảm công suất GPU bằng cách giảm giới hạn công suất thông qua pynvml.
-    
-        Args:
-            pid (Optional[int]): PID của tiến trình (không sử dụng).
-            reduction_percentage (float): Tỷ lệ giảm công suất (%).
-        """
         if self.gpu_count == 0:
             logger.warning("PowerManager: Không có GPU nào để giảm công suất.")
             return
-
+        if not (0 < reduction_percentage <= 100):
+            logger.error(f"PowerManager: reduction_percentage phải trong khoảng (0, 100], nhận: {reduction_percentage}.")
+            return
         try:
             for i in range(self.gpu_count):
-                # Tính toán power limit mới dựa trên reduction_percentage
-                desired_power = await self.calculate_desired_power_limit(i, reduction_percentage)
+                desired_power = await self.calculate_desired_power_limit(i, 100 - reduction_percentage)
                 if desired_power is not None:
                     success = await self.set_gpu_power_limit(i, desired_power)
                     if success:
-                        logger.info(f"PowerManager: Đã giảm giới hạn công suất GPU {i} xuống {desired_power}W ({reduction_percentage}% giảm).")
+                        logger.info(f"PowerManager: Đã giảm công suất GPU {i} xuống {desired_power}W.")
                     else:
-                        logger.error(f"PowerManager: Không thể giảm giới hạn công suất GPU {i}.")
-                else:
-                    logger.error(f"PowerManager: Không thể tính toán power limit mới cho GPU {i}.")
+                        logger.error(f"PowerManager: Không thể giảm công suất GPU {i}.")
         except Exception as e:
-            logger.error(f"PowerManager: Lỗi không mong muốn khi giảm công suất GPU: {e}")
+            logger.error(f"PowerManager: Lỗi khi giảm công suất GPU: {e}")
 
     async def set_gpu_usage(self, usage_percentages: List[float], pid: Optional[int] = None):
         """

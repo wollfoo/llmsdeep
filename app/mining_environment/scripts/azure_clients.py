@@ -5,12 +5,17 @@ import logging
 import asyncio
 import re
 import functools
+import psutil
+import pynvml
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
-import psutil
-import pynvml
+
+
+
+from .auxiliary_modules.models import ConfigModel
+
 
 # Các import từ SDK Azure
 from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
@@ -437,6 +442,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 #        AZURE NETWORK WATCHER CLIENT (EVENT-DRIVEN)                          #
 ###############################################################################
 
+
 class AzureNetworkWatcherClient(AzureBaseClient):
     """
     Client quản lý Network Watcher trong mô hình event-driven:
@@ -589,6 +595,7 @@ class AzureNetworkWatcherClient(AzureBaseClient):
 #         AZURE ANOMALY DETECTOR CLIENT (EVENT-DRIVEN)                        #
 ###############################################################################
 
+
 class AzureAnomalyDetectorClient(AzureBaseClient):
     """
     Client Azure Anomaly Detector:
@@ -596,6 +603,12 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
     """
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
         super().__init__(logger)
+        
+        # Kiểm tra nếu config là đối tượng ConfigModel, chuyển nó thành dict
+        if isinstance(config, ConfigModel):
+            config = config.to_dict()
+
+        # Đảm bảo config là dict trước khi sử dụng
         self.endpoint = config.get("azure_anomaly_detector", {}).get("api_base")
         self.api_key = os.getenv("ANOMALY_DETECTOR_API_KEY")
 
@@ -618,53 +631,41 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 
     async def detect_anomalies(self, metric_data: Dict[str, Any]) -> Dict[str, List[str]]:
         """
-        Phát hiện bất thường cho các PID (nhiều metric).  
-        *Event-driven*: Gọi khi anomaly_detector “cần check anomaly”.
+        Phát hiện bất thường cho các PID (nhiều metric).
         """
         anomalies = {}
         metrics_to_analyze = ['cpu_usage', 'gpu_usage', 'cache_usage', 'network_usage']
         min_data_points = 12
-        max_workers = 10  # Giới hạn luồng
+        granularity = self.config.get("granularity", "minutely")  # Hỗ trợ cấu hình granularity
 
         async def analyze_pid_metric(pid: str, metric_name: str, metric_values: List[float]) -> Optional[str]:
             """
             Phân tích 1 metric cho PID -> trả về metric_name nếu bất thường, None nếu không.
             """
             try:
-                if not isinstance(metric_values, list):
-                    self.logger.warning(f"{metric_name} PID {pid} không phải list, bỏ qua.")
-                    return None
-                if len(metric_values) < min_data_points:
-                    self.logger.warning(f"PID {pid}: ít hơn {min_data_points} data cho {metric_name}, bỏ qua.")
+                if not isinstance(metric_values, list) or len(metric_values) < min_data_points:
+                    self.logger.warning(f"PID={pid} {metric_name}: không đủ dữ liệu hoặc không hợp lệ.")
                     return None
 
                 # Tạo time series
                 series = []
                 current_time = datetime.utcnow()
-                total_data = len(metric_values)
-
                 for i, value in enumerate(metric_values):
                     if not isinstance(value, (int, float)):
-                        self.logger.warning(f"{metric_name}={value} PID {pid} không phải float, bỏ qua.")
+                        self.logger.warning(f"PID={pid} {metric_name}: giá trị không hợp lệ ({value}).")
                         continue
-                    timestamp = current_time - timedelta(minutes=total_data - i)
+                    timestamp = current_time - timedelta(minutes=len(metric_values) - i)
                     series.append(TimeSeriesPoint(timestamp=timestamp.isoformat(), value=value))
 
                 # Tạo univariate detection option
                 options = UnivariateDetectionOptions(
                     series=series,
-                    granularity="minutely",
+                    granularity=granularity,
                     sensitivity=95
                 )
 
-                # Gọi API detect_univariate_entire_series
-                response: UnivariateEntireDetectionResult = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    functools.partial(
-                        self.client.detect_univariate_entire_series,
-                        options=options
-                    )
-                )
+                # Gọi API async
+                response = await self.client.detect_univariate_entire_series(options=options)
 
                 # Kiểm tra if any True
                 if any(response.is_anomaly):
@@ -676,41 +677,30 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
             return None
 
         tasks = []
-        loop = asyncio.get_event_loop()
+        for pid, metrics in metric_data.items():
+            if not isinstance(metrics, dict):
+                self.logger.warning(f"PID={pid}: metric_data không hợp lệ, bỏ qua.")
+                continue
 
-        # Thực thi song song (event-driven)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for pid, metrics in metric_data.items():
-                if not isinstance(metrics, dict):
-                    self.logger.warning(f"Metric data PID={pid} không phải dict, bỏ qua.")
+            for metric_name in metrics_to_analyze:
+                metric_values = metrics.get(metric_name, [])
+                task = asyncio.create_task(analyze_pid_metric(pid, metric_name, metric_values))
+                tasks.append(task)
+
+        # Gather tất cả các task
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Tổng hợp anomalies
+        idx = 0
+        for pid, metrics in metric_data.items():
+            for metric_name in metrics_to_analyze:
+                result = results[idx]
+                idx += 1
+                if isinstance(result, Exception):
+                    self.logger.error(f"Lỗi phân tích PID={pid}, metric={metric_name}: {result}")
                     continue
-
-                for metric_name in metrics_to_analyze:
-                    metric_values = metrics.get(metric_name, [])
-                    # Tạo coroutine -> scheduling
-                    task = asyncio.ensure_future(analyze_pid_metric(pid, metric_name, metric_values))
-                    tasks.append(task)
-
-            # gather kết quả
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Lưu anomalies
-            # CHÚ Ý: trong code cũ, response “(pid, metric_name)” => ta sẽ gộp logic.
-            # Ở đây, ta chỉ return metric_name. Cần cắt. Thêm mapping PID ra.
-            idx = 0
-            for pid, metrics in metric_data.items():
-                for metric_name in metrics_to_analyze:
-                    response = responses[idx]
-                    idx += 1
-                    if isinstance(response, Exception):
-                        self.logger.error(f"Lỗi phân tích metric: {response}")
-                        continue
-                    if response:
-                        # response = metric_name
-                        if pid not in anomalies:
-                            anomalies[pid] = []
-                        anomalies[pid].append(metric_name)
-            # Kết thúc for lồng => quét xong.
+                if result:
+                    anomalies.setdefault(pid, []).append(metric_name)
 
         return anomalies
 

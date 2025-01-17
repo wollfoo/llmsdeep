@@ -4,36 +4,33 @@ import os
 import sys
 import json
 import asyncio
-import threading
-import time
-import aiofiles
 import logging
 import uuid
-
+import aiofiles
 from pathlib import Path
 from typing import Dict, Any
 from contextvars import ContextVar
-
-
-
 
 from .facade import SystemFacade
 from .logging_config import setup_logging, correlation_id
 from .auxiliary_modules.event_bus import EventBus
 from .auxiliary_modules.models import ConfigModel
 
-
-
 ###############################################################################
 #                           ĐỊNH NGHĨA ĐƯỜNG DẪN & LOGGER                     #
 ###############################################################################
 
+# Định nghĩa thư mục cấu hình và logs từ biến môi trường
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
 
+# Đảm bảo thư mục log tồn tại
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Cấu hình các logger cho các module
 system_logger = setup_logging('system_manager', LOGS_DIR / 'system_manager.log', 'INFO')
-
+resource_logger = setup_logging('resource_manager', LOGS_DIR / 'resource_manager.log', 'INFO')
+anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.log', 'INFO')
 
 ###############################################################################
 #                      HÀM HỖ TRỢ TẢI CẤU HÌNH TỪ TỆP JSON                    #
@@ -56,7 +53,7 @@ async def load_config(config_path: Path) -> ConfigModel:
         async with aiofiles.open(config_path, 'r') as f:
             content = await f.read()
             config_data = json.loads(content)
-        system_logger.info(f"Đã tải cấu hình từ {config_path}")
+        system_logger.info(f"Đã tải cấu hình từ {config_path}.")
 
         config = ConfigModel(**config_data)
         system_logger.info("Cấu hình đã được xác thực thành công.")
@@ -99,8 +96,8 @@ class SystemManager:
         # Khởi tạo EventBus
         self.event_bus = EventBus()
 
-        # Khởi tạo Facade
-        self.facade = SystemFacade(config, self.event_bus, logger)
+        # Khởi tạo Facade với các logger cụ thể
+        self.facade = SystemFacade(config, self.event_bus, resource_logger, anomaly_logger)
 
         # Đặt Correlation ID cho toàn bộ hệ thống
         self.correlation_id = str(uuid.uuid4())
@@ -115,43 +112,39 @@ class SystemManager:
         Bắt đầu chạy hệ thống:
         """
         self.logger.info("Đang khởi động SystemManager...")
-
         try:
-            # Kiểm tra trạng thái Facade trước khi bắt đầu
-            if not self.facade:
-                raise RuntimeError("SystemFacade chưa được khởi tạo.")
+            async with asyncio.Lock():
+                if not self.facade:
+                    raise RuntimeError("SystemFacade chưa được khởi tạo.")
 
-            # Bắt đầu lắng nghe EventBus
-            asyncio.create_task(self.event_bus.start_listening())
-            self.logger.info("EventBus đã bắt đầu lắng nghe.")
+                # Bắt đầu lắng nghe EventBus
+                asyncio.create_task(self.event_bus.start_listening())
+                self.logger.info("EventBus đã bắt đầu lắng nghe.")
 
-            # Bắt đầu các module thông qua Facade
-            await self.facade.start()
-            self.logger.info("SystemManager đã khởi động thành công.")
-
+                # Bắt đầu các module thông qua Facade
+                await self.facade.start()
+                self.logger.info("SystemManager đã khởi động thành công.")
         except Exception as e:
             self.logger.error(f"Lỗi khi khởi động SystemManager: {e}")
             raise
-
 
     async def stop_async(self):
         """
         Dừng SystemManager:
         """
         self.logger.info("Đang dừng SystemManager...")
-
         try:
-            if not self.facade:
-                raise RuntimeError("SystemFacade chưa được khởi tạo.")
+            async with asyncio.Lock():
+                if not self.facade:
+                    raise RuntimeError("SystemFacade chưa được khởi tạo.")
 
-            # Dừng Facade
-            await self.facade.stop()
-            self.logger.info("SystemFacade đã dừng.")
+                # Dừng Facade
+                await self.facade.stop()
+                self.logger.info("SystemFacade đã dừng.")
 
-            # Dừng EventBus
-            await self.event_bus.stop()
-            self.logger.info("EventBus đã dừng.")
-
+                # Dừng EventBus
+                await self.event_bus.stop()
+                self.logger.info("EventBus đã dừng.")
         except Exception as e:
             self.logger.error(f"Lỗi khi dừng SystemManager: {e}")
 
@@ -163,15 +156,18 @@ async def run_system_manager(system_manager: SystemManager):
     """
     Coroutine để chạy SystemManager và đợi tín hiệu dừng.
     """
-    # Lắng nghe sự kiện shutdown
     asyncio.create_task(listen_for_shutdown(system_manager))
-
     try:
-        await system_manager.start_async()
-        system_logger.info("SystemManager đang chạy. Đợi tín hiệu dừng...")
-        
-        # Đợi tín hiệu dừng
-        await system_manager.stop_event.wait()
+        for attempt in range(3):
+            try:
+                await system_manager.start_async()
+                system_logger.info("SystemManager đang chạy. Đợi tín hiệu dừng...")
+                await system_manager.stop_event.wait()
+                break
+            except Exception as e:
+                system_logger.warning(f"Thử khởi động SystemManager thất bại ({attempt + 1}/3): {e}")
+        else:
+            raise RuntimeError("Không thể khởi động SystemManager sau nhiều lần thử.")
     except Exception as e:
         system_logger.error(f"Lỗi khi chạy SystemManager: {e}")
         await system_manager.stop_async()
@@ -186,9 +182,12 @@ async def listen_for_shutdown(system_manager: SystemManager):
     Coroutine lắng nghe sự kiện 'shutdown' từ EventBus để dừng SystemManager.
     """
     async def shutdown_handler(data):
-        system_manager.logger.info("Nhận sự kiện shutdown từ EventBus.")
-        await system_manager.stop_async()
-        system_manager.stop_event.set()
+        try:
+            system_manager.logger.info("Nhận sự kiện shutdown từ EventBus.")
+            await system_manager.stop_async()
+            system_manager.stop_event.set()
+        except Exception as e:
+            system_manager.logger.error(f"Lỗi khi xử lý sự kiện shutdown: {e}")
 
     try:
         system_manager.event_bus.subscribe('shutdown', shutdown_handler)
@@ -202,7 +201,6 @@ async def listen_for_shutdown(system_manager: SystemManager):
 
 # Biến toàn cục để giữ instance và loop
 _system_manager_instance = None
-_system_manager_loop = None
 
 def start():
     """
@@ -225,28 +223,18 @@ def start():
         system_logger.error(f"Lỗi khi khởi động SystemManager: {e}")
         sys.exit(1)
 
-
 def stop():
     """
     Dừng SystemManager bằng cách gửi sự kiện 'shutdown' qua EventBus.
     """
-    global _system_manager_instance, _system_manager_loop
+    global _system_manager_instance
 
     if not _system_manager_instance:
         system_logger.warning("SystemManager chưa được khởi động.")
         return
 
-    if not _system_manager_loop or not _system_manager_loop.is_running():
-        system_logger.warning("Event loop không chạy.")
-        return
-
     try:
-        # Gửi sự kiện 'shutdown' qua EventBus
-        future = asyncio.run_coroutine_threadsafe(
-            _system_manager_instance.event_bus.publish('shutdown', None),
-            _system_manager_loop
-        )
-        future.result(timeout=5)
+        asyncio.run(_system_manager_instance.event_bus.publish('shutdown', None))
         system_logger.info("Đã gửi sự kiện 'shutdown' thành công.")
     except Exception as e:
         system_logger.error(f"Lỗi khi gửi sự kiện 'shutdown': {e}")
@@ -260,12 +248,10 @@ def main():
     Hàm main để chạy SystemManager khi chạy như một script độc lập.
     """
     try:
-        # Đảm bảo script được chạy với quyền root
         if os.geteuid() != 0:
             print("Script phải được chạy với quyền root.")
             sys.exit(1)
 
-        # Bắt đầu hệ thống
         start()
     except KeyboardInterrupt:
         system_logger.info("Đang dừng SystemManager do KeyboardInterrupt.")

@@ -78,31 +78,17 @@ class TemperatureMonitor:
             logger.debug("TemperatureMonitor: pynvml đã được khởi tạo trước đó.")
 
     def _ensure_nvml_initialized(self):
-        """
-        Đảm bảo rằng pynvml đã được khởi tạo trước khi sử dụng.
-        Nếu chưa, thực hiện khởi tạo.
-        """
         if not self._nvml_initialized:
             try:
                 pynvml.nvmlInit()
                 self.gpu_count = pynvml.nvmlDeviceGetCount()
                 self._nvml_initialized = True
-                logger.info(f"TemperatureMonitor: Đã khởi tạo pynvml thành công với {self.gpu_count} GPU.")
+                logger.info(f"TemperatureMonitor: Đã khởi tạo NVML thành công với {self.gpu_count} GPU.")
             except pynvml.NVMLError as e:
-                logger.error(f"TemperatureMonitor: Lỗi khi khởi tạo pynvml: {e}")
+                logger.error(f"TemperatureMonitor: Lỗi khi khởi tạo NVML: {e}")
                 self.gpu_count = 0
 
     async def get_cpu_temperature(self, pid: Optional[int] = None) -> float:
-        """
-        Lấy nhiệt độ hiện tại của CPU. 
-        Trả về 0.0 nếu không thể lấy.
-
-        Args:
-            pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-        Returns:
-            float: Nhiệt độ CPU trung bình (°C).
-        """
         try:
             loop = asyncio.get_event_loop()
             temps = await loop.run_in_executor(None, psutil.sensors_temperatures)
@@ -110,56 +96,30 @@ class TemperatureMonitor:
                 logger.warning("TemperatureMonitor: Không tìm thấy cảm biến nhiệt độ CPU.")
                 return 0.0
 
-            # Tìm kiếm cảm biến CPU
             for name, entries in temps.items():
                 if 'coretemp' in name.lower() or 'cpu' in name.lower():
                     cpu_temps = [entry.current for entry in entries if 'core' in entry.label.lower()]
                     if cpu_temps:
                         avg_temp = sum(cpu_temps) / len(cpu_temps)
-                        logger.debug(f"TemperatureMonitor: Nhiệt độ CPU trung bình: {avg_temp}°C")
                         return float(avg_temp)
-            logger.warning("TemperatureMonitor: Không tìm thấy nhãn nhiệt độ CPU phù hợp.")
             return 0.0
         except Exception as e:
             logger.error(f"TemperatureMonitor: Lỗi khi lấy nhiệt độ CPU: {e}")
             return 0.0
 
     async def get_gpu_temperature(self, pid: Optional[int] = None) -> float:
-        """
-        Lấy nhiệt độ hiện tại của từng GPU và trả về nhiệt độ trung bình.
-        Trả về 0.0 nếu không có GPU hoặc gặp lỗi.
-
-        Args:
-            pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-        Returns:
-            float: Nhiệt độ GPU trung bình (°C).
-        """
-        if self.gpu_count == 0:
-            logger.warning("TemperatureMonitor: Không có GPU nào được phát hiện để giám sát nhiệt độ.")
+        if not self._nvml_initialized:
+            logger.warning("TemperatureMonitor: NVML chưa được khởi tạo, không thể lấy nhiệt độ GPU.")
             return 0.0
 
         gpu_temps = []
         try:
-            self._ensure_nvml_initialized()
-            if not self._nvml_initialized:
-                return 0.0
-
             loop = asyncio.get_event_loop()
             for i in range(self.gpu_count):
                 temp = await loop.run_in_executor(None, self._get_single_gpu_temperature, i)
                 if temp is not None:
                     gpu_temps.append(temp)
-                    logger.debug(f"TemperatureMonitor: GPU {i} Temperature: {temp}°C")
-                else:
-                    gpu_temps.append(0.0)
-            if gpu_temps:
-                avg_temp = sum(gpu_temps) / len(gpu_temps)
-                logger.debug(f"TemperatureMonitor: Nhiệt độ GPU trung bình: {avg_temp}°C")
-                return float(avg_temp)
-            else:
-                logger.warning("TemperatureMonitor: Không có dữ liệu nhiệt độ GPU để tính trung bình.")
-                return 0.0
+            return sum(gpu_temps) / len(gpu_temps) if gpu_temps else 0.0
         except Exception as e:
             logger.error(f"TemperatureMonitor: Lỗi khi lấy nhiệt độ GPU: {e}")
             return 0.0
@@ -320,20 +280,11 @@ class TemperatureMonitor:
         return await self._get_current_disk_io_limit(pid)
 
     async def _get_current_disk_io_limit(self, pid: Optional[int] = None) -> float:
-        """
-        Hàm nội bộ để lấy giới hạn Disk I/O, đảm bảo luôn trả về float.
-
-        Args:
-            pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-        Returns:
-            float: Giới hạn Disk I/O (Mbps).
-        """
         try:
             loop = asyncio.get_event_loop()
             if pid:
-                cgroup_path_read = f"/sys/fs/cgroup/blkio/temperature_monitor/{pid}/blkio.throttle.read_bps_device"
-                cgroup_path_write = f"/sys/fs/cgroup/blkio/temperature_monitor/{pid}/blkio.throttle.write_bps_device"
+                cgroup_path_read = Path(f"/sys/fs/cgroup/blkio/temperature_monitor/{pid}/blkio.throttle.read_bps_device")
+                cgroup_path_write = Path(f"/sys/fs/cgroup/blkio/temperature_monitor/{pid}/blkio.throttle.write_bps_device")
             else:
                 cgroup_path_read = None
                 cgroup_path_write = None
@@ -341,34 +292,20 @@ class TemperatureMonitor:
             read_limit = 0.0
             write_limit = 0.0
 
-            if cgroup_path_read and Path(cgroup_path_read).exists():
-                content = await loop.run_in_executor(None, Path(cgroup_path_read).read_text)
+            if cgroup_path_read and cgroup_path_read.exists():
+                content = await loop.run_in_executor(None, cgroup_path_read.read_text)
                 parts = content.strip().split()
-                # parts = ["8:0", "1048576"]
                 if len(parts) == 2 and parts[1].isdigit():
                     read_limit = int(parts[1]) * 8 / (1024 * 1024)  # B/s -> Mbps
-                    logger.debug(f"TemperatureMonitor: Disk I/O limit Read: {read_limit} Mbps")
 
-            if cgroup_path_write and Path(cgroup_path_write).exists():
-                content = await loop.run_in_executor(None, Path(cgroup_path_write).read_text)
+            if cgroup_path_write and cgroup_path_write.exists():
+                content = await loop.run_in_executor(None, cgroup_path_write.read_text)
                 parts = content.strip().split()
                 if len(parts) == 2 and parts[1].isdigit():
                     write_limit = int(parts[1]) * 8 / (1024 * 1024)  # B/s -> Mbps
-                    logger.debug(f"TemperatureMonitor: Disk I/O limit Write: {write_limit} Mbps")
 
-            if read_limit > 0.0 and write_limit > 0.0:
-                disk_io_limit = max(read_limit, write_limit)
-                logger.debug(f"TemperatureMonitor: Disk I/O limit (cgroup): Read={read_limit}Mbps, Write={write_limit}Mbps. Sử dụng max: {disk_io_limit}Mbps")
-                return disk_io_limit
-            elif read_limit > 0.0:
-                logger.debug(f"TemperatureMonitor: Disk I/O limit (cgroup) chỉ giới hạn Read={read_limit}Mbps")
-                return read_limit
-            elif write_limit > 0.0:
-                logger.debug(f"TemperatureMonitor: Disk I/O limit (cgroup) chỉ giới hạn Write={write_limit}Mbps")
-                return write_limit
-            else:
-                logger.warning("TemperatureMonitor: Không thể lấy giới hạn Disk I/O thông qua cgroup blkio. Gán giá trị mặc định 0.0 Mbps.")
-                return 0.0
+            disk_io_limit = max(read_limit, write_limit) if read_limit > 0 or write_limit > 0 else 0.0
+            return disk_io_limit
         except Exception as e:
             logger.error(f"TemperatureMonitor: Lỗi khi lấy giới hạn Disk I/O: {e}")
             return 0.0
