@@ -96,7 +96,7 @@ class SystemFacade:
 
         try:
             # Dừng ResourceManager
-            await self.resource_manager.stop()
+            await self.resource_manager.shutdown()
             self.resource_logger.info("ResourceManager đã được dừng.")
         except Exception as e:
             self.resource_logger.error(f"Lỗi khi dừng ResourceManager: {e}")
@@ -110,9 +110,8 @@ class SystemFacade:
 
         try:
             # Dừng SafeRestoreEvaluator
-            if hasattr(self.safe_restore_evaluator, 'stop'):
-                await self.safe_restore_evaluator.stop()
-                self.resource_logger.info("SafeRestoreEvaluator đã được dừng.")
+            await self.safe_restore_evaluator.stop()
+            self.resource_logger.info("SafeRestoreEvaluator đã được dừng.")
         except Exception as e:
             self.resource_logger.error(f"Lỗi khi dừng SafeRestoreEvaluator: {e}")
 

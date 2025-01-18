@@ -377,7 +377,7 @@ class ResourceManager(IResourceManager):
             self.logger.info("ResourceManager.start() - Đã initialize_azure_clients xong.")
 
             self.logger.info("ResourceManager.start() - Khám phá tài nguyên Azure...")
-            await self.discover_azure_resources()
+            self.discover_azure_resources()
             self.logger.info("ResourceManager.start() - Đã khám phá tài nguyên Azure xong.")
 
             self.logger.info("ResourceManager.start() - Bắt đầu khởi tạo watchers...")
@@ -409,7 +409,7 @@ class ResourceManager(IResourceManager):
             self.logger.error(f"Lỗi khi khởi tạo Azure Clients: {e}\n{traceback.format_exc()}")
             raise
 
-    async def discover_azure_resources(self):
+    def discover_azure_resources(self):
         """Khám phá tài nguyên Azure (Network Watchers, NSGs...)."""
         try:
             self.logger.debug("ResourceManager.discover_azure_resources: Khám phá Network Watchers.")
@@ -841,3 +841,4 @@ class ResourceManager(IResourceManager):
             await asyncio.gather(*tasks, return_exceptions=True)
 
         self.logger.info("ResourceManager đã dừng. (KẾT THÚC)")
+

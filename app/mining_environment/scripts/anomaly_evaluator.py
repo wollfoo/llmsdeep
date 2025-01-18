@@ -25,7 +25,7 @@ class SafeRestoreEvaluator:
         self.logger = logger
         self.resource_manager = resource_manager
 
-    def start(self):
+    async def start(self):
         """
         Phương thức start() trống (no-op) để tránh warning hoặc logic minor.
         """
@@ -167,3 +167,9 @@ class SafeRestoreEvaluator:
         # Tất cả điều kiện ok => True
         self.logger.info(f"Đủ điều kiện an toàn để khôi phục cho PID={process.pid}.")
         return True
+
+    async def stop(self):
+        """
+        Dừng SafeRestoreEvaluator. Hiện tại không có logic cụ thể, nhưng được định nghĩa để đảm bảo đồng nhất với các module khác.
+        """
+        self.logger.info("SafeRestoreEvaluator.stop() được gọi. Hiện tại không có logic dừng.")

