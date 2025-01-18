@@ -25,6 +25,13 @@ class SafeRestoreEvaluator:
         self.logger = logger
         self.resource_manager = resource_manager
 
+    def start(self):
+        """
+        Phương thức start() trống (no-op) để tránh warning hoặc logic minor.
+        """
+        self.logger.debug("SafeRestoreEvaluator.start() được gọi, nhưng chưa có logic.")
+
+        # Đọc cấu hình
         # Ngưỡng baseline
         baseline_thresholds = self.config.baseline_thresholds
         self.baseline_cpu_usage_percent = baseline_thresholds.get('cpu_usage_percent', 80)

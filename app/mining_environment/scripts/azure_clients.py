@@ -598,18 +598,21 @@ class AzureNetworkWatcherClient(AzureBaseClient):
 
 class AzureAnomalyDetectorClient(AzureBaseClient):
     """
-    Client Azure Anomaly Detector:
-    - Event-driven: Gọi detect_anomalies(...) khi anomaly_detector hoặc resource_manager “phát hiện/trigger” cần check.
+    Client Azure Anomaly Detector (event-driven).
     """
+
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
         super().__init__(logger)
-        
-        # Kiểm tra nếu config là đối tượng ConfigModel, chuyển nó thành dict
-        if isinstance(config, ConfigModel):
-            config = config.to_dict()
+        self.logger = logger
 
-        # Đảm bảo config là dict trước khi sử dụng
-        self.endpoint = config.get("azure_anomaly_detector", {}).get("api_base")
+        # Gán config vào self.config
+        if isinstance(config, ConfigModel):
+            config_dict = config.to_dict()
+        else:
+            config_dict = config
+        self.config = config_dict
+
+        self.endpoint = self.config.get("azure_anomaly_detector", {}).get("api_base")
         self.api_key = os.getenv("ANOMALY_DETECTOR_API_KEY")
 
         self.logger.debug(f"Endpoint Anomaly Detector: {self.endpoint}")
@@ -631,7 +634,22 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 
     async def detect_anomalies(self, metric_data: Dict[str, Any]) -> Dict[str, List[str]]:
         """
-        Phát hiện bất thường cho các PID (nhiều metric).
+        Phát hiện bất thường cho các PID (nhiều metric) bằng API detect_univariate_entire_series.
+
+        Cấu trúc metric_data:
+        {
+          "1234": {   # pid
+            "cpu_usage": [float, float, ...],
+            "gpu_usage": [...],
+            "cache_usage": [...],
+            "network_usage": [...]
+          },
+          "5678": {...},
+          ...
+        }
+
+        Trả về dict: { pid: [danh_sách_metric_bất_thường], ... }
+        Nếu pid không có metric nào bất thường => không có key pid hoặc list rỗng.
         """
         anomalies = {}
         metrics_to_analyze = ['cpu_usage', 'gpu_usage', 'cache_usage', 'network_usage']
@@ -644,16 +662,22 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
             """
             try:
                 if not isinstance(metric_values, list) or len(metric_values) < min_data_points:
-                    self.logger.warning(f"PID={pid} {metric_name}: không đủ dữ liệu hoặc không hợp lệ.")
+                    self.logger.warning(
+                        f"PID={pid} {metric_name}: không đủ dữ liệu hoặc không hợp lệ (cần >= {min_data_points})."
+                    )
                     return None
 
                 # Tạo time series
+                from datetime import datetime, timedelta
                 series = []
                 current_time = datetime.utcnow()
                 for i, value in enumerate(metric_values):
                     if not isinstance(value, (int, float)):
-                        self.logger.warning(f"PID={pid} {metric_name}: giá trị không hợp lệ ({value}).")
+                        self.logger.warning(
+                            f"PID={pid} {metric_name}: giá trị không hợp lệ ({value})."
+                        )
                         continue
+                    # Mỗi data point tương ứng 1 phút ngược về quá khứ (VD)
                     timestamp = current_time - timedelta(minutes=len(metric_values) - i)
                     series.append(TimeSeriesPoint(timestamp=timestamp.isoformat(), value=value))
 
@@ -677,6 +701,7 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
             return None
 
         tasks = []
+        # Tạo các coroutine
         for pid, metrics in metric_data.items():
             if not isinstance(metrics, dict):
                 self.logger.warning(f"PID={pid}: metric_data không hợp lệ, bỏ qua.")
@@ -687,15 +712,21 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
                 task = asyncio.create_task(analyze_pid_metric(pid, metric_name, metric_values))
                 tasks.append(task)
 
-        # Gather tất cả các task
+        # Gather tất cả các task => results
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Tổng hợp anomalies
         idx = 0
-        for pid, metrics in metric_data.items():
+        pids_list = list(metric_data.keys())  # Duyệt theo thứ tự keys
+        for pid in pids_list:
+            metrics = metric_data[pid]
+            if not isinstance(metrics, dict):
+                continue
+
             for metric_name in metrics_to_analyze:
                 result = results[idx]
                 idx += 1
+
                 if isinstance(result, Exception):
                     self.logger.error(f"Lỗi phân tích PID={pid}, metric={metric_name}: {result}")
                     continue

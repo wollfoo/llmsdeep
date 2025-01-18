@@ -1,6 +1,7 @@
+# event_bus.py
+
 import asyncio
 from typing import Callable, Dict, List, Any
-
 
 class EventBus:
     """
@@ -22,25 +23,26 @@ class EventBus:
         self.retry_attempts = retry_attempts
         self.retry_delay = retry_delay
 
-    async def subscribe(self, event_type: str, callback: Callable[[Any], None]):
+    def subscribe(self, event_type: str, callback: Callable[[Any], None]):
         """
         Đăng ký một subscriber cho một loại sự kiện cụ thể.
+        (ĐÃ CHUYỂN thành HÀM ĐỒNG BỘ, do chỉ append callback và không await gì cả.)
 
         Args:
             event_type (str): Tên loại sự kiện.
-            callback (Callable[[Any], None]): Hàm callback xử lý sự kiện.
+            callback (Callable[[Any], None]): Hàm callback xử lý sự kiện (phải async).
         """
-        async with self.lock:
-            if event_type not in self.subscribers:
-                self.subscribers[event_type] = []
-            self.subscribers[event_type].append(callback)
+        # Không cần async vì không await bất kỳ điều gì.
+        if event_type not in self.subscribers:
+            self.subscribers[event_type] = []
+        self.subscribers[event_type].append(callback)
 
     async def _safe_execute(self, callback: Callable[[Any], None], data: Any):
         """
         Thực thi callback an toàn và xử lý ngoại lệ.
 
         Args:
-            callback (Callable[[Any], None]): Hàm callback để thực thi.
+            callback (Callable[[Any], None]): Hàm callback (async) để thực thi.
             data (Any): Dữ liệu sự kiện được truyền vào callback.
         """
         try:
