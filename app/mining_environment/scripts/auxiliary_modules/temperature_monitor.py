@@ -4,9 +4,9 @@ import os
 import sys
 import psutil
 import subprocess
-import asyncio
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import threading
 
 # Thêm đường dẫn tới thư mục chứa `logging_config.py`
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -21,49 +21,55 @@ from logging_config import setup_logging
 # Import pynvml để quản lý GPU
 import pynvml
 
-# Thiết lập logging với logging_config.py
 logger = setup_logging('temperature_monitor', LOGS_DIR / 'temperature_monitor.log', 'INFO')
 
 ###############################################################################
-#                            LỚP TemperatureMonitor                         #
+#                           LỚP TemperatureMonitor                             #
 ###############################################################################
-
 class TemperatureMonitor:
     """
     Lớp singleton giám sát nhiệt độ CPU/GPU và quản lý tài nguyên liên quan.
     """
     _instance = None
-    _lock = asyncio.Lock()
+    _lock = threading.Lock()
+
+    def __new__(cls) -> 'TemperatureMonitor':
+        """
+        Phương thức khởi tạo singleton instance của TemperatureMonitor.
+        """
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(TemperatureMonitor, cls).__new__(cls)
+        return cls._instance
 
     def __init__(self):
+        """
+        Khởi tạo TemperatureMonitor. Đảm bảo rằng __init__ chỉ chạy một lần cho singleton.
+        """
         if hasattr(self, '_initialized') and self._initialized:
             return
         self._initialized = True
 
         self._nvml_initialized = False
-        self.gpu_count = 0  # sẽ được cập nhật sau khi khởi tạo NVML
+        self.gpu_count = 0  # Sẽ được cập nhật sau khi khởi tạo NVML
 
         # Cache limit percentage (có thể được cập nhật qua set_cache_limit)
         self.cache_limit_percent = 70.0
 
-    @classmethod
-    async def create(cls) -> 'TemperatureMonitor':
-        """
-        Async factory method để tạo và khởi tạo instance (singleton).
-        """
-        async with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls()
-                await cls._instance.initialize()
-            return cls._instance
+        # Đánh dấu đã cảnh báo “Không tìm thấy cảm biến nhiệt độ CPU” để tránh spam
+        self._cpu_sensor_warning_logged = False
 
-    async def initialize(self):
+        # Khởi tạo NVML nếu có GPU
+        self.initialize()
+
+    def initialize(self) -> None:
         """
-        Khởi tạo pynvml ở chế độ async (chạy trong threadpool để tránh block event loop).
+        Khởi tạo pynvml nếu hệ thống có GPU. Đồng bộ.
         """
         if not self._nvml_initialized:
             try:
-                await asyncio.to_thread(pynvml.nvmlInit)
+                pynvml.nvmlInit()
                 self.gpu_count = pynvml.nvmlDeviceGetCount()
                 self._nvml_initialized = True
                 logger.info(f"TemperatureMonitor: Đã khởi tạo pynvml thành công với {self.gpu_count} GPU.")
@@ -73,42 +79,60 @@ class TemperatureMonitor:
         else:
             logger.debug("TemperatureMonitor: pynvml đã được khởi tạo trước đó.")
 
-    async def shutdown(self):
+    def shutdown(self) -> None:
         """
-        Dừng giám sát nhiệt độ và giải phóng tài nguyên GPU (NVML).
+        Dừng giám sát nhiệt độ và giải phóng tài nguyên GPU (NVML). Đồng bộ.
         """
         try:
             if self._nvml_initialized:
-                await asyncio.to_thread(pynvml.nvmlShutdown)
+                pynvml.nvmlShutdown()
                 self._nvml_initialized = False
                 logger.info("TemperatureMonitor: Đã shutdown thành công pynvml.")
         except pynvml.NVMLError as e:
             logger.error(f"TemperatureMonitor: Lỗi khi shutdown pynvml: {e}")
 
-    async def get_cpu_temperature(self, pid: Optional[int] = None) -> float:
+    def get_cpu_temperature(self, pid: Optional[int] = None) -> float:
         """
         Lấy nhiệt độ CPU trung bình (°C).
+
+        Nếu không có cảm biến nhiệt độ CPU, sẽ log warning một lần và trả về 0.0.
+
+        :param pid: PID của tiến trình (không sử dụng trong phiên bản đồng bộ).
+        :return: Nhiệt độ CPU trung bình (float).
         """
         try:
-            temps = await asyncio.to_thread(psutil.sensors_temperatures)
+            temps = psutil.sensors_temperatures()
             if not temps:
-                logger.warning("TemperatureMonitor: Không tìm thấy cảm biến nhiệt độ CPU.")
+                # Chỉ log warning một lần
+                if not self._cpu_sensor_warning_logged:
+                    logger.warning("TemperatureMonitor: Không tìm thấy cảm biến nhiệt độ CPU (sensors rỗng).")
+                    self._cpu_sensor_warning_logged = True
                 return 0.0
 
+            # Tìm key có 'coretemp' hoặc 'cpu' => entries => lấy core
             for name, entries in temps.items():
                 if 'coretemp' in name.lower() or 'cpu' in name.lower():
                     cpu_temps = [entry.current for entry in entries if 'core' in entry.label.lower()]
                     if cpu_temps:
                         avg_temp = sum(cpu_temps) / len(cpu_temps)
                         return float(avg_temp)
+
+            # Không thấy core => fallback 0.0
+            if not self._cpu_sensor_warning_logged:
+                logger.warning("TemperatureMonitor: Không tìm thấy entry CPU coretemp.")
+                self._cpu_sensor_warning_logged = True
             return 0.0
+
         except Exception as e:
             logger.error(f"TemperatureMonitor: Lỗi khi lấy nhiệt độ CPU: {e}")
             return 0.0
 
-    async def get_gpu_temperature(self, pid: Optional[int] = None) -> float:
+    def get_gpu_temperature(self, pid: Optional[int] = None) -> float:
         """
         Lấy nhiệt độ GPU trung bình (°C) trên tất cả GPU.
+
+        :param pid: PID của tiến trình (không sử dụng trong phiên bản đồng bộ).
+        :return: Nhiệt độ GPU trung bình (float).
         """
         if not self._nvml_initialized:
             logger.warning("TemperatureMonitor: NVML chưa được khởi tạo, không thể lấy nhiệt độ GPU.")
@@ -117,17 +141,22 @@ class TemperatureMonitor:
         try:
             temps = []
             for i in range(self.gpu_count):
-                temp = await asyncio.to_thread(self._get_single_gpu_temperature, i)
+                temp = self._get_single_gpu_temperature(i)
                 if temp is not None:
                     temps.append(temp)
-            return (sum(temps) / len(temps)) if temps else 0.0
+            if not temps:
+                return 0.0
+            return sum(temps) / len(temps)
         except Exception as e:
             logger.error(f"TemperatureMonitor: Lỗi khi lấy nhiệt độ GPU: {e}")
             return 0.0
 
     def _get_single_gpu_temperature(self, gpu_index: int) -> Optional[float]:
         """
-        Lấy nhiệt độ của một GPU cụ thể (chạy trong threadpool).
+        Lấy nhiệt độ của một GPU cụ thể.
+
+        :param gpu_index: Chỉ số GPU.
+        :return: Nhiệt độ GPU (float) hoặc None nếu lỗi.
         """
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
@@ -137,21 +166,27 @@ class TemperatureMonitor:
             logger.error(f"TemperatureMonitor: Lỗi khi lấy nhiệt độ GPU {gpu_index}: {e}")
             return None
 
-    async def setup_temperature_monitoring(self):
+    def setup_temperature_monitoring(self) -> None:
         """
-        Thiết lập giám sát nhiệt độ (nếu cần luồng riêng).
+        Thiết lập giám sát nhiệt độ (nếu cần). Đồng bộ.
         """
         logger.info("TemperatureMonitor: Đã thiết lập giám sát nhiệt độ.")
 
-    async def get_current_disk_io_limit(self, pid: Optional[int] = None) -> float:
+    def get_current_disk_io_limit(self, pid: Optional[int] = None) -> float:
         """
         Giả lập lấy giới hạn Disk I/O (Mbps) qua cgroup.
-        """
-        return await self._get_current_disk_io_limit(pid)
 
-    async def _get_current_disk_io_limit(self, pid: Optional[int] = None) -> float:
+        :param pid: PID của tiến trình.
+        :return: Giới hạn Disk I/O (Mbps) hoặc 0.0 nếu không có giới hạn.
+        """
+        return self._get_current_disk_io_limit(pid)
+
+    def _get_current_disk_io_limit(self, pid: Optional[int] = None) -> float:
         """
         Thực hiện đọc file cgroup cho disk IO limit (giả lập).
+
+        :param pid: PID của tiến trình.
+        :return: Giới hạn Disk I/O (Mbps) hoặc 0.0 nếu không có giới hạn.
         """
         try:
             if pid:
@@ -165,13 +200,13 @@ class TemperatureMonitor:
             write_limit = 0.0
 
             if cgroup_path_read and cgroup_path_read.exists():
-                content = await asyncio.to_thread(cgroup_path_read.read_text)
+                content = cgroup_path_read.read_text()
                 parts = content.strip().split()
                 if len(parts) == 2 and parts[1].isdigit():
                     read_limit = int(parts[1]) * 8 / (1024 * 1024)  # B/s -> Mbps
 
             if cgroup_path_write and cgroup_path_write.exists():
-                content = await asyncio.to_thread(cgroup_path_write.read_text)
+                content = cgroup_path_write.read_text()
                 parts = content.strip().split()
                 if len(parts) == 2 and parts[1].isdigit():
                     write_limit = int(parts[1]) * 8 / (1024 * 1024)  # B/s -> Mbps
@@ -181,229 +216,65 @@ class TemperatureMonitor:
             logger.error(f"TemperatureMonitor: Lỗi khi lấy giới hạn Disk I/O: {e}")
             return 0.0
 
-    # ... (các hàm khác: set_cpu_threads, set_ram_allocation, set_cache_limit, etc.)
-    # Lược bớt do nội dung logic tương tự => chuyển sang await asyncio.to_thread(...) thay cho run_in_executor(...).
-
-    # Demo: cắt gọn 1 ví dụ _find_mining_process => to_thread:
-    def _find_mining_process(self) -> Optional[psutil.Process]:
-        """Tìm tiến trình khai thác."""
-        try:
-            for proc in psutil.process_iter(['pid', 'name']):
-                if proc.info['name'] in ['ml-inference', 'inference-cuda']:
-                    logger.debug(f"TemperatureMonitor: Tìm thấy tiến trình {proc.info['name']} PID={proc.pid}")
-                    return proc
-            return None
-        except Exception as e:
-            logger.error(f"TemperatureMonitor: Lỗi khi tìm tiến trình khai thác: {e}")
-            return None
-
-
-
-# Singleton instance của TemperatureMonitor sẽ được tạo thông qua async factory method
+###############################################################################
+#                           Các Hàm Ngoài Class                               #
+###############################################################################
 _temperature_monitor_instance: Optional[TemperatureMonitor] = None
-_temperature_monitor_lock = asyncio.Lock()
+_temperature_monitor_lock = threading.Lock()
 
-async def get_temperature_monitor() -> TemperatureMonitor:
+def get_temperature_monitor() -> TemperatureMonitor:
     """
-    Lấy singleton instance của TemperatureMonitor một cách bất đồng bộ.
+    Lấy singleton instance của TemperatureMonitor một cách đồng bộ.
 
-    Returns:
-        TemperatureMonitor: Instance của TemperatureMonitor.
+    :return: Instance của TemperatureMonitor.
     """
     global _temperature_monitor_instance
-    async with _temperature_monitor_lock:
-        if _temperature_monitor_instance is None:
-            _temperature_monitor_instance = await TemperatureMonitor.create()
+    if _temperature_monitor_instance is None:
+        with _temperature_monitor_lock:
+            if _temperature_monitor_instance is None:
+                _temperature_monitor_instance = TemperatureMonitor()
     return _temperature_monitor_instance
 
-###############################################################################
-#                          Các Hàm Ngoài Class                              #
-###############################################################################
-async def setup_temperature_monitoring():
+def setup_temperature_monitoring() -> None:
     """
-    Thiết lập giám sát nhiệt độ.
+    Thiết lập giám sát nhiệt độ. Đồng bộ.
     """
-    temperature_monitor = await get_temperature_monitor()
-    await temperature_monitor.setup_temperature_monitoring()
+    tm = get_temperature_monitor()
+    tm.setup_temperature_monitoring()
 
-async def get_cpu_temperature(pid: Optional[int] = None) -> float:
+def get_cpu_temperature(pid: Optional[int] = None) -> float:
     """
-    Trả về nhiệt độ CPU hiện tại (°C).
+    Lấy nhiệt độ CPU trung bình (°C). Đồng bộ.
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-    Returns:
-        float: Nhiệt độ CPU trung bình (°C).
+    :param pid: PID của tiến trình (không sử dụng trong phiên bản đồng bộ).
+    :return: Nhiệt độ CPU trung bình (float).
     """
-    temperature_monitor = await get_temperature_monitor()
-    return await temperature_monitor.get_cpu_temperature(pid)
+    tm = get_temperature_monitor()
+    return tm.get_cpu_temperature(pid)
 
-async def get_gpu_temperature(pid: Optional[int] = None) -> float:
+def get_gpu_temperature(pid: Optional[int] = None) -> float:
     """
-    Trả về nhiệt độ GPU hiện tại (°C).
+    Lấy nhiệt độ GPU trung bình (°C) trên tất cả GPU. Đồng bộ.
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-    Returns:
-        float: Nhiệt độ GPU trung bình (°C).
+    :param pid: PID của tiến trình (không sử dụng trong phiên bản đồng bộ).
+    :return: Nhiệt độ GPU trung bình (float).
     """
-    temperature_monitor = await get_temperature_monitor()
-    return await temperature_monitor.get_gpu_temperature(pid)
+    tm = get_temperature_monitor()
+    return tm.get_gpu_temperature(pid)
 
-async def get_current_cpu_threads(pid: Optional[int] = None) -> int:
+def get_current_disk_io_limit(pid: Optional[int] = None) -> float:
     """
-    Trả về số lượng CPU threads hiện tại.
+    Lấy giới hạn Disk I/O (Mbps) hiện tại cho tiến trình. Đồng bộ.
 
-    Args:
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-    Returns:
-        int: Số lượng CPU threads.
+    :param pid: PID của tiến trình.
+    :return: Giới hạn Disk I/O (Mbps) hoặc 0.0 nếu không có giới hạn.
     """
-    temperature_monitor = await get_temperature_monitor()
-    return await temperature_monitor.get_current_cpu_threads(pid)
+    tm = get_temperature_monitor()
+    return tm.get_current_disk_io_limit(pid)
 
-async def set_cpu_threads(new_threads: int, pid: Optional[int] = None):
+def shutdown_temperature_monitor() -> None:
     """
-    Giảm công suất CPU bằng cách giảm số lượng threads.
-
-    Args:
-        new_threads (int): Số lượng threads mới.
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
+    Dừng giám sát nhiệt độ và giải phóng tài nguyên GPU (NVML). Đồng bộ.
     """
-    temperature_monitor = await get_temperature_monitor()
-    await temperature_monitor.set_cpu_threads(new_threads, pid)
-
-async def get_current_ram_allocation(pid: Optional[int] = None) -> float:
-    """
-    Trả về lượng RAM hiện tại (MB).
-
-    Args:
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-    Returns:
-        float: Lượng RAM hiện tại (MB).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    return await temperature_monitor.get_current_ram_allocation(pid)
-
-async def set_ram_allocation(new_ram_mb: int, pid: Optional[int] = None):
-    """
-    Thiết lập giới hạn RAM (MB).
-
-    Args:
-        new_ram_mb (int): Lượng RAM mới (MB).
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    await temperature_monitor.set_ram_allocation(new_ram_mb, pid)
-
-async def get_current_gpu_usage(pid: Optional[int] = None) -> float:
-    """
-    Trả về mức sử dụng GPU hiện tại (%).
-
-    Args:
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-    Returns:
-        float: Mức sử dụng GPU trung bình (%).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    return await temperature_monitor.get_current_gpu_usage(pid)
-
-async def get_current_disk_io_limit(pid: Optional[int] = None) -> float:
-    """
-    Trả về giới hạn Disk I/O hiện tại (Mbps).
-
-    Args:
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-    Returns:
-        float: Giới hạn Disk I/O (Mbps).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    return await temperature_monitor.get_current_disk_io_limit(pid)
-
-async def set_disk_io_limit(new_disk_io_mbps: float, pid: Optional[int] = None):
-    """
-    Thiết lập giới hạn Disk I/O (Mbps).
-
-    Args:
-        new_disk_io_mbps (float): Giới hạn Disk I/O mới (Mbps).
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    await temperature_monitor.set_disk_io_limit(new_disk_io_mbps, pid)
-
-async def get_current_network_bandwidth_limit(pid: Optional[int] = None) -> float:
-    """
-    Trả về giới hạn băng thông mạng hiện tại (Mbps).
-
-    Args:
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-    Returns:
-        float: Giới hạn băng thông mạng (Mbps).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    return await temperature_monitor.get_current_network_bandwidth_limit(pid)
-
-async def set_network_bandwidth_limit(new_network_bw_mbps: float, pid: Optional[int] = None):
-    """
-    Thiết lập giới hạn băng thông mạng (Mbps).
-
-    Args:
-        new_network_bw_mbps (float): Giới hạn băng thông mạng mới (Mbps).
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    await temperature_monitor.set_network_bandwidth_limit(new_network_bw_mbps, pid)
-
-async def get_current_cache_limit(pid: Optional[int] = None) -> float:
-    """
-    Trả về giới hạn Cache hiện tại (%).
-
-    Args:
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-
-    Returns:
-        float: Giới hạn Cache (%).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    return await temperature_monitor.get_current_cache_limit(pid)
-
-async def set_cache_limit(new_cache_limit_percent: float, pid: Optional[int] = None):
-    """
-    Thiết lập giới hạn Cache (%).
-
-    Args:
-        new_cache_limit_percent (float): Giới hạn Cache mới (%).
-        pid (Optional[int]): PID của tiến trình (không sử dụng).
-    """
-    temperature_monitor = await get_temperature_monitor()
-    await temperature_monitor.set_cache_limit(new_cache_limit_percent, pid)
-
-async def shutdown_temperature_monitor():
-    """
-    Dừng giám sát nhiệt độ và giải phóng tài nguyên.
-    """
-    temperature_monitor = await get_temperature_monitor()
-    await temperature_monitor.shutdown()
-
-# Utility functions
-def _write_to_file(path: Path, content: str):
-    """
-    Ghi nội dung vào file.
-
-    Args:
-        path (Path): Đường dẫn tới file.
-        content (str): Nội dung cần ghi.
-    """
-    try:
-        with open(path, 'w') as f:
-            f.write(content)
-        logger.debug(f"TemperatureMonitor: Đã ghi nội dung vào file {path}: {content.strip()}")
-    except Exception as e:
-        logger.error(f"TemperatureMonitor: Lỗi khi ghi vào file {path}: {e}")
+    tm = get_temperature_monitor()
+    tm.shutdown()
