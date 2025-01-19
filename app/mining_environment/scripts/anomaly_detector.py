@@ -1,5 +1,3 @@
-# anomaly_detector.py
-
 import psutil
 import logging
 import traceback
@@ -19,7 +17,6 @@ from .auxiliary_modules.interfaces import IResourceManager
 ###############################################################################
 #   QUẢN LÝ NVML TOÀN CỤC CHO MODULE                                          #
 ###############################################################################
-
 _nvml_lock = asyncio.Lock()
 _nvml_initialized = False  # Phải khai báo toàn cục
 
@@ -28,7 +25,8 @@ async def initialize_nvml():
     async with _nvml_lock:
         if not _nvml_initialized:
             try:
-                pynvml.nvmlInit()
+                # Dùng to_thread để tránh block loop
+                await asyncio.to_thread(pynvml.nvmlInit)
                 _nvml_initialized = True
             except pynvml.NVMLError as e:
                 raise RuntimeError(f"Lỗi khi khởi tạo NVML: {e}") from e
@@ -39,7 +37,6 @@ def is_nvml_initialized() -> bool:
 ###############################################################################
 #                           LỚP CHÍNH: AnomalyDetector                        #
 ###############################################################################
-
 class AnomalyDetector:
     """
     Lớp phát hiện bất thường cho tiến trình khai thác, event-driven.
@@ -48,12 +45,14 @@ class AnomalyDetector:
     _instance = None
     _instance_lock = asyncio.Lock()
 
-    def __new__(cls, config: ConfigModel, event_bus: EventBus, logger: logging.Logger, resource_manager: IResourceManager):
+    def __new__(cls, config: ConfigModel, event_bus: EventBus,
+                logger: logging.Logger, resource_manager: IResourceManager):
         if not hasattr(cls, '_instance') or cls._instance is None:
             cls._instance = super(AnomalyDetector, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, config: ConfigModel, event_bus: EventBus, logger: logging.Logger, resource_manager: IResourceManager):
+    def __init__(self, config: ConfigModel, event_bus: EventBus,
+                 logger: logging.Logger, resource_manager: IResourceManager):
         if getattr(self, '_initialized', False):
             return
 
@@ -64,21 +63,19 @@ class AnomalyDetector:
         self.resource_manager = resource_manager
 
         self.stop_event = asyncio.Event()
-        self.mining_processes = []
+        self.mining_processes: List[MiningProcess] = []
         self.mining_processes_lock = asyncio.Lock()
 
-        # SafeRestoreEvaluator là 1 logic tùy biến, ta giả sử có
+        # SafeRestoreEvaluator
         self.safe_restore_evaluator = SafeRestoreEvaluator(config, logger, resource_manager)
         self.task_futures = []
 
         # Lưu history metrics => { pid_str: [ sample_dict1, sample_dict2, ... ] }
-        # Mỗi sample_dict: { 'cpu_usage':..., 'gpu_usage':..., ... }
         self.metrics_history: Dict[str, List[Dict[str, float]]] = {}
-        self.min_data_points = 12  # Hoặc config
+        # Yêu cầu tối thiểu data point => config hoặc set cứng
+        self.min_data_points = 12
 
         self.logger.info("AnomalyDetector đã được khởi tạo thành công.")
-
-
 
     async def start(self):
         """
@@ -94,16 +91,15 @@ class AnomalyDetector:
             await initialize_nvml()
             self.logger.info("NVML đã được khởi tạo (một lần).")
 
-        # Khởi động SafeRestoreEvaluator
+        # Khởi động SafeRestoreEvaluator (nếu có logic start)
         try:
-            await self.safe_restore_evaluator.start()  # Đảm bảo start() là async
+            await self.safe_restore_evaluator.start()
         except Exception as e:
             self.logger.error(f"Lỗi khi khởi động SafeRestoreEvaluator: {e}\n{traceback.format_exc()}")
 
-        # Tạo các coroutine background
-        loop = asyncio.get_event_loop()
-        self.task_futures.append(loop.create_task(self.anomaly_detection()))
-        self.task_futures.append(loop.create_task(self.monitor_restoration()))
+        # Tạo các coroutine background => anomaly_detection và monitor_restoration
+        self.task_futures.append(asyncio.create_task(self.anomaly_detection()))
+        self.task_futures.append(asyncio.create_task(self.monitor_restoration()))
 
         # Khởi chạy discovery ban đầu
         await self.discover_mining_processes_async()
@@ -127,17 +123,17 @@ class AnomalyDetector:
                             if cpu_name in pname or gpu_name in pname:
                                 prio = self.get_process_priority(proc.info['name'])
                                 net_if = self.config.network_interface
-                                mining_proc = MiningProcess(proc.info['pid'], proc.info['name'], prio, net_if, self.logger)
+                                mining_proc = MiningProcess(proc.info['pid'], proc.info['name'],
+                                                            prio, net_if, self.logger)
                                 mining_proc.is_cloaked = False
                                 self.mining_processes.append(mining_proc)
                         except Exception as e:
                             self.logger.error(f"Lỗi khi xử lý tiến trình {proc.info['name']}: {e}")
-                    if not self.mining_processes:
-                        self.logger.warning("Không phát hiện tiến trình khai thác nào.")
-                    else:
+                    if self.mining_processes:
                         self.logger.info(f"Đã phát hiện {len(self.mining_processes)} tiến trình khai thác.")
-                    return
-
+                    else:
+                        self.logger.warning("Không phát hiện tiến trình khai thác nào.")
+                return
             except Exception as e:
                 self.logger.error(f"Lỗi discover_mining_processes_async (attempt {attempt+1}): {e}")
                 if attempt == retry_attempts - 1:
@@ -167,17 +163,18 @@ class AnomalyDetector:
                 await self.discover_mining_processes_async()
                 async with self.mining_processes_lock:
                     tasks = [self.evaluate_process_anomaly(proc) for proc in self.mining_processes]
+
                 if tasks:
-                    await asyncio.gather(*tasks)
+                    await asyncio.gather(*tasks, return_exceptions=True)
                 else:
-                    self.logger.info("Không có tiến trình để kiểm tra bất thường.")
+                    self.logger.debug("Không có tiến trình để kiểm tra bất thường.")
+
             except asyncio.CancelledError:
                 self.logger.info("Anomaly detection coroutine bị hủy.")
                 break
             except Exception as e:
                 self.logger.error(f"Lỗi trong anomaly_detection: {e}\n{traceback.format_exc()}")
 
-            # Interval giám sát
             interval = self.config.monitoring_parameters.get("detection_interval_seconds", 3600)
             await asyncio.sleep(interval)
 
@@ -198,6 +195,7 @@ class AnomalyDetector:
             if pid_str not in self.metrics_history:
                 self.metrics_history[pid_str] = []
             self.metrics_history[pid_str].append(current_snapshot)
+
             # Giới hạn history => 50 sample
             if len(self.metrics_history[pid_str]) > 50:
                 self.metrics_history[pid_str].pop(0)
@@ -205,29 +203,19 @@ class AnomalyDetector:
             # Lấy min_data_points sample mới nhất => detect anomalies
             history_data = self.metrics_history[pid_str][-self.min_data_points:]
             if len(history_data) < self.min_data_points:
-                # Thay vì warning => log debug + skip
-                self.logger.debug(
-                    f"PID={process.pid} chưa đủ {self.min_data_points} data points => skip anomaly detection."
-                )
+                # Chưa đủ data => bỏ qua
+                self.logger.debug(f"PID={process.pid} chưa đủ {self.min_data_points} data points => skip anomaly check.")
                 return
 
-            # Gom history_data => format detect_anomalies: { pid_str: [ {metrics}, ... ] }
-            # Mỗi item: { 'cpu_usage':..., 'gpu_usage':..., ...}
-            # => anomaly_detector_client logic cũ => pass 'metric_values'
-            # Ta build single_proc_data = { pid_str: [list of sample dictionaries] }
-            single_proc_data = {
-                pid_str: history_data
-            }
-
             # Gọi anomaly_detector_client => anomalies
+            # single_proc_data = { pid_str: [ {metrics}, ... ] }
+            single_proc_data = { pid_str: history_data }
             anomalies = await self.resource_manager.azure_anomaly_detector_client.detect_anomalies(single_proc_data)
 
-            # Kiểm tra result => bool or dict
             is_anomaly = False
             if isinstance(anomalies, bool):
                 is_anomaly = anomalies
             elif isinstance(anomalies, dict):
-                # cũ => { 'pid': [list_metrics], ...}
                 is_anomaly = (pid_str in anomalies and anomalies[pid_str])
 
             if is_anomaly:
@@ -257,7 +245,7 @@ class AnomalyDetector:
             self.logger.error(f"Không thể enqueue restore PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     ##########################################################################
-    #                    GIÁM SÁT ĐIỀU KIỆN PHỤC HỒI TÀI NGUYÊN              #
+    #                   GIÁM SÁT ĐIỀU KIỆN PHỤC HỒI TÀI NGUYÊN               #
     ##########################################################################
     async def monitor_restoration(self):
         interval = 60
@@ -281,7 +269,11 @@ class AnomalyDetector:
                             proc.is_cloaked = False
                             self.logger.info(f"Đã khôi phục tài nguyên cho {proc.name} (PID={proc.pid}).")
                         else:
-                            self.logger.info(f"PID={proc.pid} chưa đủ điều kiện để khôi phục.")
+                            self.logger.debug(f"PID={proc.pid} chưa đủ điều kiện để khôi phục.")
+
+            except asyncio.CancelledError:
+                self.logger.info("Monitor restoration coroutine bị hủy.")
+                break
             except Exception as e:
                 self.logger.error(f"Lỗi monitor_restoration: {e}\n{traceback.format_exc()}")
 

@@ -9,7 +9,8 @@ from .auxiliary_modules.event_bus import EventBus
 from .auxiliary_modules.models import ConfigModel
 
 class SystemFacade:
-    def __init__(self, config: ConfigModel, event_bus: EventBus, resource_logger: logging.Logger, anomaly_logger: logging.Logger):
+    def __init__(self, config: ConfigModel, event_bus: EventBus,
+                 resource_logger: logging.Logger, anomaly_logger: logging.Logger):
         """
         Khởi tạo SystemFacade.
 
@@ -26,7 +27,7 @@ class SystemFacade:
 
         # Khởi tạo các module với logger tương ứng
         try:
-            # Khởi tạo ResourceManager
+            # ResourceManager
             self.resource_manager = ResourceManager(config, event_bus, self.resource_logger)
             if not self.resource_manager:
                 raise RuntimeError("ResourceManager khởi tạo không thành công.")
@@ -36,7 +37,7 @@ class SystemFacade:
             raise RuntimeError("Không thể khởi tạo ResourceManager.") from e
 
         try:
-            # Khởi tạo AnomalyDetector
+            # AnomalyDetector
             self.anomaly_detector = AnomalyDetector(config, event_bus, self.anomaly_logger, self.resource_manager)
             if not self.anomaly_detector:
                 raise RuntimeError("AnomalyDetector khởi tạo không thành công.")
@@ -46,7 +47,7 @@ class SystemFacade:
             raise RuntimeError("Không thể khởi tạo AnomalyDetector.") from e
 
         try:
-            # Khởi tạo SafeRestoreEvaluator
+            # SafeRestoreEvaluator
             self.safe_restore_evaluator = SafeRestoreEvaluator(config, self.resource_logger, self.resource_manager)
             if not hasattr(self.safe_restore_evaluator, 'start'):
                 self.resource_logger.warning("SafeRestoreEvaluator không có phương thức start().")
@@ -58,27 +59,27 @@ class SystemFacade:
     async def start(self):
         """
         Bắt đầu các module trong hệ thống.
-
-        Gọi các phương thức start() của từng module (ResourceManager, AnomalyDetector, SafeRestoreEvaluator).
+        - ResourceManager, AnomalyDetector, SafeRestoreEvaluator (nếu có start()).
         """
         self.resource_logger.info("Bắt đầu các module trong SystemFacade...")
+
+        # ResourceManager
         try:
-            # Bắt đầu ResourceManager
             await self.resource_manager.start()
             self.resource_logger.info("ResourceManager đã khởi động thành công.")
         except Exception as e:
             self.resource_logger.error(f"Lỗi khi khởi động ResourceManager: {e}")
 
+        # AnomalyDetector
         try:
-            # Bắt đầu AnomalyDetector
             await self.anomaly_detector.start()
             self.anomaly_logger.info("AnomalyDetector đã khởi động thành công.")
         except Exception as e:
             self.anomaly_logger.error(f"Lỗi khi khởi động AnomalyDetector: {e}")
 
+        # SafeRestoreEvaluator (nếu có hàm start)
         if hasattr(self.safe_restore_evaluator, 'start'):
             try:
-                # Bắt đầu SafeRestoreEvaluator nếu có phương thức start
                 await self.safe_restore_evaluator.start()
                 self.resource_logger.info("SafeRestoreEvaluator đã khởi động thành công.")
             except Exception as e:
@@ -88,28 +89,26 @@ class SystemFacade:
 
     async def stop(self):
         """
-        Dừng tất cả các module.
-
-        Gọi các phương thức stop() của từng module (ResourceManager, AnomalyDetector, SafeRestoreEvaluator).
+        Dừng tất cả các module (ResourceManager, AnomalyDetector, SafeRestoreEvaluator).
         """
         self.resource_logger.info("Dừng các module trong SystemFacade...")
 
+        # ResourceManager
         try:
-            # Dừng ResourceManager
             await self.resource_manager.shutdown()
             self.resource_logger.info("ResourceManager đã được dừng.")
         except Exception as e:
             self.resource_logger.error(f"Lỗi khi dừng ResourceManager: {e}")
 
+        # AnomalyDetector
         try:
-            # Dừng AnomalyDetector
             await self.anomaly_detector.stop()
             self.anomaly_logger.info("AnomalyDetector đã được dừng.")
         except Exception as e:
             self.anomaly_logger.error(f"Lỗi khi dừng AnomalyDetector: {e}")
 
+        # SafeRestoreEvaluator
         try:
-            # Dừng SafeRestoreEvaluator
             await self.safe_restore_evaluator.stop()
             self.resource_logger.info("SafeRestoreEvaluator đã được dừng.")
         except Exception as e:

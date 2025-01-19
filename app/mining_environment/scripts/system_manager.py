@@ -59,7 +59,7 @@ class SystemManager:
         self.config = config
         self.logger = logger
 
-        # Tạo 1 instance EventBus (trong loop này)
+        # Tạo 1 instance EventBus
         self.event_bus = EventBus()
         self.facade = SystemFacade(config, self.event_bus, resource_logger, anomaly_logger)
 
@@ -70,23 +70,27 @@ class SystemManager:
         # Dùng Event() để chờ dừng
         self.stop_event = asyncio.Event()
 
+        # Lock duy nhất để tránh start/stop chồng chéo
+        self._start_stop_lock = asyncio.Lock()
+
     async def start_async(self):
         """
         Khởi động SystemManager (chạy trong event loop).
         """
         self.logger.info("Đang khởi động SystemManager...")
         try:
-            async with asyncio.Lock():
+            async with self._start_stop_lock:
                 if not self.facade:
                     raise RuntimeError("SystemFacade chưa được khởi tạo.")
 
-                # Bắt đầu lắng nghe EventBus (1 task)
+                # Bắt đầu lắng nghe EventBus (1 task background)
                 asyncio.create_task(self.event_bus.start_listening())
                 self.logger.info("EventBus đã bắt đầu lắng nghe.")
 
                 # Khởi động facade => ResourceManager, AnomalyDetector, ...
                 await self.facade.start()
                 self.logger.info("SystemManager đã khởi động thành công.")
+
         except Exception as e:
             self.logger.error(f"Lỗi khi khởi động SystemManager: {e}")
             raise
@@ -97,7 +101,7 @@ class SystemManager:
         """
         self.logger.info("Đang dừng SystemManager...")
         try:
-            async with asyncio.Lock():
+            async with self._start_stop_lock:
                 if not self.facade:
                     raise RuntimeError("SystemFacade chưa được khởi tạo.")
 
@@ -108,6 +112,7 @@ class SystemManager:
                 # Dừng EventBus
                 await self.event_bus.stop()
                 self.logger.info("EventBus đã dừng.")
+
         except Exception as e:
             self.logger.error(f"Lỗi khi dừng SystemManager: {e}")
 
@@ -142,7 +147,7 @@ async def run_system_manager(system_manager: SystemManager):
 #                       LẮNG NGHE SỰ KIỆN 'shutdown' TỪ EVENT BUS            #
 ###############################################################################
 async def listen_for_shutdown(system_manager: SystemManager):
-    async def shutdown_handler(data):
+    async def shutdown_handler(_data):
         try:
             system_manager.logger.info("Nhận sự kiện shutdown từ EventBus.")
             await system_manager.stop_async()

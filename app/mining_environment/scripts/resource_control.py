@@ -1,14 +1,11 @@
-# resource_control.py
-
 import os
 import uuid
 import logging
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import psutil
 import pynvml  # NVIDIA Management Library
 import asyncio
-
 
 ###############################################################################
 #                           CPU RESOURCE MANAGER                              #
@@ -32,8 +29,8 @@ class CPUResourceManager:
         """
         try:
             if not os.path.exists(self.CGROUP_BASE_PATH):
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, os.makedirs, self.CGROUP_BASE_PATH, True, True)
+                # Dùng asyncio.to_thread thay vì get_event_loop().run_in_executor
+                await asyncio.to_thread(os.makedirs, self.CGROUP_BASE_PATH, True, True)
                 self.logger.debug(f"Tạo thư mục cgroup cơ sở tại {self.CGROUP_BASE_PATH}.")
         except PermissionError:
             self.logger.error(f"Không đủ quyền tạo thư mục cgroup tại {self.CGROUP_BASE_PATH}.")
@@ -64,8 +61,7 @@ class CPUResourceManager:
 
             cgroup_name = f"cpu_cloak_{uuid.uuid4().hex[:8]}"
             cgroup_path = os.path.join(self.CGROUP_BASE_PATH, cgroup_name)
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, os.makedirs, cgroup_path, True, True)
+            await asyncio.to_thread(os.makedirs, cgroup_path, True, True)
             self.logger.debug(f"Tạo cgroup tại {cgroup_path} cho PID={pid}.")
 
             # Tính CPU quota (dựa trên throttle_percentage)
@@ -101,16 +97,16 @@ class CPUResourceManager:
             cgroup_path = os.path.join(self.CGROUP_BASE_PATH, cgroup_name)
             procs_path = os.path.join(cgroup_path, "cgroup.procs")
 
-            with open(procs_path, "r") as f:
-                procs = f.read().strip()
-                if procs:
-                    self.logger.warning(
-                        f"Cgroup {cgroup_name} vẫn còn PID={procs}. Không thể xóa."
-                    )
-                    return False
+            if os.path.exists(procs_path):
+                with open(procs_path, "r") as f:
+                    procs = f.read().strip()
+                    if procs:
+                        self.logger.warning(
+                            f"Cgroup {cgroup_name} vẫn còn PID={procs}. Không thể xóa."
+                        )
+                        return False
 
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, os.rmdir, cgroup_path)
+            await asyncio.to_thread(os.rmdir, cgroup_path)
             self.logger.info(f"Xóa cgroup {cgroup_name} thành công.")
             return True
         except FileNotFoundError:
@@ -151,8 +147,7 @@ class CPUResourceManager:
         try:
             process = psutil.Process(pid)
             target_cores = cores or self.get_available_cpus()
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, process.cpu_affinity, target_cores)
+            await asyncio.to_thread(process.cpu_affinity, target_cores)
             self.logger.debug(f"Đặt CPU affinity cho PID={pid} => {target_cores}.")
             return True
         except psutil.NoSuchProcess:
@@ -190,7 +185,6 @@ class CPUResourceManager:
             all_pids = [proc.pid for proc in psutil.process_iter(attrs=['pid'])]
             external_pids = set(all_pids) - set(target_pids)
 
-            # Tạo cgroup cho mỗi PID external
             results = []
             for pid_ in external_pids:
                 result = await self.throttle_cpu_usage(pid_, throttle_percentage)
@@ -245,7 +239,6 @@ class GPUResourceManager:
         return self.gpu_initialized
 
     async def get_gpu_count(self) -> int:
-        """Trả về số lượng GPU khả dụng."""
         if not self.gpu_initialized:
             return 0
         try:
@@ -254,7 +247,6 @@ class GPUResourceManager:
             return 0
 
     async def get_handle(self, gpu_index: int):
-        """Lấy handle GPU."""
         if not self.gpu_initialized:
             return None
         try:
@@ -263,9 +255,6 @@ class GPUResourceManager:
             return None
 
     async def get_gpu_power_limit(self, gpu_index: int) -> Optional[int]:
-        """
-        Lấy power limit GPU (W).
-        """
         if not self.gpu_initialized:
             return None
         try:
@@ -279,9 +268,6 @@ class GPUResourceManager:
             return None
 
     async def set_gpu_power_limit(self, pid: int, gpu_index: int, power_limit_w: int) -> bool:
-        """
-        Đặt power limit GPU (W).
-        """
         if not self.gpu_initialized:
             self.logger.error("GPUResourceManager chưa init. Không thể set power limit.")
             return False
@@ -311,9 +297,6 @@ class GPUResourceManager:
             return False
 
     async def set_gpu_clocks(self, pid: int, gpu_index: int, sm_clock: int, mem_clock: int) -> bool:
-        """
-        Đặt xung nhịp GPU SM và MEM (MHz) bằng nvidia-smi lock.
-        """
         if not self.gpu_initialized:
             self.logger.error("GPUResourceManager chưa init. Không thể set clocks.")
             return False
@@ -322,7 +305,6 @@ class GPUResourceManager:
             if not handle or sm_clock <= 0 or mem_clock <= 0:
                 return False
 
-            # Lưu xung nhịp hiện tại
             current_sm_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_SM)
             current_mem_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_MEM)
 
@@ -333,13 +315,13 @@ class GPUResourceManager:
             self.process_gpu_settings[pid][gpu_index]['sm_clock_mhz'] = current_sm_clock
             self.process_gpu_settings[pid][gpu_index]['mem_clock_mhz'] = current_mem_clock
 
-            loop = asyncio.get_event_loop()
+            # Thay vì get_event_loop().run_in_executor -> dùng asyncio.to_thread
             cmd_sm = [
                 'nvidia-smi',
                 '-i', str(gpu_index),
                 '--lock-gpu-clocks=' + str(sm_clock)
             ]
-            await loop.run_in_executor(None, subprocess.run, cmd_sm, {'check': True})
+            await asyncio.to_thread(subprocess.run, cmd_sm, {'check': True})
             self.logger.debug(f"Set SM clock={sm_clock}MHz cho GPU={gpu_index}, PID={pid}.")
 
             cmd_mem = [
@@ -347,7 +329,7 @@ class GPUResourceManager:
                 '-i', str(gpu_index),
                 '--lock-memory-clocks=' + str(mem_clock)
             ]
-            await loop.run_in_executor(None, subprocess.run, cmd_mem, {'check': True})
+            await asyncio.to_thread(subprocess.run, cmd_mem, {'check': True})
             self.logger.debug(f"Set MEM clock={mem_clock}MHz cho GPU={gpu_index}, PID={pid}.")
 
             return True
@@ -360,68 +342,56 @@ class GPUResourceManager:
 
     async def limit_temperature(self, gpu_index: int, temperature_threshold: float, fan_speed_increase: float) -> bool:
         """
-        Quản lý nhiệt độ GPU bằng cách điều chỉnh quạt, giới hạn power và xung nhịp.
-        - Nếu nhiệt độ vượt ngưỡng => hạ power limit, hạ xung nhịp.
-        - Nếu nhiệt độ dưới ngưỡng => boost xung nhịp (nếu muốn),
-        - Nếu nhiệt độ nằm gần threshold => có thể bỏ qua hoặc logic tùy ý.
-
-        Args:
-            gpu_index (int): Chỉ số GPU.
-            temperature_threshold (float): Ngưỡng nhiệt độ tối đa (°C).
-            fan_speed_increase (float): Tỷ lệ tăng tốc độ quạt (%) để làm mát.
-
-        Returns:
-            bool: True nếu tất cả thao tác thành công, False nếu xảy ra lỗi.
+        Hạn chế nhiệt độ GPU bằng cách điều chỉnh quạt, power limit, xung nhịp...
         """
         try:
             # 1) Kiểm tra đã init NVML chưa
             if not self.gpu_initialized:
                 self.logger.error("GPUResourceManager chưa init. Không thể limit_temperature.")
                 return False
-
+            
             # 2) Tăng tốc độ quạt (nếu GPU driver hỗ trợ)
             success_fan = await self.control_fan_speed(gpu_index, fan_speed_increase)
             if success_fan:
                 self.logger.info(f"Quạt GPU={gpu_index} tăng thêm {fan_speed_increase}%.")
             else:
-                self.logger.warning(f"Không thể điều chỉnh quạt GPU={gpu_index}. Có thể driver không hỗ trợ.")
+                self.logger.warning(f"Không thể điều chỉnh quạt GPU={gpu_index}.")
 
             # 3) Kiểm tra nhiệt độ hiện tại
             current_temperature = await self.get_gpu_temperature(gpu_index)
             if current_temperature is None:
-                self.logger.warning(f"Không thể lấy nhiệt độ GPU={gpu_index}. Bỏ qua điều chỉnh nhiệt.")
+                self.logger.warning(f"Không thể lấy nhiệt độ GPU={gpu_index}. Bỏ qua điều chỉnh.")
                 return False
-
+            
             # 4) Lấy xung nhịp hiện tại (để hạ hoặc boost)
             current_sm_clock = None
             current_mem_clock = None
-
-            try:
-                handle = await self.get_handle(gpu_index)
-                if handle:
-                    loop = asyncio.get_event_loop()
+            handle = await self.get_handle(gpu_index)
+            if handle:
+                try:
                     # Lấy SM clock
-                    current_sm_clock = await loop.run_in_executor(
-                        None, pynvml.nvmlDeviceGetClock, handle, pynvml.NVML_CLOCK_SM
+                    current_sm_clock = await asyncio.to_thread(
+                        pynvml.nvmlDeviceGetClock, handle, pynvml.NVML_CLOCK_SM
                     )
                     # Lấy MEM clock
-                    current_mem_clock = await loop.run_in_executor(
-                        None, pynvml.nvmlDeviceGetClock, handle, pynvml.NVML_CLOCK_MEM
+                    current_mem_clock = await asyncio.to_thread(
+                        pynvml.nvmlDeviceGetClock, handle, pynvml.NVML_CLOCK_MEM
                     )
-            except Exception as e:
-                self.logger.error(f"Không thể lấy current clocks GPU={gpu_index}: {e}")
-                return False
+                except Exception as ex:
+                    self.logger.error(f"Không thể lấy current clocks GPU={gpu_index}: {ex}")
+                    return False
 
             if current_sm_clock is None or current_mem_clock is None:
                 self.logger.warning(f"current_sm_clock hoặc current_mem_clock = None, GPU={gpu_index}.")
                 return False
 
             # 5) So sánh nhiệt độ với threshold
-            if current_temperature > temperature_threshold:
-                # ***** Trường hợp nhiệt độ cao => throttle power + hạ xung nhịp *****
+            if current_temperature <= temperature_threshold:
+                 # ***** Trường hợp nhiệt độ cao => throttle power + hạ xung nhịp *****
                 self.logger.info(
                     f"Nhiệt độ GPU={gpu_index}={current_temperature}°C vượt {temperature_threshold}°C => throttle."
                 )
+
                 # Xác định mức độ “vượt”
                 excess_temp = current_temperature - temperature_threshold
                 if excess_temp <= 5:
@@ -437,7 +407,7 @@ class GPUResourceManager:
                 if current_power_limit is None:
                     self.logger.warning(f"Không thể get power_limit GPU={gpu_index}. Bỏ qua throttle.")
                     return False
-
+                
                 desired_power_limit = int(round(current_power_limit * (1 - throttle_pct / 100)))
                 # Giới hạn power limit
                 success_pl = await self.set_gpu_power_limit(pid=None, gpu_index=gpu_index, power_limit_w=desired_power_limit)
@@ -448,7 +418,7 @@ class GPUResourceManager:
                 else:
                     self.logger.error(f"Không thể set power limit GPU={gpu_index}.")
 
-                # Hạ xung nhịp (VD: SM -100, MEM -50)
+                # Hạ xung nhịp
                 new_sm_clock = max(500, current_sm_clock - 100)
                 new_mem_clock = max(300, current_mem_clock - 50)
                 success_clocks = await self.set_gpu_clocks(pid=None, gpu_index=gpu_index,
@@ -461,7 +431,7 @@ class GPUResourceManager:
                     self.logger.warning(f"Không thể hạ xung nhịp GPU={gpu_index}.")
 
             elif current_temperature < temperature_threshold:
-                # ***** Trường hợp nhiệt độ thấp => boost (tuỳ ý) *****
+                # ***** Trường hợp nhiệt độ bình thường *****
                 self.logger.info(
                     f"Nhiệt độ GPU={gpu_index}={current_temperature}°C < {temperature_threshold}°C => có thể boost."
                 )
@@ -473,7 +443,7 @@ class GPUResourceManager:
                 else:
                     boost_pct = 30
                 self.logger.debug(f"diff_temp={diff_temp}°C => boost_pct={boost_pct}%")
-
+                
                 # Tính clock mới
                 # Giới hạn SM=1530, MEM=877 (ví dụ) hoặc tuỳ GPU
                 new_sm_clock = min(current_sm_clock + int(current_sm_clock * boost_pct / 100), 1530)
@@ -492,10 +462,46 @@ class GPUResourceManager:
                 self.logger.debug(
                     f"Nhiệt độ GPU={gpu_index}={current_temperature}°C xấp xỉ threshold={temperature_threshold}°C => không điều chỉnh."
                 )
-
             return True
         except Exception as e:
             self.logger.error(f"Lỗi khi điều khiển nhiệt độ GPU={gpu_index}: {e}")
+            return False
+        
+    async def get_gpu_temperature(self, gpu_index: int) -> Optional[float]:
+        """
+        Helper lấy nhiệt độ GPU => tách riêng, thay vì lồng ghép.
+        """
+        try:
+            if not self.gpu_initialized:
+                return None
+            handle = await self.get_handle(gpu_index)
+            if not handle:
+                return None
+            temp = await asyncio.to_thread(
+                pynvml.nvmlDeviceGetTemperature, handle, pynvml.NVML_TEMPERATURE_GPU
+            )
+            return float(temp)
+        except Exception as e:
+            self.logger.error(f"Lỗi get_gpu_temperature GPU={gpu_index}: {e}")
+            return None
+
+    async def control_fan_speed(self, gpu_index: int, increase_percentage: float) -> bool:
+        """
+        Điều chỉnh quạt GPU (nvidia-settings). Chỉ gọi khi driver hỗ trợ.
+        """
+        try:
+            cmd = [
+                'nvidia-settings',
+                '-a', f'[fan:{gpu_index}]/GPUFanControlState=1',
+                '-a', f'[fan:{gpu_index}]/GPUTargetFanSpeed={int(increase_percentage)}'
+            ]
+            await asyncio.to_thread(subprocess.run, cmd, {'check': True})
+            return True
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Lỗi khi điều chỉnh quạt GPU {gpu_index}: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Lỗi khi điều chỉnh quạt GPU {gpu_index}: {e}")
             return False
 
     async def restore_resources(self, pid: int) -> bool:
@@ -566,9 +572,7 @@ class NetworkResourceManager:
                 '--pid-owner', str(pid),
                 '-j', 'MARK', '--set-mark', str(mark)
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd, {'check': True})
             self.logger.debug(f"MARK iptables cho PID={pid}, mark={mark}.")
             self.process_marks[pid] = mark
             return True
@@ -589,9 +593,7 @@ class NetworkResourceManager:
                 '--pid-owner', str(pid),
                 '-j', 'MARK', '--set-mark', str(mark)
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd, {'check': True})
             self.logger.debug(f"Hủy MARK iptables cho PID={pid}, mark={mark}.")
             if pid in self.process_marks:
                 del self.process_marks[pid]
@@ -608,36 +610,27 @@ class NetworkResourceManager:
         Giới hạn băng thông thông qua tc (event-driven).
         """
         try:
-            # Thêm qdisc root
             cmd_qdisc = [
                 'tc', 'qdisc', 'add', 'dev', interface,
                 'root', 'handle', '1:', 'htb', 'default', '12'
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd_qdisc, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd_qdisc, {'check': True})
             self.logger.debug(f"Thêm tc qdisc 'htb' cho {interface}.")
 
-            # Thêm class htb
             cmd_class = [
                 'tc', 'class', 'add', 'dev', interface,
                 'parent', '1:', 'classid', '1:1',
                 'htb', 'rate', f'{bandwidth_mbps}mbit'
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd_class, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd_class, {'check': True})
             self.logger.debug(f"Thêm tc class '1:1' rate={bandwidth_mbps}mbit cho {interface}.")
 
-            # Thêm filter áp dụng cho fwmark
             cmd_filter = [
                 'tc', 'filter', 'add', 'dev', interface,
                 'protocol', 'ip', 'parent', '1:', 'prio', '1',
                 'handle', str(mark), 'fw', 'flowid', '1:1'
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd_filter, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd_filter, {'check': True})
             self.logger.debug(f"Thêm tc filter mark={mark} trên {interface}.")
 
             return True
@@ -650,35 +643,26 @@ class NetworkResourceManager:
         Gỡ bỏ băng thông thông qua tc (event-driven).
         """
         try:
-            # Xoá filter
             cmd_filter_del = [
                 'tc', 'filter', 'del', 'dev', interface,
                 'protocol', 'ip', 'parent', '1:', 'prio', '1',
                 'handle', str(mark), 'fw', 'flowid', '1:1'
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd_filter_del, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd_filter_del, {'check': True})
             self.logger.debug(f"Xóa tc filter mark={mark} trên {interface}.")
 
-            # Xoá class
             cmd_class_del = [
                 'tc', 'class', 'del', 'dev', interface,
                 'parent', '1:', 'classid', '1:1'
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd_class_del, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd_class_del, {'check': True})
             self.logger.debug(f"Xóa tc class '1:1' trên {interface}.")
 
-            # Xoá qdisc root
             cmd_qdisc_del = [
                 'tc', 'qdisc', 'del', 'dev', interface,
                 'root', 'handle', '1:', 'htb'
             ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd_qdisc_del, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd_qdisc_del, {'check': True})
             self.logger.debug(f"Xóa tc qdisc 'htb' trên {interface}.")
             return True
         except subprocess.CalledProcessError as e:
@@ -686,9 +670,6 @@ class NetworkResourceManager:
             return False
 
     async def limit_bandwidth_for_pid(self, pid: int, interface: str, bandwidth_mbps: float) -> bool:
-        """
-        Giới hạn băng thông cho PID cụ thể thông qua packets mark + tc.
-        """
         try:
             mark = pid % 32768
             success_mark = await self.mark_packets(pid, mark)
@@ -707,9 +688,6 @@ class NetworkResourceManager:
             return False
 
     async def remove_bandwidth_limit_for_pid(self, pid: int, interface: str) -> bool:
-        """
-        Gỡ bỏ giới hạn băng thông cho PID cụ thể.
-        """
         try:
             mark = self.process_marks.get(pid)
             if not mark:
@@ -749,12 +727,8 @@ class DiskIOResourceManager:
         Đặt trọng số I/O cho PID (ionice).
         """
         try:
-            cmd = [
-                'ionice', '-c', '2', '-n', str(io_weight), '-p', str(pid)
-            ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd, {'check': True}
-            )
+            cmd = ['ionice', '-c', '2', '-n', str(io_weight), '-p', str(pid)]
+            await asyncio.to_thread(subprocess.run, cmd, {'check': True})
             self.logger.debug(f"Set io_weight={io_weight} cho PID={pid} qua ionice.")
             return True
         except subprocess.CalledProcessError as e:
@@ -769,12 +743,8 @@ class DiskIOResourceManager:
         Khôi phục Disk I/O => set io_weight=0 (class=0).
         """
         try:
-            cmd = [
-                'ionice', '-c', '0', '-p', str(pid)
-            ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd, {'check': True}
-            )
+            cmd = ['ionice', '-c', '0', '-p', str(pid)]
+            await asyncio.to_thread(subprocess.run, cmd, {'check': True})
             self.logger.info(f"Khôi phục Disk I/O cho PID={pid} (ionice class=0).")
             return True
         except subprocess.CalledProcessError as e:
@@ -804,9 +774,7 @@ class CacheResourceManager:
         """
         try:
             cmd = ['sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches']
-            await asyncio.get_event_loop().run_in_executor(
-                None, subprocess.run, cmd, {'check': True}
-            )
+            await asyncio.to_thread(subprocess.run, cmd, {'check': True})
             self.logger.debug("Đã drop caches.")
             if pid:
                 self.dropped_pids.append(pid)
@@ -867,9 +835,7 @@ class MemoryResourceManager:
         try:
             process = psutil.Process(pid)
             mem_bytes = memory_limit_mb * 1024 * 1024
-            await asyncio.get_event_loop().run_in_executor(
-                None, process.rlimit, psutil.RLIMIT_AS, (mem_bytes, mem_bytes)
-            )
+            await asyncio.to_thread(process.rlimit, psutil.RLIMIT_AS, (mem_bytes, mem_bytes))
             self.logger.debug(f"Đặt memory_limit={memory_limit_mb}MB cho PID={pid}.")
             return True
         except psutil.NoSuchProcess:
@@ -905,8 +871,8 @@ class MemoryResourceManager:
         """
         try:
             process = psutil.Process(pid)
-            await asyncio.get_event_loop().run_in_executor(
-                None, process.rlimit,
+            await asyncio.to_thread(
+                process.rlimit,
                 psutil.RLIMIT_AS,
                 (psutil.RLIM_INFINITY, psutil.RLIM_INFINITY)
             )
@@ -930,7 +896,7 @@ class MemoryResourceManager:
 
 
 ###############################################################################
-#                     RESOURCE CONTROL FACTORY                                # 
+#                     RESOURCE CONTROL FACTORY                                #
 ###############################################################################
 class ResourceControlFactory:
     """
@@ -943,7 +909,7 @@ class ResourceControlFactory:
         Khởi tạo tất cả resource managers theo mô hình event-driven.
 
         Args:
-            config (Dict[str, Any]): Cấu hình của ResourceManager (JSON).
+            config (Dict[str, Any]): Cấu hình ResourceManager (JSON).
             logger (logging.Logger): Logger.
 
         Returns:
@@ -951,7 +917,6 @@ class ResourceControlFactory:
         """
         resource_managers = {}
 
-        # Danh sách các lớp manager cần khởi tạo
         manager_classes = {
             'cpu': CPUResourceManager,
             'gpu': GPUResourceManager,

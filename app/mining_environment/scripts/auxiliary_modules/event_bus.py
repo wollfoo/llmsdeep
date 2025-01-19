@@ -26,13 +26,8 @@ class EventBus:
     def subscribe(self, event_type: str, callback: Callable[[Any], None]):
         """
         Đăng ký một subscriber cho một loại sự kiện cụ thể.
-        (ĐÃ CHUYỂN thành HÀM ĐỒNG BỘ, do chỉ append callback và không await gì cả.)
-
-        Args:
-            event_type (str): Tên loại sự kiện.
-            callback (Callable[[Any], None]): Hàm callback xử lý sự kiện (phải async).
+        callback phải là hàm async (chấp nhận data).
         """
-        # Không cần async vì không await bất kỳ điều gì.
         if event_type not in self.subscribers:
             self.subscribers[event_type] = []
         self.subscribers[event_type].append(callback)
@@ -40,10 +35,6 @@ class EventBus:
     async def _safe_execute(self, callback: Callable[[Any], None], data: Any):
         """
         Thực thi callback an toàn và xử lý ngoại lệ.
-
-        Args:
-            callback (Callable[[Any], None]): Hàm callback (async) để thực thi.
-            data (Any): Dữ liệu sự kiện được truyền vào callback.
         """
         try:
             await callback(data)
@@ -53,20 +44,16 @@ class EventBus:
     async def publish(self, event_type: str, data: Any):
         """
         Phát hành một sự kiện tới tất cả các subscriber đã đăng ký.
-
-        Args:
-            event_type (str): Tên loại sự kiện.
-            data (Any): Dữ liệu kèm theo sự kiện.
+        Bảo đảm chạy trên cùng 1 loop => tránh “attached to a different loop”.
         """
         retries = 0
         while retries < self.retry_attempts:
             try:
                 async with self.lock:
                     if event_type in self.subscribers:
-                        tasks = []
-                        for callback in self.subscribers[event_type]:
-                            print(f"Phát hành sự kiện '{event_type}' tới {callback}.")
-                            tasks.append(asyncio.create_task(self._safe_execute(callback, data)))
+                        # Thay vì create_task => gather đồng loạt
+                        callbacks = self.subscribers[event_type]
+                        tasks = [self._safe_execute(cb, data) for cb in callbacks]
                         await asyncio.gather(*tasks, return_exceptions=True)
                 break  # Thoát vòng lặp nếu publish thành công
             except Exception as e:
@@ -77,10 +64,6 @@ class EventBus:
     async def enqueue_event(self, event_type: str, data: Any):
         """
         Đẩy một sự kiện vào hàng đợi.
-
-        Args:
-            event_type (str): Tên loại sự kiện.
-            data (Any): Dữ liệu kèm theo sự kiện.
         """
         try:
             await self.queue.put((event_type, data))
@@ -108,4 +91,4 @@ class EventBus:
         Dừng EventBus bằng cách hủy các coroutine lắng nghe.
         """
         print("Đang dừng EventBus...")
-        # Không cần xử lý gì thêm ở đây, chỉ dừng lắng nghe.
+        # Không cần logic đặc biệt, coroutine lắng nghe sẽ được cancel bên ngoài.

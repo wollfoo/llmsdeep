@@ -1,5 +1,3 @@
-# azure_clients.py
-
 import os
 import logging
 import asyncio
@@ -11,11 +9,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
-
-
-
 from .auxiliary_modules.models import ConfigModel
-
 
 # Các import từ SDK Azure
 from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
@@ -26,7 +20,7 @@ from azure.monitor.query import (
     LogsQueryResult,
 )
 from azure.mgmt.security import SecurityCenter
-from azure.loganalytics import LogAnalyticsDataClient, models as logmodels
+from azure.loganalytics import LogAnalyticsDataClient
 from azure.loganalytics.models import QueryBody
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
@@ -43,25 +37,13 @@ from azure.ai.anomalydetector.models import (
     UnivariateEntireDetectionResult,
 )
 
-# from openai import AzureOpenAI  # (đã bị loại bỏ trong code gốc)
-
 ###############################################################################
 #              DECORATOR ĐỂ RETRY BẤT ĐỒNG BỘ (EVENT-DRIVEN-STYLE)           #
 ###############################################################################
 
 def async_retry(exception_to_check: Any, tries: int = 4, delay: float = 3.0, backoff: float = 2.0):
     """
-    Decorator bất đồng bộ để retry một coroutine khi gặp exception cụ thể.  
-    Giúp “sự kiện” có thể tự trigger lại, thay vì chặn luồng chính.
-
-    Args:
-        exception_to_check (Exception or tuple): Loại exception cần bắt.
-        tries (int): Số lần thử tối đa.
-        delay (float): Độ trễ ban đầu (giây).
-        backoff (float): Hệ số nhân cho mỗi lần retry (lũy thừa).
-
-    Returns:
-        Callable: Coroutine đã bọc logic retry.
+    Decorator bất đồng bộ để retry một coroutine khi gặp exception cụ thể.
     """
     def decorator_retry(func: Any):
         @functools.wraps(func)
@@ -87,9 +69,7 @@ def async_retry(exception_to_check: Any, tries: int = 4, delay: float = 3.0, bac
 
 class AzureBaseClient:
     """
-    Lớp cơ sở cho các client Azure khác, chuyển sang mô hình event-driven:
-    - Không polling liên tục để lấy resource,
-    - Thay vào đó, gọi discover_resources(...) “khi có sự kiện” (VD: user request, ResourceManager).
+    Lớp cơ sở cho các client Azure khác. Cung cấp logic authenticate() và discover_resources().
     """
     def __init__(self, logger: logging.Logger):
         self.logger = logger
@@ -98,14 +78,13 @@ class AzureBaseClient:
             self.logger.error("AZURE_SUBSCRIPTION_ID không được thiết lập.")
             raise ValueError("AZURE_SUBSCRIPTION_ID không được thiết lập.")
 
-        # Tất cả đều auth 1 lần, sẵn sàng cho event-driven
         self.credential = self.authenticate()
         self.resource_graph_client = ResourceGraphClient(self.credential)
         self.resource_management_client = ResourceManagementClient(self.credential, self.subscription_id)
 
     def authenticate(self) -> ClientSecretCredential:
         """
-        Thực hiện authenticate, lưu credential cho event-driven use-case.
+        Thực hiện authenticate, lưu credential.
         """
         client_id = os.getenv('AZURE_CLIENT_ID')
         client_secret = os.getenv('AZURE_CLIENT_SECRET')
@@ -129,8 +108,8 @@ class AzureBaseClient:
 
     def discover_resources(self, resource_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Khám phá resource thông qua Resource Graph.
-        *Event-driven*: Gọi khi “cần xem resource” (VD: do `resource_manager.py` trigger).
+        Khám phá resource thông qua Resource Graph (đồng bộ). 
+        Event-driven => Gọi khi “cần”.
         """
         try:
             query = "Resources"
@@ -142,25 +121,20 @@ class AzureBaseClient:
                 subscriptions=[self.subscription_id],
                 query=query
             )
-
-            # Gọi trực tiếp mà không sử dụng asyncio
             response = self.resource_graph_client.resources(request)
-
             if not isinstance(response.data, list):
                 self.logger.warning("Dữ liệu trả về không phải là list.")
                 return []
 
-            resources = [
-                {
+            resources = []
+            for res in response.data:
+                resources.append({
                     'id': res.get('id', 'N/A'),
                     'name': res.get('name', 'N/A'),
                     'type': res.get('type', 'N/A'),
-                    'resourceGroup': res.get('resourceGroup', 'N/A'),
-                }
-                for res in response.data
-            ]
-
-            self.logger.info(f"Đã khám phá {len(resources)} tài nguyên (event-driven).")
+                    'resourceGroup': res.get('resourceGroup', 'N/A')
+                })
+            self.logger.info(f"Đã khám phá {len(resources)} tài nguyên.")
             return resources
         except Exception as e:
             self.logger.error(f"Lỗi khi khám phá tài nguyên: {e}", exc_info=True)
@@ -173,8 +147,7 @@ class AzureBaseClient:
 class AzureSentinelClient(AzureBaseClient):
     """
     Client Azure Sentinel.  
-    - Phương thức get_recent_alerts() được gọi khi “có sự kiện” (VD: anomaly_detector.py)  
-      cần lấy alert mới 1 ngày / n ngày.
+    Dùng SecurityCenter để list() alert => filter theo ngày.
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
@@ -182,27 +155,22 @@ class AzureSentinelClient(AzureBaseClient):
 
     async def get_recent_alerts(self, days: int = 1) -> List[Any]:
         """
-        Lấy alert gần đây từ Azure Sentinel.  
-        *Event-driven*: Gọi khi anomaly_detector hay ResourceManager muốn check alert.
+        Lấy alert gần đây từ Azure Sentinel. 
         """
         try:
-            loop = asyncio.get_event_loop()
-            # Chuyển qua run_in_executor => non-block
-            alerts = await loop.run_in_executor(None, list, self.security_client.alerts.list())
+            # Chuyển qua to_thread => non-block
+            alerts = await asyncio.to_thread(lambda: list(self.security_client.alerts.list()))
             recent_alerts = []
             cutoff_time = datetime.utcnow() - timedelta(days=days)
 
             for alert in alerts:
-                if (
-                    hasattr(alert, 'properties')
-                    and hasattr(alert.properties, 'created_time')
-                    and alert.properties.created_time >= cutoff_time
-                ):
+                created_time = None
+                if hasattr(alert, 'properties') and hasattr(alert.properties, 'created_time'):
+                    created_time = alert.properties.created_time
+                if created_time and created_time >= cutoff_time:
                     recent_alerts.append(alert)
 
-            self.logger.info(
-                f"Đã lấy {len(recent_alerts)} alerts từ Azure Sentinel trong {days} ngày gần đây (event-driven)."
-            )
+            self.logger.info(f"Đã lấy {len(recent_alerts)} alerts từ Azure Sentinel trong {days} ngày gần đây.")
             return recent_alerts
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy alerts từ Azure Sentinel: {e}")
@@ -214,50 +182,36 @@ class AzureSentinelClient(AzureBaseClient):
 
 class AzureLogAnalyticsClient(AzureBaseClient):
     """
-    Client tương tác Log Analytics:
-    - Dùng event-driven, chỉ query logs khi “có sự kiện” (VD: anomaly_detector muốn check logs).
-    - Sử dụng async factory method create() để khởi tạo (gồm initialize).
+    Client tương tác Log Analytics (LogsQueryClient).
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
-        if not hasattr(self, "credential") or not self.credential:
-            raise AttributeError("Credential không được định nghĩa trong AzureBaseClient.")
-
         self.logs_client = LogsQueryClient(self.credential)
         self.log_analytics_mgmt_client = LogAnalyticsManagementClient(self.credential, self.subscription_id)
         self.workspace_ids: List[str] = []
 
     @classmethod
     async def create(cls, logger: logging.Logger) -> 'AzureLogAnalyticsClient':
-        """
-        Async factory method để tạo instance AzureLogAnalyticsClient.  
-        *Event-driven*: Gọi khi khởi tạo xong “cần query log Azure”.
-        """
         instance = cls(logger)
         await instance.initialize()
         return instance
 
     async def initialize(self):
-        """
-        Hàm khởi tạo async. Lấy workspace IDs 1 lần, xong sẵn sàng cho event-driven.
-        """
         self.workspace_ids = await self.get_workspace_ids()
 
     async def get_workspace_ids(self) -> List[str]:
         """
-        Lấy danh sách workspace IDs.  
-        *Event-driven*: Gọi khi init (hoặc khi “need workspace list”).
+        Lấy danh sách workspace IDs => return [resource_id,...].
         """
         try:
-            resources = await self.discover_resources('Microsoft.OperationalInsights/workspaces')
+            # discover_resources() là hàm đồng bộ => dùng to_thread
+            resources = await asyncio.to_thread(self.discover_resources, 'Microsoft.OperationalInsights/workspaces')
             if not resources:
                 self.logger.warning("Không tìm thấy Log Analytics Workspace nào.")
                 return []
-
             workspace_ids = [res['id'] for res in resources if 'id' in res]
-            self.logger.info(f"Đã tìm thấy {len(workspace_ids)} Log Analytics Workspaces (event-driven).")
+            self.logger.info(f"Đã tìm thấy {len(workspace_ids)} Log Analytics Workspaces.")
             return workspace_ids
-
         except Exception as e:
             self.logger.error(f"Lỗi khi lấy Workspace IDs: {e}")
             return []
@@ -278,15 +232,15 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 
     async def get_workspace_details(self, resource_id: str) -> Optional[Workspace]:
         """
-        Lấy chi tiết 1 workspace, gọi khi “cần check workspace detail”.
+        Lấy chi tiết 1 workspace => workspace object.
         """
         try:
             parsed = self.parse_log_analytics_id(resource_id)
             resource_group = parsed["resource_group"]
             workspace_name = parsed["workspace_name"]
 
-            ws = await asyncio.get_event_loop().run_in_executor(
-                None,
+            # Dùng partial + to_thread
+            ws = await asyncio.to_thread(
                 functools.partial(
                     self.log_analytics_mgmt_client.workspaces.get,
                     resource_group_name=resource_group,
@@ -294,7 +248,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                 )
             )
             self.logger.info(
-                f"Đã lấy thông tin workspace '{ws.name}' (group='{resource_group}') (event-driven)."
+                f"Đã lấy thông tin workspace '{ws.name}' (RG='{resource_group}')."
             )
             return ws
         except Exception as e:
@@ -303,17 +257,15 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 
     async def query_logs(self, query: str, days: int = 7) -> List[Dict[str, Any]]:
         """
-        Query logs theo ngày, event-driven: chỉ gọi khi “có sự kiện” check logs.
+        Query logs => days => timespan.
         """
         results = []
         if days < 0:
             self.logger.error("days phải >= 0.")
             return results
-
         if not self.workspace_ids:
             self.logger.error("Không có Workspace ID để truy vấn logs.")
             return results
-
         if not query:
             self.logger.error("Query không được để trống.")
             return results
@@ -333,8 +285,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                     continue
 
                 try:
-                    response = await asyncio.get_event_loop().run_in_executor(
-                        None,
+                    response = await asyncio.to_thread(
                         functools.partial(
                             self.logs_client.query_workspace,
                             workspace_id=customer_id,
@@ -342,9 +293,8 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                             timespan=timespan
                         )
                     )
-
                     if not isinstance(response.tables, list):
-                        self.logger.warning(f"Kết quả không hợp lệ từ Workspace GUID {customer_id}.")
+                        self.logger.warning(f"KQ không hợp lệ (Workspace GUID={customer_id}).")
                         continue
 
                     workspace_results = []
@@ -353,23 +303,19 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                             for row in table.rows:
                                 row_dict = dict(zip(table.columns, row))
                                 workspace_results.append(row_dict)
-
                     if workspace_results:
                         results.extend(workspace_results)
                         self.logger.info(
                             f"Truy vấn thành công workspace '{ws_details.name}' (GUID={customer_id})."
                         )
                     else:
-                        self.logger.warning(
-                            f"Không có dữ liệu trả về từ workspace '{ws_details.name}'."
-                        )
-
+                        self.logger.warning(f"Không có dữ liệu trả về từ workspace '{ws_details.name}'.")
                 except HttpResponseError as http_error:
                     self.logger.error(f"Lỗi HTTP Workspace GUID={customer_id}: {http_error}")
                 except Exception as workspace_error:
                     self.logger.error(f"Lỗi Workspace GUID={customer_id}: {workspace_error}")
 
-            self.logger.info(f"Tổng cộng lấy {len(results)} dòng log (event-driven).")
+            self.logger.info(f"Tổng cộng lấy {len(results)} dòng log.")
         except Exception as e:
             self.logger.critical(f"Lỗi nghiêm trọng khi truy vấn logs: {e}", exc_info=True)
         return results
@@ -378,14 +324,12 @@ class AzureLogAnalyticsClient(AzureBaseClient):
         self, query: str, start_time: datetime, end_time: datetime
     ) -> List[Dict[str, Any]]:
         """
-        Query logs với khoảng thời gian tùy chọn.  
-        Event-driven: Gọi khi anomaly_detector cần logs 1 time range.
+        Query logs 1 khoảng thời gian tùy chọn.
         """
         results = []
         if not self.workspace_ids:
             self.logger.error("Không có Workspace ID để truy vấn logs.")
             return results
-
         if start_time > end_time:
             self.logger.error("start_time phải <= end_time.")
             return results
@@ -401,8 +345,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                     continue
 
                 try:
-                    response = await asyncio.get_event_loop().run_in_executor(
-                        None,
+                    response = await asyncio.to_thread(
                         functools.partial(
                             self.logs_client.query_workspace,
                             workspace_id=customer_id,
@@ -410,15 +353,11 @@ class AzureLogAnalyticsClient(AzureBaseClient):
                             timespan=(start_time, end_time)
                         )
                     )
-
                     for table in response.tables:
                         for row in table.rows:
                             row_dict = dict(zip(table.columns, row))
                             results.append(row_dict)
-
-                    self.logger.info(
-                        f"Query logs thành công Workspace GUID={customer_id} (time range)."
-                    )
+                    self.logger.info(f"Query logs OK Workspace GUID={customer_id} (time range).")
                 except Exception as workspace_error:
                     self.logger.error(f"Lỗi Workspace GUID={customer_id}: {workspace_error}")
 
@@ -428,7 +367,7 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 
     async def query_aml_logs(self, days: int = 1) -> List[Dict[str, Any]]:
         """
-        Query AML logs, event-driven (anomaly_detector cần AML logs).  
+        Query AML logs => KQL => AzureDiagnostics
         """
         kql = f"""
         AzureDiagnostics
@@ -442,12 +381,9 @@ class AzureLogAnalyticsClient(AzureBaseClient):
 #        AZURE NETWORK WATCHER CLIENT (EVENT-DRIVEN)                          #
 ###############################################################################
 
-
 class AzureNetworkWatcherClient(AzureBaseClient):
     """
-    Client quản lý Network Watcher trong mô hình event-driven:
-    - Gọi get_flow_logs / create_flow_log / delete_flow_log khi “cần”
-    - Không duy trì vòng lặp polling.
+    Client quản lý Network Watcher: get_flow_logs, create_flow_log, etc.
     """
     def __init__(self, logger: logging.Logger):
         super().__init__(logger)
@@ -455,24 +391,19 @@ class AzureNetworkWatcherClient(AzureBaseClient):
 
     async def get_network_watcher_name(self, resource_group: str) -> Optional[str]:
         """
-        Lấy tên network watcher cho 1 resource group, event-driven: 
-        *Gọi khi ResourceManager/AnomalyDetector “cần check network watcher”.
+        Lấy tên network watcher cho 1 resource group => location => watchers
         """
         try:
-            # Lấy location của resource group
-            region = await asyncio.get_event_loop().run_in_executor(
-                None,
+            # Lấy location resource group => to_thread
+            rg_obj = await asyncio.to_thread(
                 functools.partial(
                     self.resource_management_client.resource_groups.get,
                     resource_group_name=resource_group
                 )
-            ).then(lambda rg: rg.location)
-
-            watchers = await asyncio.get_event_loop().run_in_executor(
-                None,
-                list,
-                self.network_client.network_watchers.list_all()
             )
+            region = rg_obj.location
+
+            watchers = await asyncio.to_thread(lambda: list(self.network_client.network_watchers.list_all()))
             for watcher in watchers:
                 if watcher.location.lower() == region.lower():
                     self.logger.info(f"Network Watcher '{watcher.name}' cho vùng '{region}'.")
@@ -483,43 +414,38 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             self.logger.error(f"Lỗi khi tìm Network Watcher cho RG '{resource_group}': {e}")
             return None
 
-    async def get_flow_logs(self, network_watcher_resource_group: str, network_watcher_name: str, nsg_name: str) -> List[Any]:
+    async def get_flow_logs(self, nw_rg: str, nw_name: str, nsg_name: str) -> List[Any]:
         """
-        Lấy flow logs từ NSG, event-driven: “cần check flow logs”.
+        Lấy flow logs từ NSG
         """
         try:
-            flow_log_configurations = await asyncio.get_event_loop().run_in_executor(
-                None,
+            flow_log_configurations = await asyncio.to_thread(
                 functools.partial(
                     self.network_client.flow_logs.list,
-                    resource_group_name=network_watcher_resource_group,
-                    network_watcher_name=network_watcher_name
+                    resource_group_name=nw_rg,
+                    network_watcher_name=nw_name
                 )
             )
-            flow_logs = [
-                log for log in flow_log_configurations
-                if hasattr(log, 'target_resource_id') and log.target_resource_id.endswith(nsg_name)
-            ]
-            self.logger.info(
-                f"Lấy {len(flow_logs)} flow logs từ NSG {nsg_name}, RG {network_watcher_resource_group} (event-driven)."
-            )
+            # Filter log
+            flow_logs = []
+            for log in flow_log_configurations:
+                if hasattr(log, 'target_resource_id') and log.target_resource_id.endswith(nsg_name):
+                    flow_logs.append(log)
+            self.logger.info(f"Lấy {len(flow_logs)} flow logs từ NSG={nsg_name}, RG={nw_rg}.")
             return flow_logs
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi lấy flow logs từ NSG {nsg_name}, RG {network_watcher_resource_group}: {e}"
+                f"Lỗi khi lấy flow logs từ NSG {nsg_name}, RG={nw_rg}: {e}"
             )
             return []
 
-    async def create_flow_log(
-        self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str,
-        params: Dict[str, Any]
-    ) -> Optional[Any]:
+    async def create_flow_log(self, resource_group: str, network_watcher_name: str, 
+                              nsg_name: str, flow_log_name: str, params: Dict[str, Any]) -> Optional[Any]:
         """
-        Tạo flow log cho NSG, event-driven: “cần enable flow log”.
+        Tạo flow log => to_thread
         """
         try:
-            flow_log = await asyncio.get_event_loop().run_in_executor(
-                None,
+            flow_log_op = await asyncio.to_thread(
                 functools.partial(
                     self.network_client.flow_logs.begin_create_or_update,
                     resource_group_name=resource_group,
@@ -527,9 +453,10 @@ class AzureNetworkWatcherClient(AzureBaseClient):
                     flow_log_name=flow_log_name,
                     parameters=params
                 )
-            ).result()
+            )
+            flow_log = flow_log_op.result()
             self.logger.info(
-                f"Đã tạo flow log {flow_log_name} cho NSG {nsg_name}, RG {resource_group} (event-driven)."
+                f"Đã tạo flow log {flow_log_name} cho NSG {nsg_name}, RG {resource_group}."
             )
             return flow_log
         except Exception as e:
@@ -538,48 +465,46 @@ class AzureNetworkWatcherClient(AzureBaseClient):
             )
             return None
 
-    async def delete_flow_log(
-        self, resource_group: str, network_watcher_name: str, nsg_name: str, flow_log_name: str
-    ) -> bool:
+    async def delete_flow_log(self, resource_group: str, network_watcher_name: str,
+                              nsg_name: str, flow_log_name: str) -> bool:
         """
-        Xóa flow log, event-driven: “cần remove flow log”.
+        Xóa flow log => to_thread
         """
         try:
-            await asyncio.get_event_loop().run_in_executor(
-                None,
+            delete_op = await asyncio.to_thread(
                 functools.partial(
                     self.network_client.flow_logs.begin_delete,
                     resource_group_name=resource_group,
                     network_security_group_name=nsg_name,
                     flow_log_name=flow_log_name
                 )
-            ).result()
+            )
+            delete_op.result()
             self.logger.info(
                 f"Đã xóa flow log {flow_log_name} (NSG={nsg_name}, RG={resource_group})."
             )
             return True
         except Exception as e:
             self.logger.error(
-                f"Lỗi khi xóa flow log {flow_log_name}, NSG {nsg_name}, RG {resource_group}: {e}"
+                f"Lỗi khi xóa flow log {flow_log_name}, NSG={nsg_name}, RG={resource_group}: {e}"
             )
             return False
 
-    async def check_flow_log_status(self, network_watcher_resource_group: str, network_watcher_name: str, flow_log_name: str) -> Optional[Dict[str, Any]]:
+    async def check_flow_log_status(self, nw_rg: str, nw_name: str, flow_log_name: str) -> Optional[Dict[str, Any]]:
         """
-        Kiểm tra trạng thái Flow Log, event-driven: “cần check flow log status”.
+        Kiểm tra trạng thái Flow Log => to_thread
         """
         try:
-            flow_log = await asyncio.get_event_loop().run_in_executor(
-                None,
+            flow_log = await asyncio.to_thread(
                 functools.partial(
                     self.network_client.flow_logs.get,
-                    resource_group_name=network_watcher_resource_group,
-                    network_watcher_name=network_watcher_name,
+                    resource_group_name=nw_rg,
+                    network_watcher_name=nw_name,
                     flow_log_name=flow_log_name
                 )
             )
             self.logger.info(
-                f"Flow Log {flow_log_name}, provisioning_state={flow_log.provisioning_state} (event-driven)."
+                f"Flow Log {flow_log_name}, provisioning_state={flow_log.provisioning_state}."
             )
             return {
                 "id": flow_log.id,
@@ -595,17 +520,14 @@ class AzureNetworkWatcherClient(AzureBaseClient):
 #         AZURE ANOMALY DETECTOR CLIENT (EVENT-DRIVEN)                        #
 ###############################################################################
 
-
 class AzureAnomalyDetectorClient(AzureBaseClient):
     """
     Client Azure Anomaly Detector (event-driven).
     """
-
     def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
         super().__init__(logger)
         self.logger = logger
 
-        # Gán config vào self.config
         if isinstance(config, ConfigModel):
             config_dict = config.to_dict()
         else:
@@ -627,110 +549,86 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
                 endpoint=self.endpoint,
                 credential=AzureKeyCredential(self.api_key)
             )
-            self.logger.info("Kết nối Azure Anomaly Detector thành công (event-driven).")
+            self.logger.info("Kết nối Azure Anomaly Detector thành công.")
         except Exception as e:
             self.logger.error(f"Lỗi kết nối Azure Anomaly Detector: {e}")
             raise e
 
     async def detect_anomalies(self, metric_data: Dict[str, Any]) -> Dict[str, List[str]]:
         """
-        Phát hiện bất thường cho các PID (nhiều metric) bằng API detect_univariate_entire_series.
-
-        Cấu trúc metric_data:
-        {
-          "1234": {   # pid
-            "cpu_usage": [float, float, ...],
-            "gpu_usage": [...],
-            "cache_usage": [...],
-            "network_usage": [...]
-          },
-          "5678": {...},
-          ...
-        }
-
-        Trả về dict: { pid: [danh_sách_metric_bất_thường], ... }
-        Nếu pid không có metric nào bất thường => không có key pid hoặc list rỗng.
+        Phát hiện bất thường cho các PID (nhiều metric).
         """
         anomalies = {}
         metrics_to_analyze = ['cpu_usage', 'gpu_usage', 'cache_usage', 'network_usage']
         min_data_points = 12
-        granularity = self.config.get("granularity", "minutely")  # Hỗ trợ cấu hình granularity
+        granularity = self.config.get("granularity", "minutely")
 
-        async def analyze_pid_metric(pid: str, metric_name: str, metric_values: List[float]) -> Optional[str]:
+        async def analyze_pid_metric(pid: str, metric_name: str, values: List[float]) -> Optional[str]:
             """
-            Phân tích 1 metric cho PID -> trả về metric_name nếu bất thường, None nếu không.
+            Phân tích 1 metric => trả về metric_name nếu có bất thường, None nếu ko.
             """
             try:
-                if not isinstance(metric_values, list) or len(metric_values) < min_data_points:
+                if len(values) < min_data_points:
                     self.logger.warning(
-                        f"PID={pid} {metric_name}: không đủ dữ liệu hoặc không hợp lệ (cần >= {min_data_points})."
+                        f"PID={pid} {metric_name}: không đủ dữ liệu (cần >= {min_data_points})."
                     )
                     return None
 
-                # Tạo time series
                 from datetime import datetime, timedelta
-                series = []
                 current_time = datetime.utcnow()
-                for i, value in enumerate(metric_values):
-                    if not isinstance(value, (int, float)):
+                series = []
+                for i, val in enumerate(values):
+                    if not isinstance(val, (int, float)):
                         self.logger.warning(
-                            f"PID={pid} {metric_name}: giá trị không hợp lệ ({value})."
+                            f"PID={pid} {metric_name}: giá trị không hợp lệ ({val})."
                         )
                         continue
-                    # Mỗi data point tương ứng 1 phút ngược về quá khứ (VD)
-                    timestamp = current_time - timedelta(minutes=len(metric_values) - i)
-                    series.append(TimeSeriesPoint(timestamp=timestamp.isoformat(), value=value))
+                    timestamp = current_time - timedelta(minutes=len(values) - i)
+                    series.append(TimeSeriesPoint(timestamp=timestamp.isoformat(), value=val))
 
-                # Tạo univariate detection option
                 options = UnivariateDetectionOptions(
                     series=series,
                     granularity=granularity,
                     sensitivity=95
                 )
 
-                # Gọi API async
-                response = await self.client.detect_univariate_entire_series(options=options)
-
-                # Kiểm tra if any True
+                # Gọi API detect => blocking => to_thread
+                response = await asyncio.to_thread(
+                    self.client.detect_univariate_entire_series,
+                    options=options
+                )
                 if any(response.is_anomaly):
                     self.logger.warning(f"PID={pid} bất thường metric={metric_name}.")
                     return metric_name
-
             except Exception as e:
                 self.logger.error(f"Lỗi phân tích PID={pid}, metric={metric_name}: {e}")
             return None
 
         tasks = []
-        # Tạo các coroutine
         for pid, metrics in metric_data.items():
             if not isinstance(metrics, dict):
-                self.logger.warning(f"PID={pid}: metric_data không hợp lệ, bỏ qua.")
+                self.logger.warning(f"PID={pid}: metric_data không hợp lệ => bỏ qua.")
                 continue
-
             for metric_name in metrics_to_analyze:
                 metric_values = metrics.get(metric_name, [])
                 task = asyncio.create_task(analyze_pid_metric(pid, metric_name, metric_values))
                 tasks.append(task)
 
-        # Gather tất cả các task => results
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Tổng hợp anomalies
         idx = 0
-        pids_list = list(metric_data.keys())  # Duyệt theo thứ tự keys
+        pids_list = list(metric_data.keys())
         for pid in pids_list:
             metrics = metric_data[pid]
             if not isinstance(metrics, dict):
                 continue
-
             for metric_name in metrics_to_analyze:
                 result = results[idx]
                 idx += 1
-
                 if isinstance(result, Exception):
                     self.logger.error(f"Lỗi phân tích PID={pid}, metric={metric_name}: {result}")
                     continue
-                if result:
+                if result:  # => metric_name
                     anomalies.setdefault(pid, []).append(metric_name)
 
         return anomalies
@@ -746,10 +644,11 @@ class AzureAnomalyDetectorClient(AzureBaseClient):
 
     def log_configuration(self):
         """
-        Log cấu hình (chủ yếu debug).
+        Log cấu hình (debug).
         """
         self.logger.debug(f"Endpoint: {self.endpoint}")
         self.logger.debug(f"API Key: {'***' if self.api_key else None}")
+
 
 
 # ====================================
