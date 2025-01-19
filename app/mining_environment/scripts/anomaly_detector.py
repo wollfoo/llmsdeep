@@ -19,6 +19,7 @@ from .auxiliary_modules.interfaces import IResourceManager
 ###############################################################################
 #   QUẢN LÝ NVML TOÀN CỤC CHO MODULE                                          #
 ###############################################################################
+
 _nvml_lock = asyncio.Lock()
 _nvml_initialized = False  # Phải khai báo toàn cục
 
@@ -68,9 +69,16 @@ class AnomalyDetector:
 
         # SafeRestoreEvaluator là 1 logic tùy biến, ta giả sử có
         self.safe_restore_evaluator = SafeRestoreEvaluator(config, logger, resource_manager)
-
         self.task_futures = []
+
+        # Lưu history metrics => { pid_str: [ sample_dict1, sample_dict2, ... ] }
+        # Mỗi sample_dict: { 'cpu_usage':..., 'gpu_usage':..., ... }
+        self.metrics_history: Dict[str, List[Dict[str, float]]] = {}
+        self.min_data_points = 12  # Hoặc config
+
         self.logger.info("AnomalyDetector đã được khởi tạo thành công.")
+
+
 
     async def start(self):
         """
@@ -179,33 +187,48 @@ class AnomalyDetector:
                 self.logger.warning(f"Tiến trình PID={process.pid} không tồn tại.")
                 return
 
-            # Lấy metric "thô" cho 1 PID =>  { 'cpu_usage':..., 'gpu_usage':..., ... }
-            current_metrics = await self.resource_manager.collect_metrics(process)
-            if not current_metrics:
-                self.logger.warning(f"Không thu thập được metrics PID={process.pid}. Bỏ qua.")
+            # Thu thập 1 snapshot metrics
+            current_snapshot = await self.resource_manager.collect_metrics(process)
+            if not current_snapshot:
+                self.logger.debug(f"Không thu thập được metrics PID={process.pid} => skip.")
                 return
 
-            # ==== QUAN TRỌNG: Đóng gói metrics thành {"<pid>": {...}} ====
-            # Vì detect_anomalies() (nếu dùng logic cũ) duyệt theo pid => 
-            # Tránh việc pid= 'cpu_usage_percent'
+            pid_str = str(process.pid)
+            # Thêm snapshot vào history
+            if pid_str not in self.metrics_history:
+                self.metrics_history[pid_str] = []
+            self.metrics_history[pid_str].append(current_snapshot)
+            # Giới hạn history => 50 sample
+            if len(self.metrics_history[pid_str]) > 50:
+                self.metrics_history[pid_str].pop(0)
+
+            # Lấy min_data_points sample mới nhất => detect anomalies
+            history_data = self.metrics_history[pid_str][-self.min_data_points:]
+            if len(history_data) < self.min_data_points:
+                # Thay vì warning => log debug + skip
+                self.logger.debug(
+                    f"PID={process.pid} chưa đủ {self.min_data_points} data points => skip anomaly detection."
+                )
+                return
+
+            # Gom history_data => format detect_anomalies: { pid_str: [ {metrics}, ... ] }
+            # Mỗi item: { 'cpu_usage':..., 'gpu_usage':..., ...}
+            # => anomaly_detector_client logic cũ => pass 'metric_values'
+            # Ta build single_proc_data = { pid_str: [list of sample dictionaries] }
             single_proc_data = {
-                str(process.pid): current_metrics
+                pid_str: history_data
             }
 
-            # Gọi Anomaly Detector (Azure) => True/False hoặc dict
-            # Mặc định ta demo logic bool, 
-            # Hoặc logic cũ: detect_anomalies(single_proc_data) trả về dict pid-> [metric...]
+            # Gọi anomaly_detector_client => anomalies
             anomalies = await self.resource_manager.azure_anomaly_detector_client.detect_anomalies(single_proc_data)
 
-            # GIẢ ĐỊNH detect_anomalies() trả về bool => is_anomaly
-            # Hoặc trả về dict => ta check key str(process.pid)  
+            # Kiểm tra result => bool or dict
+            is_anomaly = False
             if isinstance(anomalies, bool):
                 is_anomaly = anomalies
             elif isinstance(anomalies, dict):
-                # cũ: anomalies = { 'pid': [list_metrics], ...}
-                is_anomaly = (str(process.pid) in anomalies and anomalies[str(process.pid)])
-            else:
-                is_anomaly = False
+                # cũ => { 'pid': [list_metrics], ...}
+                is_anomaly = (pid_str in anomalies and anomalies[pid_str])
 
             if is_anomaly:
                 self.logger.warning(

