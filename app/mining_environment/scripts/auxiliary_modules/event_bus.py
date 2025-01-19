@@ -1,3 +1,4 @@
+
 # event_bus.py
 
 import asyncio
@@ -22,11 +23,11 @@ class EventBus:
         self.lock = asyncio.Lock()
         self.retry_attempts = retry_attempts
         self.retry_delay = retry_delay
+        self._listening_task = None
 
     def subscribe(self, event_type: str, callback: Callable[[Any], None]):
         """
-        Đăng ký một subscriber cho một loại sự kiện cụ thể.
-        callback phải là hàm async (chấp nhận data).
+        Đăng ký một subscriber cho một loại sự kiện cụ thể (callback async).
         """
         if event_type not in self.subscribers:
             self.subscribers[event_type] = []
@@ -44,18 +45,17 @@ class EventBus:
     async def publish(self, event_type: str, data: Any):
         """
         Phát hành một sự kiện tới tất cả các subscriber đã đăng ký.
-        Bảo đảm chạy trên cùng 1 loop => tránh “attached to a different loop”.
+        Dùng gather trong cùng event loop => tránh “attached to a different loop”.
         """
         retries = 0
         while retries < self.retry_attempts:
             try:
                 async with self.lock:
                     if event_type in self.subscribers:
-                        # Thay vì create_task => gather đồng loạt
                         callbacks = self.subscribers[event_type]
                         tasks = [self._safe_execute(cb, data) for cb in callbacks]
                         await asyncio.gather(*tasks, return_exceptions=True)
-                break  # Thoát vòng lặp nếu publish thành công
+                break  # Đã publish thành công
             except Exception as e:
                 retries += 1
                 print(f"Lỗi khi phát hành sự kiện '{event_type}', retry {retries}/{self.retry_attempts}: {e}")
@@ -88,7 +88,9 @@ class EventBus:
 
     async def stop(self):
         """
-        Dừng EventBus bằng cách hủy các coroutine lắng nghe.
+        Dừng EventBus (hủy coroutine lắng nghe).
         """
         print("Đang dừng EventBus...")
-        # Không cần logic đặc biệt, coroutine lắng nghe sẽ được cancel bên ngoài.
+        # Lưu ý: Nếu 'start_listening()' đang chạy trong create_task(...),
+        # ta chỉ cần cancel task đó từ bên ngoài; hàm này có thể rỗng.
+        # Hoặc cài cờ stop; tùy cách triển khai.

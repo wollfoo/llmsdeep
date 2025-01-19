@@ -19,6 +19,7 @@ from .auxiliary_modules.models import ConfigModel
 ###############################################################################
 #                   ĐỊNH NGHĨA ĐƯỜNG DẪN & LOGGER                             #
 ###############################################################################
+
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', '/app/mining_environment/config'))
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,6 +31,8 @@ anomaly_logger = setup_logging('anomaly_detector', LOGS_DIR / 'anomaly_detector.
 ###############################################################################
 #                   HÀM HỖ TRỢ TẢI CẤU HÌNH TỪ TỆP JSON                       #
 ###############################################################################
+
+
 async def load_config(config_path: Path) -> ConfigModel:
     try:
         async with aiofiles.open(config_path, 'r') as f:
@@ -40,20 +43,13 @@ async def load_config(config_path: Path) -> ConfigModel:
         config = ConfigModel(**config_data)
         system_logger.info("Cấu hình đã được xác thực thành công.")
         return config
-
-    except FileNotFoundError:
-        system_logger.error(f"Tệp cấu hình không tìm thấy: {config_path}")
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        system_logger.error(f"Lỗi cú pháp JSON trong tệp cấu hình {config_path}: {e}")
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        system_logger.error(f"Lỗi khi tải cấu hình {config_path}: {e}")
         sys.exit(1)
     except Exception as e:
         system_logger.error(f"Lỗi khi tải cấu hình: {e}")
         sys.exit(1)
 
-###############################################################################
-#                             CLASS: SystemManager                            #
-###############################################################################
 class SystemManager:
     def __init__(self, config: ConfigModel, logger: logging.Logger):
         self.config = config
@@ -75,7 +71,7 @@ class SystemManager:
 
     async def start_async(self):
         """
-        Khởi động SystemManager (chạy trong event loop).
+        Khởi động SystemManager (trong cùng event loop).
         """
         self.logger.info("Đang khởi động SystemManager...")
         try:
@@ -83,45 +79,42 @@ class SystemManager:
                 if not self.facade:
                     raise RuntimeError("SystemFacade chưa được khởi tạo.")
 
-                # Bắt đầu lắng nghe EventBus (1 task background)
+                # Tạo task lắng nghe event bus
                 asyncio.create_task(self.event_bus.start_listening())
                 self.logger.info("EventBus đã bắt đầu lắng nghe.")
 
-                # Khởi động facade => ResourceManager, AnomalyDetector, ...
+                # Khởi động facade => ResourceManager, AnomalyDetector
                 await self.facade.start()
                 self.logger.info("SystemManager đã khởi động thành công.")
-
         except Exception as e:
             self.logger.error(f"Lỗi khi khởi động SystemManager: {e}")
             raise
 
     async def stop_async(self):
         """
-        Dừng SystemManager (chạy trong cùng event loop).
+        Dừng SystemManager trong cùng loop.
         """
         self.logger.info("Đang dừng SystemManager...")
         try:
             async with self._start_stop_lock:
                 if not self.facade:
                     raise RuntimeError("SystemFacade chưa được khởi tạo.")
-
-                # Dừng facade (gồm ResourceManager, AnomalyDetector,...)
                 await self.facade.stop()
                 self.logger.info("SystemFacade đã dừng.")
 
                 # Dừng EventBus
                 await self.event_bus.stop()
                 self.logger.info("EventBus đã dừng.")
-
         except Exception as e:
             self.logger.error(f"Lỗi khi dừng SystemManager: {e}")
 
 ###############################################################################
 #                         HÀM CHẠY CHÍNH: run_system_manager()               #
 ###############################################################################
+
 async def run_system_manager(system_manager: SystemManager):
     """
-    Coroutine chạy SystemManager và đợi tín hiệu dừng.
+    Coroutine chạy SystemManager, đợi tín hiệu dừng.
     """
     asyncio.create_task(listen_for_shutdown(system_manager))
     try:
@@ -137,7 +130,7 @@ async def run_system_manager(system_manager: SystemManager):
             except Exception as e:
                 system_logger.warning(f"Thử khởi động SystemManager thất bại ({attempt + 1}/3): {e}")
         else:
-            raise RuntimeError("Không thể khởi động SystemManager sau nhiều lần thử.")
+            raise RuntimeError("Không thể khởi động SystemManager sau 3 lần thử.")
     except Exception as e:
         system_logger.error(f"Lỗi khi chạy SystemManager: {e}")
         await system_manager.stop_async()
@@ -146,6 +139,7 @@ async def run_system_manager(system_manager: SystemManager):
 ###############################################################################
 #                       LẮNG NGHE SỰ KIỆN 'shutdown' TỪ EVENT BUS            #
 ###############################################################################
+
 async def listen_for_shutdown(system_manager: SystemManager):
     async def shutdown_handler(_data):
         try:
@@ -161,12 +155,10 @@ async def listen_for_shutdown(system_manager: SystemManager):
 ###############################################################################
 #                           start(), stop(), main()                           #
 ###############################################################################
+
 _system_manager_instance = None
 
 def start():
-    """
-    Khởi động SystemManager trong loop duy nhất.
-    """
     global _system_manager_instance
     if _system_manager_instance:
         system_logger.warning("SystemManager đã được khởi động.")
@@ -174,12 +166,9 @@ def start():
 
     try:
         resource_config_path = CONFIG_DIR / "resource_config.json"
-        # Tải config trong 1 lần asyncio.run(...)
         config = asyncio.run(load_config(resource_config_path))
 
         _system_manager_instance = SystemManager(config, system_logger)
-
-        # Chạy run_system_manager(_system_manager_instance) => block
         asyncio.run(run_system_manager(_system_manager_instance))
 
     except Exception as e:
@@ -187,16 +176,12 @@ def start():
         sys.exit(1)
 
 def stop():
-    """
-    Gửi sự kiện 'shutdown' qua EventBus => dừng SystemManager trong cùng loop.
-    """
     global _system_manager_instance
     if not _system_manager_instance:
         system_logger.warning("SystemManager chưa được khởi động.")
         return
-
     try:
-        # Gọi publish 'shutdown' => EventBus => callback => stop SystemManager
+        # Gửi sự kiện 'shutdown' => EventBus => callback => stop SystemManager
         asyncio.run(_system_manager_instance.event_bus.publish('shutdown', None))
         system_logger.info("Đã gửi sự kiện 'shutdown' thành công.")
     except Exception as e:
@@ -207,10 +192,9 @@ def main():
         if os.geteuid() != 0:
             print("Script phải được chạy với quyền root.")
             sys.exit(1)
-
         start()
     except KeyboardInterrupt:
-        system_logger.info("Đang dừng SystemManager do KeyboardInterrupt.")
+        system_logger.info("Dừng SystemManager do KeyboardInterrupt.")
         stop()
     except Exception as e:
         system_logger.error(f"Lỗi trong quá trình chạy SystemManager: {e}")
