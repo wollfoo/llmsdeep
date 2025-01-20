@@ -27,7 +27,7 @@ LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 from logging_config import setup_logging
-logger = setup_logging('power_management', LOGS_DIR / 'power_management.log', 'INFO')
+logger = setup_logging('temperature_monitor', LOGS_DIR / 'temperature_monitor.log', 'INFO')
 
 
 class TemperatureMonitor:
