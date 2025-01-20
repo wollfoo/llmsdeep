@@ -38,6 +38,9 @@ class SafeRestoreEvaluator:
         self.logger = logger
         self.resource_manager = resource_manager
 
+        if not self.logger:
+            raise ValueError("Logger không được khởi tạo.")
+
         # Các ngưỡng khôi phục mặc định (có thể bị override khi start())
         self.baseline_cpu_usage_percent = 80
         self.baseline_gpu_usage_percent = 80
