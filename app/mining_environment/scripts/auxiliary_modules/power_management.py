@@ -8,6 +8,7 @@ Quản lý năng lượng CPU, GPU theo mô hình đồng bộ (threading),
 import os
 import sys
 import psutil
+import logging
 import subprocess
 import pynvml
 import threading

@@ -6,7 +6,7 @@ Quản lý giám sát nhiệt độ CPU, GPU, và giới hạn Disk I/O (theo m�
 
 Đảm bảo tương thích với resource_manager.py (cũng hoạt động đồng bộ).
 """
-
+import logging
 import os
 import sys
 import psutil

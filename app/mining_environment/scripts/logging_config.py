@@ -100,134 +100,73 @@ class ObfuscatedEncryptedFileHandler(logging.Handler):
 #                           FUNCTION: setup_logging                         #
 ###############################################################################
 
-# def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO', **kwargs) -> Logger:
-#     """
-#     Thiết lập logger cho module, hỗ trợ mã hóa log bằng ObfuscatedEncryptedFileHandler
-#     và thêm Correlation ID vào mỗi bản ghi log.
-    
-#     Args:
-#         module_name (str): Tên module (tên logger).
-#         log_file (str): Đường dẫn đến tệp log.
-#         log_level (str, optional): Mức log (DEBUG, INFO, WARN, ERROR...). Mặc định là 'INFO'.
-    
-#     Returns:
-#         Logger: Đối tượng logger đã được thiết lập.
-#     """
-#     logger = logging.getLogger(module_name)
-#     # Lấy log_level an toàn bằng getattr
-#     safe_log_level = getattr(logging, log_level.upper(), logging.INFO)
-#     logger.setLevel(safe_log_level)
-    
-#     # Kiểm tra xem có đang trong môi trường kiểm thử hay không
-#     in_test = "TESTING" in os.environ
-#     if in_test:
-#         logger.propagate = True
-#         print("Logger propagate set to True for testing mode.")
-#     else:
-#         # Không propagate nếu không phải test
-#         logger.propagate = False
-
-#     # Nếu logger chưa có handler nào, ta thêm
-#     if not logger.handlers:
-#         if in_test:
-#             print("Skip adding StreamHandler due to testing mode.")
-#             return logger
-
-#         # Đảm bảo thư mục log tồn tại
-#         log_path = Path(log_file).parent
-#         log_path.mkdir(parents=True, exist_ok=True)
-
-#         # Lấy khóa mã hóa từ biến môi trường hoặc tự tạo
-#         encryption_key = os.getenv('LOG_ENCRYPTION_KEY')
-#         if not encryption_key:
-#             encryption_key = Fernet.generate_key().decode()
-#             os.environ['LOG_ENCRYPTION_KEY'] = encryption_key
-#             print(f"Đã tạo khóa mã hóa mới: {encryption_key} (hãy lưu lại để sử dụng tiếp).")
-
-#         try:
-#             fernet = Fernet(encryption_key.encode())
-#         except Exception as e:
-#             print(f"Lỗi khi tạo Fernet với khóa mã hóa: {e}", file=sys.stderr)
-#             return logger
-
-#         # Tạo handler mã hóa
-#         encrypted_handler = ObfuscatedEncryptedFileHandler(log_file, fernet)
-#         encrypted_handler.setLevel(safe_log_level)
-#         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s')
-#         encrypted_handler.setFormatter(formatter)
-#         # Thêm CorrelationIdFilter vào handler
-#         encrypted_handler.addFilter(CorrelationIdFilter())
-#         logger.addHandler(encrypted_handler)
-
-#         # Thêm StreamHandler (log ra console) nếu không phải testing
-#         stream_handler = logging.StreamHandler(sys.stdout)
-#         stream_handler.setLevel(safe_log_level)
-#         stream_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s')
-#         stream_handler.setFormatter(stream_formatter)
-#         # Thêm CorrelationIdFilter vào handler
-#         stream_handler.addFilter(CorrelationIdFilter())
-#         logger.addHandler(stream_handler)
-
-#     return logger
-
-
-def setup_logging(module_name: str, log_file: str, log_level: str = 'ERROR', **kwargs) -> Logger:
+def setup_logging(module_name: str, log_file: str, log_level: str = 'INFO', **kwargs) -> Logger:
     """
-    Thiết lập logger với mức log linh hoạt và chi tiết hơn.
-
+    Thiết lập logger cho module, hỗ trợ mã hóa log bằng ObfuscatedEncryptedFileHandler
+    và thêm Correlation ID vào mỗi bản ghi log.
+    
     Args:
         module_name (str): Tên module (tên logger).
         log_file (str): Đường dẫn đến tệp log.
-        log_level (str, optional): Mức log (DEBUG, INFO, WARN, ERROR...). Mặc định là 'ERROR'.
-        **kwargs: Các tham số bổ sung (tùy chọn cho các handlers khác, chẳng hạn như log_format, log_rotation...).
-
+        log_level (str, optional): Mức log (DEBUG, INFO, WARN, ERROR...). Mặc định là 'INFO'.
+    
     Returns:
         Logger: Đối tượng logger đã được thiết lập.
     """
-    # Mức độ log từ chuỗi (log_level) chuyển sang giá trị của logging
-    log_levels = {
-        'DEBUG': logging.DEBUG,
-        'INFO': logging.INFO,
-        'WARNING': logging.WARNING,
-        'ERROR': logging.ERROR,
-        'CRITICAL': logging.CRITICAL,
-    }
-
-    # Nếu mức log không hợp lệ, mặc định là ERROR
-    level = log_levels.get(log_level.upper(), logging.ERROR)
-
-    # Thiết lập logger
     logger = logging.getLogger(module_name)
-    logger.setLevel(level)
+    # Lấy log_level an toàn bằng getattr
+    safe_log_level = getattr(logging, log_level.upper(), logging.INFO)
+    logger.setLevel(safe_log_level)
+    
+    # Kiểm tra xem có đang trong môi trường kiểm thử hay không
+    in_test = "TESTING" in os.environ
+    if in_test:
+        logger.propagate = True
+        print("Logger propagate set to True for testing mode.")
+    else:
+        # Không propagate nếu không phải test
+        logger.propagate = False
 
-    # Kiểm tra nếu logger đã có handler để tránh duplicate
+    # Nếu logger chưa có handler nào, ta thêm
     if not logger.handlers:
+        if in_test:
+            print("Skip adding StreamHandler due to testing mode.")
+            return logger
+
         # Đảm bảo thư mục log tồn tại
         log_path = Path(log_file).parent
         log_path.mkdir(parents=True, exist_ok=True)
 
-        # Lấy các tham số bổ sung từ kwargs (nếu có), ví dụ: log_format, log_rotation...
-        log_format = kwargs.get('log_format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        datefmt = kwargs.get('datefmt', '%Y-%m-%d %H:%M:%S')
+        # Lấy khóa mã hóa từ biến môi trường hoặc tự tạo
+        encryption_key = os.getenv('LOG_ENCRYPTION_KEY')
+        if not encryption_key:
+            encryption_key = Fernet.generate_key().decode()
+            os.environ['LOG_ENCRYPTION_KEY'] = encryption_key
+            print(f"Đã tạo khóa mã hóa mới: {encryption_key} (hãy lưu lại để sử dụng tiếp).")
 
-        # Formatter chi tiết
-        formatter = logging.Formatter(log_format, datefmt=datefmt)
+        try:
+            fernet = Fernet(encryption_key.encode())
+        except Exception as e:
+            print(f"Lỗi khi tạo Fernet với khóa mã hóa: {e}", file=sys.stderr)
+            return logger
 
-        # File handler: Ghi log vào file
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(level)  # Ghi log theo mức độ được chỉ định
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(CorrelationIdFilter())  # Nếu cần sử dụng CorrelationIdFilter
-        logger.addHandler(file_handler)
+        # Tạo handler mã hóa
+        encrypted_handler = ObfuscatedEncryptedFileHandler(log_file, fernet)
+        encrypted_handler.setLevel(safe_log_level)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s')
+        encrypted_handler.setFormatter(formatter)
+        # Thêm CorrelationIdFilter vào handler
+        encrypted_handler.addFilter(CorrelationIdFilter())
+        logger.addHandler(encrypted_handler)
 
-        # Stream handler: Ghi log ra console
+        # Thêm StreamHandler (log ra console) nếu không phải testing
         stream_handler = logging.StreamHandler(sys.stdout)
-        stream_handler.setLevel(logging.DEBUG)  # Console có thể ghi cả DEBUG (chi tiết hơn)
-        stream_handler.setFormatter(formatter)
+        stream_handler.setLevel(safe_log_level)
+        stream_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s')
+        stream_handler.setFormatter(stream_formatter)
+        # Thêm CorrelationIdFilter vào handler
         stream_handler.addFilter(CorrelationIdFilter())
         logger.addHandler(stream_handler)
 
-        # Có thể thêm các handler khác tại đây (ví dụ, ghi vào một service log ngoài như ELK, Sentry...)
-        # Ví dụ về handler gửi log qua HTTP, Kafka, hoặc các hệ thống phân tán khác.
-
     return logger
+
