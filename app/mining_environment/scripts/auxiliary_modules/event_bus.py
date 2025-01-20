@@ -8,11 +8,16 @@ Cung cấp một Event Bus chạy theo mô hình đồng bộ (threading), hỗ 
 tránh xung đột dữ liệu và đảm bảo an toàn trong môi trường đa luồng.
 """
 
+import os
+import sys
 import logging
 import threading
 import time
-from typing import Callable, Dict, List, Any
 import queue
+from typing import Callable, Dict, List, Any
+from pathlib import Path  # Sửa lỗi thiếu import
+
+
 
 # Thêm đường dẫn tới thư mục chứa `logging_config.py`
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -21,7 +26,6 @@ sys.path.append(str(SCRIPT_DIR))
 # Thiết lập đường dẫn tới thư mục logs
 LOGS_DIR = Path(os.getenv('LOGS_DIR', '/app/mining_environment/logs'))
 os.makedirs(LOGS_DIR, exist_ok=True)
-
 
 from logging_config import setup_logging
 logger = setup_logging('event_bus', LOGS_DIR / 'event_bus.log', 'INFO')
