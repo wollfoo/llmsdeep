@@ -253,7 +253,7 @@ class GpuCloakStrategy(CloakStrategy):
 
             # limit_temperature (nếu cần)
             for gpu_index in range(gpu_count):
-                f self.stop_monitoring:  # Kiểm tra cờ dừng giám sát
+                if self.stop_monitoring:  # Kiểm tra cờ dừng giám sát
                     self.logger.info("[GPU Cloaking] Dừng giám sát nhiệt độ do yêu cầu khôi phục tài nguyên.")
                     break
                 success_temp = self.gpu_resource_manager.limit_temperature(
