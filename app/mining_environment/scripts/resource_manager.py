@@ -615,8 +615,8 @@ class ResourceManager(IResourceManager):
         # Ngưỡng công suất từ cấu hình
         power_lims = self.config.power_limits
         per_dev_power = power_lims.get("per_device_power_watts", {})
-        cpu_max_pwr = per_dev_power.get("cpu", 150)  # Công suất tối đa CPU (W)
-        gpu_max_pwr = per_dev_power.get("gpu", 300)  # Công suất tối đa GPU (W)
+        cpu_max_pwr = per_dev_power.get("cpu", 100)  # Công suất tối đa CPU (W)
+        gpu_max_pwr = per_dev_power.get("gpu", 230)  # Công suất tối đa GPU (W)
 
         # Vòng lặp giám sát
         while not self._stop_flag:

@@ -211,7 +211,7 @@ class GpuCloakStrategy(CloakStrategy):
             self.throttle_percentage = 20
 
         self.target_sm_clock = config.get('sm_clock', 1300)
-        self.target_mem_clock = config.get('mem_clock', 800)
+        self.target_mem_clock = config.get('mem_clock', 877)
 
         self.temperature_threshold = config.get('temperature_threshold', 80)
         if self.temperature_threshold <= 0:

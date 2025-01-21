@@ -525,7 +525,7 @@ class GPUResourceManager:
                 self.logger.debug(f"diff_temp={diff_temp}°C => boost_pct={boost_pct}%")
 
                 # Boost clock
-                new_sm_clock = min(current_sm_clock + int(current_sm_clock * boost_pct / 100), 1530)
+                new_sm_clock = min(current_sm_clock + int(current_sm_clock * boost_pct / 100), 1245)
                 new_mem_clock = min(current_mem_clock + int(current_mem_clock * boost_pct / 100), 877)
 
                 success_boost = self.set_gpu_clocks(None, gpu_index, new_sm_clock, new_mem_clock)
