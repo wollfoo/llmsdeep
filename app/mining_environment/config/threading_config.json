@@ -3,8 +3,6 @@
         "CPU": "ml-inference",
         "GPU": "inference-cuda"
     },
-    "max_cpu_threads": 5,
-    "max_gpu_threads": 2,
     "cpu_rate_limit": 25,
     "gpu_rate_limit": 20,
     "cpu_bundle_size": 8,

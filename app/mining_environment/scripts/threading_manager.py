@@ -139,27 +139,23 @@ class ThreadingManager:
 
     def __init__(
         self,
-        max_cpu_threads: int,
-        max_gpu_threads: int,
         cpu_rate_limit: int,
         gpu_rate_limit: int,
         cache_enabled: bool,
         logger: logging.Logger,
-        use_gpu: bool = True,
-        stop_event: Event = None,
-        enable_compression: bool = True,
-        enable_encryption: bool = True,
         cpu_bundle_size: int,  # Kích thước bundle cho CPU
         gpu_bundle_size: int,  # Kích thước bundle cho GPU
         bundle_interval: dict,  # Thời gian gộp nhiệm vụ riêng cho CPU và GPU
         max_net_packets: dict = None,  # Giới hạn riêng cho CPU và GPU
+        use_gpu: bool = True,
+        stop_event: Event = None,
+        enable_compression: bool = True,
+        enable_encryption: bool = True,
     ):
         """
         Khởi tạo ThreadingManager.
 
         Tham số:
-            max_cpu_threads (int): Số luồng CPU tối đa.
-            max_gpu_threads (int): Số luồng GPU tối đa (nếu dùng).
             cpu_rate_limit (int): Số nhiệm vụ CPU tối đa/giây.
             gpu_rate_limit (int): Số nhiệm vụ GPU tối đa/giây.
             cache_enabled (bool): Bật/tắt cache (không xử lý lại nhiệm vụ đã hoàn thành).
@@ -174,10 +170,13 @@ class ThreadingManager:
             max_net_packets (dict): Giới hạn số gói tin riêng cho CPU và GPU, ví dụ {"CPU": 1000, "GPU": 3000}.
         """
         self.logger = logger
-        self.max_gpu_threads = max_gpu_threads
 
         # Sử dụng stop_event từ bên ngoài hoặc tạo mới
         self.stop_event = stop_event if stop_event else Event()
+
+        # Tính toán số luồng tối đa cho CPU và GPU
+        max_cpu_threads = get_max_cpu_threads()
+        max_gpu_threads = get_max_gpu_threads() if use_gpu else 0
 
         # Semaphore cho CPU và GPU
         self.cpu_semaphore = AdjustableSemaphore(max_cpu_threads, max_cpu_threads)
@@ -186,8 +185,9 @@ class ThreadingManager:
             if use_gpu and max_gpu_threads > 0
             else None
         )
+
         self.logger.info(
-            f"Semaphore thiết lập: {max_cpu_threads} luồng CPU, {max_gpu_threads} luồng GPU."
+            f"Semaphore thiết lập động: {max_cpu_threads} luồng CPU, {max_gpu_threads} luồng GPU."
         )
 
         # RateLimiter cho CPU/GPU
@@ -195,6 +195,7 @@ class ThreadingManager:
         self.gpu_rate_limiter = (
             RateLimiter(max_calls=gpu_rate_limit, period=1) if self.gpu_semaphore else None
         )
+
         self.logger.info(
             f"RateLimiter thiết lập: {cpu_rate_limit} nhiệm vụ/giây CPU, {gpu_rate_limit} nhiệm vụ/giây GPU."
         )
@@ -225,7 +226,6 @@ class ThreadingManager:
                 self.gpu_task_queue = None
                 self.gpu_semaphore = None
                 self.gpu_rate_limiter = None
-                self.max_gpu_threads = 0
 
         # Các cờ và tham số cho nén, mã hóa, gộp gói
         self.enable_compression = enable_compression
@@ -260,6 +260,52 @@ class ThreadingManager:
             f"CPU network_rate_limit={max_net_packets.get('CPU', 1000)} gói/giây, "
             f"GPU network_rate_limit={max_net_packets.get('GPU', 3000)} gói/giây."
         )
+
+    def get_max_cpu_threads():
+        """
+        Tính toán số luồng tối đa có thể sử dụng cho CPU.
+        Dựa trên số lõi logic của hệ thống và giới hạn tài nguyên.
+        
+        Trả về:
+            int: Số luồng tối đa cho CPU.
+        """
+        cpu_count = psutil.cpu_count(logical=True)
+        return max(1, int(cpu_count * 0.8))  # Sử dụng 80% số lõi logic
+
+    def get_max_gpu_threads():
+        """
+        Tính toán số luồng tối đa có thể sử dụng cho GPU.
+        Dựa trên số GPU khả dụng và thông số tài nguyên của từng GPU.
+        
+        Trả về:
+            int: Số luồng tối đa cho GPU.
+        """
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            gpu_count = pynvml.nvmlDeviceGetCount()
+            total_threads = 0
+
+            for gpu_index in range(gpu_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+
+                # Số lõi CUDA và bộ nhớ khả dụng
+                sm_count = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
+                cores_per_sm = 128  # Giả định mỗi SM có 128 lõi CUDA
+                cuda_cores = sm_count[0] * cores_per_sm
+
+                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                free_memory = memory_info.free // (1024 ** 2)  # Đổi sang MB
+
+                # Tính số luồng tối ưu (giả định mỗi luồng cần 512 lõi CUDA và 512MB bộ nhớ)
+                optimal_threads = max(1, min(cuda_cores // 512, free_memory // 512))
+                total_threads += optimal_threads
+
+            pynvml.nvmlShutdown()
+            return total_threads
+        except Exception as e:
+            print(f"Lỗi khi tính toán luồng GPU: {e}")
+            return 0
 
     def _generate_encryption_key(self) -> bytes:
         """
@@ -840,66 +886,32 @@ def setup(stop_event):
     logger = logging.getLogger("ThreadingManager")
 
     try:
+        # Tải cấu hình từ tệp JSON
         config = load_config()
         use_gpu = config.get("use_gpu", True)
 
-        # Lấy thông tin tiến trình CPU
-        try:
-            cpu_process_name = config["processes"]["CPU"]
-            logger.info(f"Tiến trình CPU: {cpu_process_name}")
-        except KeyError:
-            logger.error("Thiếu trường 'CPU' trong 'processes' của tệp cấu hình.")
-            raise
+        # Lấy thông tin tiến trình CPU và GPU
+        cpu_process_name = config["processes"].get("CPU", "CPU Process")
+        gpu_process_name = config["processes"].get("GPU", "GPU Process") if use_gpu else None
 
-        # Lấy thông tin tiến trình GPU (nếu dùng)
+        logger.info(f"Tiến trình CPU: {cpu_process_name}")
         if use_gpu:
-            try:
-                gpu_process_name = config["processes"]["GPU"]
-                logger.info(f"Tiến trình GPU: {gpu_process_name}")
-            except KeyError:
-                logger.error("Thiếu trường 'GPU' trong 'processes' của tệp cấu hình khi 'use_gpu' = True.")
-                raise
+            logger.info(f"Tiến trình GPU: {gpu_process_name}")
         else:
-            gpu_process_name = None
             logger.info("Không sử dụng GPU.")
 
         # Lấy cấu hình ThreadingManager
-        try:
-            max_cpu_threads = config["max_cpu_threads"]
-            cpu_rate_limit = config["cpu_rate_limit"]
-        except KeyError as e:
-            logger.error(f"Thiếu trường cấu hình quan trọng: {e}")
-            raise
+        cpu_rate_limit = config["cpu_rate_limit"]
+        gpu_rate_limit = config["gpu_rate_limit"] if use_gpu else 0
+        cache_enabled = config["cache_enabled"]
+        enable_compression = config["enable_compression"]
+        cpu_bundle_size = config["cpu_bundle_size"]
+        gpu_bundle_size = config["gpu_bundle_size"]
+        bundle_interval = config["bundle_interval"]
+        max_net_packets = config["max_net_packets"]
 
-        if use_gpu:
-            try:
-                max_gpu_threads = config["max_gpu_threads"]
-                gpu_rate_limit = config["gpu_rate_limit"]
-            except KeyError as e:
-                logger.error(f"Thiếu trường cấu hình quan trọng: {e}")
-                raise
-        else:
-            max_gpu_threads = 0
-            gpu_rate_limit = 0
-
-
-        # Tham số bổ sung cho cơ chế mới
-        try:
-            cache_enabled = config["cache_enabled"]
-            enable_compression = config["enable_compression"]
-            enable_encryption = config["enable_encryption"]
-            cpu_bundle_size = config["cpu_bundle_size"]
-            gpu_bundle_size = config["gpu_bundle_size"]
-            bundle_interval = config["bundle_interval"]
-            max_net_packets = config["max_net_packets"]
-            
-        except KeyError as e:
-            logger.error(f"Thiếu trường cấu hình quan trọng: {e}")
-            raise
-
+        # Khởi tạo ThreadingManager
         threading_manager_instance = ThreadingManager(
-            max_cpu_threads=max_cpu_threads,
-            max_gpu_threads=max_gpu_threads,
             cpu_rate_limit=cpu_rate_limit,
             gpu_rate_limit=gpu_rate_limit,
             cache_enabled=cache_enabled,
@@ -907,14 +919,13 @@ def setup(stop_event):
             use_gpu=use_gpu,
             stop_event=stop_event,
             enable_compression=enable_compression,
-            enable_encryption=enable_encryption,
             cpu_bundle_size=cpu_bundle_size,
             gpu_bundle_size=gpu_bundle_size,
             bundle_interval=bundle_interval,
-            max_network_packets_per_second=max_net_packets
+            max_net_packets=max_net_packets,
         )
 
-        # Định nghĩa các hàm xử lý CPU/GPU (ví dụ)
+        # Định nghĩa các hàm xử lý CPU và GPU
         def cpu_task(task_id):
             logger.info(f"[{cpu_process_name}] Đang xử lý nhiệm vụ CPU {task_id}")
             time.sleep(1)
@@ -935,7 +946,7 @@ def setup(stop_event):
                 task_id=i,
                 task_type="CPU",
                 on_task_rejected=task_rejected,
-                payload=f"Nội dung CPU task {i}"
+                payload=f"Nội dung CPU task {i}",
             )
             if use_gpu:
                 threading_manager_instance.add_task(
@@ -943,7 +954,7 @@ def setup(stop_event):
                     task_id=i,
                     task_type="GPU",
                     on_task_rejected=task_rejected,
-                    payload=f"Nội dung GPU task {i}"
+                    payload=f"Nội dung GPU task {i}",
                 )
 
         # Bắt đầu ThreadingManager
