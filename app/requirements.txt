@@ -27,6 +27,7 @@ grpcio-tools
 dependency-injector
 uvicorn
 aiohttp
+pycryptodome
 azure-identity
 azure-mgmt-resource
 azure-mgmt-resourcegraph
