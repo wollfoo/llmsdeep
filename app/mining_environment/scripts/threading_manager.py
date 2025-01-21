@@ -149,14 +149,15 @@ class ThreadingManager:
         stop_event: Event = None,
         enable_compression: bool = True,
         enable_encryption: bool = True,
-        encryption_key: str = "secret_key_demo",
-        bundle_size: int = 3,
-        bundle_interval: float = 2.0,
-        max_network_packets_per_second: int = 5
-    ):
+        encryption_key: str,
+        cpu_bundle_size: int,  # Kích thước bundle cho CPU
+        gpu_bundle_size: int,  # Kích thước bundle cho GPU
+        bundle_interval: dict,  # Thời gian gộp nhiệm vụ riêng cho CPU và GPU
+        max_network_packets_per_second: int = 5 ):
+
         """
         Khởi tạo ThreadingManager.
-        
+
         Tham số:
             max_cpu_threads (int): Số luồng CPU tối đa.
             max_gpu_threads (int): Số luồng GPU tối đa (nếu dùng).
@@ -169,8 +170,9 @@ class ThreadingManager:
             enable_compression (bool): Bật/tắt cơ chế nén dữ liệu.
             enable_encryption (bool): Bật/tắt cơ chế mã hóa dữ liệu.
             encryption_key (str): Khóa bí mật dùng cho AES (demo).
-            bundle_size (int): Số lượng nhiệm vụ sẽ gộp chung vào một gói trước khi xử lý.
-            bundle_interval (float): Thời gian tối đa chờ trước khi gộp nhiệm vụ và xử lý.
+            cpu_bundle_size (int): Số lượng nhiệm vụ sẽ gộp chung trong một gói trước khi xử lý (CPU).
+            gpu_bundle_size (int): Số lượng nhiệm vụ sẽ gộp chung trong một gói trước khi xử lý (GPU).
+            bundle_interval (dict): Thời gian gộp nhiệm vụ riêng cho CPU và GPU, ví dụ {"CPU": 1.0, "GPU": 3.0}.
             max_network_packets_per_second (int): Giới hạn số “gói tin” (bundle) mỗi giây khi gửi.
         """
         self.logger = logger
@@ -232,15 +234,21 @@ class ThreadingManager:
         self.enable_encryption = enable_encryption
         # Chuyển encryption_key thành dạng bytes
         self.encryption_key = hashlib.sha256(encryption_key.encode()).digest()
-        self.bundle_size = bundle_size
-        self.bundle_interval = bundle_interval
+        self.cpu_bundle_size = cpu_bundle_size
+        self.gpu_bundle_size = gpu_bundle_size
+
+        # Cấu hình bundle_interval cho CPU và GPU
+        self.bundle_interval = bundle_interval or {"CPU": 1.0, "GPU": 3.0}
+        self.cpu_bundle_interval = self.bundle_interval.get("CPU", 1.0)
+        self.gpu_bundle_interval = self.bundle_interval.get("GPU", 3.0)
 
         # Network rate limiter
         self.network_rate_limiter = NetworkRateLimiter(max_packets_per_second=max_network_packets_per_second)
 
         self.logger.info(
             f"Các tính năng: nén={self.enable_compression}, mã hóa={self.enable_encryption}, "
-            f"gộp gói={self.bundle_size}, network_rate_limit={max_network_packets_per_second} gói/giây."
+            f"CPU bundle_interval={self.cpu_bundle_interval}s, GPU bundle_interval={self.gpu_bundle_interval}s, "
+            f"network_rate_limit={max_network_packets_per_second} gói/giây."
         )
 
     def _compress_data(self, data: bytes) -> bytes:
@@ -308,7 +316,7 @@ class ThreadingManager:
     def _bundle_and_process_tasks(self, task_func, task_type: str):
         """
         Hàm hỗ trợ gộp nhiều nhiệm vụ rồi xử lý thành một “gói” (bundle).
-        
+
         Tham số:
             task_func (function): Hàm thực thi thực tế cho mỗi nhiệm vụ (CPU hoặc GPU).
             task_type (str): "CPU" hoặc "GPU".
@@ -317,15 +325,26 @@ class ThreadingManager:
         semaphore = self.cpu_semaphore if task_type == "CPU" else self.gpu_semaphore
         rate_limiter = self.cpu_rate_limiter if task_type == "CPU" else self.gpu_rate_limiter
 
+        # Lấy kích thước bundle riêng
+        bundle_size = self.cpu_bundle_size if task_type == "CPU" else self.gpu_bundle_size
+
         task_buffer = []
         last_bundle_time = time.time()
 
         while not self.stop_event.is_set():
             priority, task_id = None, None
             acquired = False
+
             try:
+                # Log trạng thái hàng đợi khi đầy hoặc gần đầy
+                if queue_obj.qsize() >= queue_obj.maxsize * 0.8:
+                    self.logger.warning(
+                        f"{task_type}: Hàng đợi đã đạt {queue_obj.qsize()}/{queue_obj.maxsize} (80% hoặc hơn)."
+                    )
+
                 # Lấy nhiệm vụ từ hàng đợi
                 priority, task_id, task_payload = queue_obj.get(timeout=1)
+
                 # Kiểm tra cache (nếu đã xử lý thì bỏ qua)
                 if self.cache_enabled and task_id in self.task_cache:
                     self.logger.info(f"{task_type}: Task {task_id} đã xử lý trước đó. Bỏ qua.")
@@ -337,58 +356,83 @@ class ThreadingManager:
                 # Kiểm tra điều kiện gộp gói (đủ số lượng hoặc đủ thời gian)
                 now = time.time()
                 if (
-                    len(task_buffer) >= self.bundle_size
+                    len(task_buffer) >= bundle_size
                     or (now - last_bundle_time) >= self.bundle_interval
                 ):
-                    # Gộp & xử lý gói
+                    # Thử acquire semaphore
                     acquired = semaphore.acquire(timeout=5)
                     if not acquired:
-                        self.logger.warning(f"{task_type}: Semaphore timeout cho gói bundle. Đưa lại hàng đợi.")
-                        # Đưa lại các nhiệm vụ vào queue
-                        for t in task_buffer:
-                            queue_obj.put_nowait(t)
-                        task_buffer.clear()
+                        self.logger.warning(
+                            f"{task_type}: Semaphore timeout khi xử lý bundle với {len(task_buffer)} tasks."
+                        )
+
+                        # Tái đưa nhiệm vụ trở lại hàng đợi (giới hạn 50% buffer)
+                        tasks_to_return = len(task_buffer) // 2  # Tối đa 50%
+                        returned_tasks = 0
+                        for t in task_buffer[:tasks_to_return]:
+                            try:
+                                queue_obj.put_nowait(t)
+                                returned_tasks += 1
+                            except Full:
+                                self.logger.error(
+                                    f"{task_type}: Hàng đợi đầy khi đưa lại nhiệm vụ."
+                                )
+                                break
+
+                        # Log số lượng nhiệm vụ không thể tái đưa vào hàng đợi
+                        remaining_tasks = len(task_buffer) - returned_tasks
+                        if remaining_tasks > 0:
+                            self.logger.warning(
+                                f"{task_type}: {remaining_tasks} nhiệm vụ bị loại bỏ do hàng đợi đầy."
+                            )
+
+                        # Loại bỏ các nhiệm vụ không thể đưa lại và làm sạch buffer
+                        task_buffer = []
                         last_bundle_time = now
                         continue
 
-                    # Giới hạn tần suất thực thi (RateLimiter CPU/GPU)
+                    # Thực hiện xử lý bundle nếu semaphore thành công
                     with rate_limiter:
-                        # NetworkRateLimiter: Mỗi gói tin (bundle) được xem là một packet
                         self.network_rate_limiter.wait()
 
                         # Gộp payload của các task thành một block
                         combined_payload = self._combine_task_payloads(task_buffer)
-                        # Nén
+
+                        # Nén dữ liệu
                         compressed_data = self._compress_data(combined_payload)
-                        # Mã hóa
+
+                        # Mã hóa dữ liệu
                         encrypted_data = self._encrypt_data(compressed_data)
 
-                        # Gọi hàm xử lý “gói tin” – tùy logic 
-                        # Ở đây minh họa là gọi task_func cho từng task_id, 
-                        # kèm theo dữ liệu gộp, thực tế có thể tuỳ biến
+                        # Gọi hàm xử lý "bundle"
                         self._process_bundle(task_func, task_type, task_buffer, encrypted_data)
 
-                        # Đánh dấu cache (nếu bật)
+                        # Cập nhật cache nếu được bật
                         if self.cache_enabled:
-                            with self.cache_lock:
-                                for _, t_id, _ in task_buffer:
-                                    self.task_cache[t_id] = True
+                            try:
+                                with self.cache_lock:
+                                    for _, t_id, _ in task_buffer:
+                                        self.task_cache[t_id] = True
+                            except Exception as e:
+                                self.logger.error(f"Lỗi khi lưu cache: {e}. Tiếp tục xử lý mà không lưu cache.")
 
-                    # Xong gói, clear buffer
+                    # Xóa buffer và cập nhật thời gian xử lý gói
                     task_buffer.clear()
                     last_bundle_time = now
 
             except queue.Empty:
-                # Hàng đợi trống, không làm gì
+                # Hàng đợi trống, tiếp tục chờ
                 continue
             except Full:
-                self.logger.warning(f"{task_type}: Hàng đợi đầy khi tái đưa nhiệm vụ.")
+                self.logger.warning(f"{task_type}: Hàng đợi đầy khi thêm nhiệm vụ trở lại.")
             except Exception as e:
+                # Log lỗi khi xảy ra vấn đề
                 if task_id is not None:
                     self.logger.error(f"{task_type}: Lỗi khi xử lý task {task_id}: {e}", exc_info=True)
                 else:
                     self.logger.error(f"{task_type}: Lỗi khi lấy nhiệm vụ từ hàng đợi: {e}", exc_info=True)
             finally:
+                # Đảm bảo semaphore được giải phóng
                 if acquired:
                     semaphore.release()
                 if priority is not None and task_id is not None:
@@ -420,19 +464,42 @@ class ThreadingManager:
         """
         Thực hiện xử lý bundle sau khi đã gộp, nén, mã hóa.
         Người dùng có thể tùy chỉnh logic giải mã, giải nén hoặc phân phối lại.
-        
+
         Tham số:
             task_func (function): Hàm xử lý cho mỗi nhiệm vụ.
             task_type (str): "CPU" hoặc "GPU".
             task_buffer (list): Danh sách nhiệm vụ [(priority, id, payload), ...].
             encrypted_data (bytes): Dữ liệu đã nén + mã hóa.
         """
-        # Nếu cần giải mã, giải nén => _decrypt_data -> _decompress_data
-        # Ở đây ta ví dụ chỉ log, sau đó gọi task_func cho từng task_id
-        self.logger.info(f"{task_type}: Đang xử lý bundle {len(task_buffer)} tasks. Size encrypted={len(encrypted_data)} bytes.")
-        for _, task_id, _ in task_buffer:
-            # Gọi hàm xử lý mặc định
-            task_func(task_id)
+        start_time = time.time()  # Ghi lại thời gian bắt đầu xử lý
+        self.logger.info(
+            f"{task_type}: Bắt đầu xử lý bundle {len(task_buffer)} tasks. Size encrypted={len(encrypted_data)} bytes."
+        )
+
+        try:
+            # Nếu cần giải mã, giải nén => _decrypt_data -> _decompress_data
+            # Ở đây ta ví dụ chỉ log, sau đó gọi task_func cho từng task_id
+            for _, task_id, _ in task_buffer:
+                # Gọi hàm xử lý mặc định
+                task_func(task_id)
+
+        except Exception as e:
+            self.logger.error(
+                f"{task_type}: Lỗi khi xử lý bundle {len(task_buffer)} tasks: {e}", exc_info=True
+            )
+
+        finally:
+            end_time = time.time()  # Ghi lại thời gian kết thúc xử lý
+            processing_time = end_time - start_time
+            self.logger.info(
+                f"{task_type}: Hoàn thành xử lý bundle {len(task_buffer)} tasks trong {processing_time:.2f}s."
+            )
+
+            # Cảnh báo nếu thời gian xử lý vượt quá ngưỡng (ví dụ: 5 giây)
+            if processing_time > 5.0:
+                self.logger.warning(
+                    f"{task_type}: Xử lý bundle mất {processing_time:.2f}s, vượt ngưỡng thời gian cho phép."
+                )
 
     def add_task(self, priority: int, task_id: int, task_type: str, on_task_rejected=None, payload=None):
         """
@@ -455,9 +522,27 @@ class ThreadingManager:
             return
 
         try:
-            # Bổ sung payload vào tuple
+            # Kiểm tra trạng thái hàng đợi
+            queue_size = queue_obj.qsize()
+            max_size = queue_obj.maxsize
+            if queue_size >= max_size * 0.8:
+                self.logger.warning(
+                    f"Hàng đợi {task_type} đã đạt {queue_size}/{max_size} (80% dung lượng). "
+                    f"Nhiệm vụ {task_id} có thể bị từ chối sớm nếu tiếp tục thêm nhiệm vụ."
+                )
+                # Nếu hàng đợi vượt quá 90%, từ chối ngay lập tức
+                if queue_size >= max_size * 0.9:
+                    self.logger.error(
+                        f"Hàng đợi {task_type} đã đạt {queue_size}/{max_size} (90% dung lượng). "
+                        f"Từ chối nhiệm vụ {task_id}."
+                    )
+                    if on_task_rejected:
+                        on_task_rejected(task_id, task_type)
+                    return
+
+            # Thêm nhiệm vụ vào hàng đợi
             queue_obj.put_nowait((priority, task_id, payload))
-            self.logger.info(f"Thêm nhiệm vụ {task_id} vào {task_type} với ưu tiên {priority}.")
+            self.logger.info(f"Thêm nhiệm vụ {task_id} vào {task_type} với ưu tiên {priority}. Hiện trạng hàng đợi: {queue_size + 1}/{max_size}.")
         except Full:
             self.logger.warning(f"Hàng đợi {task_type} đầy. Từ chối nhiệm vụ {task_id}.")
             if on_task_rejected:
@@ -471,6 +556,7 @@ class ThreadingManager:
             cpu_task_func (function): Hàm xử lý dành cho CPU.
             gpu_task_func (function|None): Hàm xử lý dành cho GPU (nếu sử dụng).
         """
+        # Khởi tạo các worker thread
         self.cpu_worker_thread = Thread(
             target=self._bundle_and_process_tasks,
             args=(cpu_task_func, "CPU"),
@@ -484,15 +570,59 @@ class ThreadingManager:
             ) if self.use_gpu else None
         )
 
+        # Khởi tạo luồng giám sát và điều chỉnh tài nguyên
         self.monitor_and_adjust_thread = Thread(
             target=self._monitor_and_adjust_resources,
             daemon=False
         )
 
+        # Luồng giám sát trạng thái các worker
+        def _monitor_worker_threads():
+            """
+            Giám sát trạng thái các worker thread để đảm bảo không bị dừng bất thường.
+            Nếu phát hiện thread dừng, tự động khởi động lại.
+            """
+            while not self.stop_event.is_set():
+                if not self.cpu_worker_thread.is_alive():
+                    self.logger.error("Luồng xử lý CPU đã dừng bất thường. Đang khởi động lại.")
+                    self.cpu_worker_thread = Thread(
+                        target=self._bundle_and_process_tasks,
+                        args=(cpu_task_func, "CPU"),
+                        daemon=True
+                    )
+                    self.cpu_worker_thread.start()
+
+                if self.use_gpu and self.gpu_worker_thread and not self.gpu_worker_thread.is_alive():
+                    self.logger.error("Luồng xử lý GPU đã dừng bất thường. Đang khởi động lại.")
+                    self.gpu_worker_thread = Thread(
+                        target=self._bundle_and_process_tasks,
+                        args=(gpu_task_func, "GPU"),
+                        daemon=True
+                    )
+                    self.gpu_worker_thread.start()
+
+                if not self.monitor_and_adjust_thread.is_alive():
+                    self.logger.error("Luồng giám sát và điều chỉnh tài nguyên đã dừng. Đang khởi động lại.")
+                    self.monitor_and_adjust_thread = Thread(
+                        target=self._monitor_and_adjust_resources,
+                        daemon=False
+                    )
+                    self.monitor_and_adjust_thread.start()
+
+                time.sleep(10)  # Tần suất kiểm tra định kỳ
+
+        # Luồng giám sát worker threads
+        self.worker_monitor_thread = Thread(
+            target=_monitor_worker_threads,
+            daemon=True
+        )
+
+        # Bắt đầu tất cả các luồng
         self.cpu_worker_thread.start()
         if self.gpu_worker_thread:
             self.gpu_worker_thread.start()
         self.monitor_and_adjust_thread.start()
+        self.worker_monitor_thread.start()
 
         self.logger.info("ThreadingManager khởi động thành công.")
 
@@ -520,6 +650,8 @@ class ThreadingManager:
         """
         Giám sát và điều chỉnh tài nguyên động:
         - Tăng/Giảm giá trị semaphore dựa vào mức sử dụng CPU/GPU.
+        - Điều chỉnh kích thước bundle_size (cpu_bundle_size, gpu_bundle_size) theo tải tài nguyên.
+        - Chỉ điều chỉnh bundle_size khi có sự chênh lệch lớn (>10%) so với ngưỡng tối ưu.
         - Chạy định kỳ 60 giây để đánh giá lại tình hình tài nguyên.
         """
         max_cpu_threads = psutil.cpu_count(logical=True)
@@ -528,22 +660,47 @@ class ThreadingManager:
         self.logger.info(f"Giới hạn Semaphore tối đa: {max_cpu_threads} luồng CPU, {max_gpu_threads} luồng GPU")
 
         min_semaphore_limit = 1
+        min_bundle_size = 1
+        max_bundle_size = 100  # Định nghĩa kích thước bundle tối đa
+
+        # Biến để lưu dấu thời gian điều chỉnh bundle_size
+        last_cpu_bundle_adjustment = 0
+        last_gpu_bundle_adjustment = 0
+        bundle_adjustment_interval = 30  # Thời gian tối thiểu giữa các lần điều chỉnh (giây)
 
         while not self.stop_event.is_set():
             try:
+                now = time.time()
+
                 # Giám sát CPU
                 cpu_usage = psutil.cpu_percent(interval=1)
                 self.logger.info(f"CPU Usage: {cpu_usage}%")
+
                 if cpu_usage > 85:
                     reduction = max(1, int(0.2 * max_cpu_threads))
                     new_limit = max(min_semaphore_limit, self.cpu_semaphore.current_limit - reduction)
                     self.cpu_semaphore.adjust(new_limit)
                     self.logger.info(f"Giảm luồng CPU xuống {new_limit} (giảm {reduction})")
+
+                    # Điều chỉnh cpu_bundle_size (nếu đã đủ thời gian và chênh lệch lớn)
+                    if now - last_cpu_bundle_adjustment >= bundle_adjustment_interval:
+                        if abs(cpu_usage - 70) > 10 and self.cpu_bundle_size > min_bundle_size:
+                            self.cpu_bundle_size = max(min_bundle_size, self.cpu_bundle_size - 1)
+                            self.logger.info(f"Giảm cpu_bundle_size xuống {self.cpu_bundle_size} do CPU quá tải.")
+                            last_cpu_bundle_adjustment = now
+
                 elif cpu_usage < 60:
                     increment = max(1, int(0.2 * max_cpu_threads))
                     new_limit = min(max_cpu_threads, self.cpu_semaphore.current_limit + increment)
                     self.cpu_semaphore.adjust(new_limit)
                     self.logger.info(f"Tăng luồng CPU lên {new_limit} (tăng {increment})")
+
+                    # Điều chỉnh cpu_bundle_size (nếu đã đủ thời gian và chênh lệch lớn)
+                    if now - last_cpu_bundle_adjustment >= bundle_adjustment_interval:
+                        if abs(cpu_usage - 70) > 10 and self.cpu_bundle_size < max_bundle_size:
+                            self.cpu_bundle_size = min(max_bundle_size, self.cpu_bundle_size + 1)
+                            self.logger.info(f"Tăng cpu_bundle_size lên {self.cpu_bundle_size} do CPU tải thấp.")
+                            last_cpu_bundle_adjustment = now
 
                 # Giám sát GPU
                 if self.use_gpu and self.gpu_semaphore:
@@ -558,17 +715,34 @@ class ThreadingManager:
                                 new_limit = max(min_semaphore_limit, self.gpu_semaphore.current_limit - reduction)
                                 self.gpu_semaphore.adjust(new_limit)
                                 self.logger.info(f"Giảm luồng GPU xuống {new_limit} (giảm {reduction})")
+
+                                # Điều chỉnh gpu_bundle_size (nếu đã đủ thời gian và chênh lệch lớn)
+                                if now - last_gpu_bundle_adjustment >= bundle_adjustment_interval:
+                                    if abs(gpu_utilization - 70) > 10 and self.gpu_bundle_size > min_bundle_size:
+                                        self.gpu_bundle_size = max(min_bundle_size, self.gpu_bundle_size - 1)
+                                        self.logger.info(f"Giảm gpu_bundle_size xuống {self.gpu_bundle_size} do GPU quá tải.")
+                                        last_gpu_bundle_adjustment = now
+
                             elif gpu_utilization < 60:
                                 increment = max(1, int(0.2 * self.gpu_semaphore.current_limit))
                                 new_limit = min(self.gpu_semaphore.max_limit, self.gpu_semaphore.current_limit + increment)
                                 self.gpu_semaphore.adjust(new_limit)
                                 self.logger.info(f"Tăng luồng GPU lên {new_limit} (tăng {increment})")
+
+                                # Điều chỉnh gpu_bundle_size (nếu đã đủ thời gian và chênh lệch lớn)
+                                if now - last_gpu_bundle_adjustment >= bundle_adjustment_interval:
+                                    if abs(gpu_utilization - 70) > 10 and self.gpu_bundle_size < max_bundle_size:
+                                        self.gpu_bundle_size = min(max_bundle_size, self.gpu_bundle_size + 1)
+                                        self.logger.info(f"Tăng gpu_bundle_size lên {self.gpu_bundle_size} do GPU tải thấp.")
+                                        last_gpu_bundle_adjustment = now
+
                     except Exception as e:
                         self.logger.warning(f"Lỗi khi giám sát GPU: {e}")
 
             except Exception as e:
                 self.logger.error(f"Lỗi trong _monitor_and_adjust_resources: {e}")
 
+            # Chờ trước lần giám sát tiếp theo
             time.sleep(60)  # Chu kỳ giám sát, có thể điều chỉnh
 
 
@@ -597,7 +771,6 @@ def load_config():
         raise FileNotFoundError(f"Lỗi: {e}")
     except json.JSONDecodeError as e:
         raise ValueError(f"Lỗi định dạng JSON trong tệp cấu hình: {e}")
-
 
 def setup(stop_event):
     """
@@ -653,15 +826,21 @@ def setup(stop_event):
             max_gpu_threads = 0
             gpu_rate_limit = 0
 
-        cache_enabled = config.get("cache_enabled", False)
 
         # Tham số bổ sung cho cơ chế mới
-        enable_compression = config.get("enable_compression", True)
-        enable_encryption = config.get("enable_encryption", True)
-        encryption_key = config.get("encryption_key", "secret_key_demo")
-        bundle_size = config.get("bundle_size", 3)
-        bundle_interval = config.get("bundle_interval", 2.0)
-        max_net_packets = config.get("max_net_packets", 5)
+        try:
+            cache_enabled = config["cache_enabled"]
+            enable_compression = config["enable_compression"]
+            enable_encryption = config["enable_encryption"]
+            encryption_key = config["encryption_key"]
+            cpu_bundle_size = config["cpu_bundle_size"]
+            gpu_bundle_size = config["gpu_bundle_size"]
+            bundle_interval = config["bundle_interval"]
+            max_net_packets = config["max_net_packets"]
+            
+        except KeyError as e:
+            logger.error(f"Thiếu trường cấu hình quan trọng: {e}")
+            raise
 
         threading_manager_instance = ThreadingManager(
             max_cpu_threads=max_cpu_threads,
@@ -675,7 +854,8 @@ def setup(stop_event):
             enable_compression=enable_compression,
             enable_encryption=enable_encryption,
             encryption_key=encryption_key,
-            bundle_size=bundle_size,
+            cpu_bundle_size=cpu_bundle_size,
+            gpu_bundle_size=gpu_bundle_size,
             bundle_interval=bundle_interval,
             max_network_packets_per_second=max_net_packets
         )

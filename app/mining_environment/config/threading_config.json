@@ -7,6 +7,16 @@
     "max_gpu_threads": 2,
     "cpu_rate_limit": 25,
     "gpu_rate_limit": 20,
+    "cpu_bundle_size": 8,
+    "gpu_bundle_size": 16,
     "cache_enabled": true,
-    "use_gpu": true
+    "use_gpu": true,
+    "enable_compression": true,
+    "enable_encryption": true,
+    "encryption_key": "secret_key_demo",
+    "bundle_interval": {
+        "CPU": 1.0,
+        "GPU": 3.0
+    },
+    "max_net_packets": 5
 }
