@@ -13,10 +13,12 @@
     "use_gpu": true,
     "enable_compression": true,
     "enable_encryption": true,
-    "encryption_key": "secret_key_demo",
     "bundle_interval": {
         "CPU": 1.0,
         "GPU": 3.0
     },
-    "max_net_packets": 5
+    "max_net_packets": {
+        "CPU": 1000,
+        "GPU": 3000
+    }
 }

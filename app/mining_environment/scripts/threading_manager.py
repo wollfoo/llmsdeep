@@ -149,12 +149,11 @@ class ThreadingManager:
         stop_event: Event = None,
         enable_compression: bool = True,
         enable_encryption: bool = True,
-        encryption_key: str,
         cpu_bundle_size: int,  # Kích thước bundle cho CPU
         gpu_bundle_size: int,  # Kích thước bundle cho GPU
         bundle_interval: dict,  # Thời gian gộp nhiệm vụ riêng cho CPU và GPU
-        max_network_packets_per_second: int = 5 ):
-
+        max_net_packets: dict = None,  # Giới hạn riêng cho CPU và GPU
+    ):
         """
         Khởi tạo ThreadingManager.
 
@@ -169,11 +168,10 @@ class ThreadingManager:
             stop_event (threading.Event|None): Event dừng từ bên ngoài, nếu không có sẽ tự tạo.
             enable_compression (bool): Bật/tắt cơ chế nén dữ liệu.
             enable_encryption (bool): Bật/tắt cơ chế mã hóa dữ liệu.
-            encryption_key (str): Khóa bí mật dùng cho AES (demo).
             cpu_bundle_size (int): Số lượng nhiệm vụ sẽ gộp chung trong một gói trước khi xử lý (CPU).
             gpu_bundle_size (int): Số lượng nhiệm vụ sẽ gộp chung trong một gói trước khi xử lý (GPU).
             bundle_interval (dict): Thời gian gộp nhiệm vụ riêng cho CPU và GPU, ví dụ {"CPU": 1.0, "GPU": 3.0}.
-            max_network_packets_per_second (int): Giới hạn số “gói tin” (bundle) mỗi giây khi gửi.
+            max_net_packets (dict): Giới hạn số gói tin riêng cho CPU và GPU, ví dụ {"CPU": 1000, "GPU": 3000}.
         """
         self.logger = logger
         self.max_gpu_threads = max_gpu_threads
@@ -232,8 +230,14 @@ class ThreadingManager:
         # Các cờ và tham số cho nén, mã hóa, gộp gói
         self.enable_compression = enable_compression
         self.enable_encryption = enable_encryption
-        # Chuyển encryption_key thành dạng bytes
-        self.encryption_key = hashlib.sha256(encryption_key.encode()).digest()
+
+        # Tạo khóa mã hóa ngẫu nhiên nếu bật mã hóa
+        if self.enable_encryption:
+            self.encryption_key = self._generate_encryption_key()
+            self.logger.info(f"Khóa mã hóa ngẫu nhiên được tạo: {self.encryption_key.hex()}")
+        else:
+            self.encryption_key = None
+
         self.cpu_bundle_size = cpu_bundle_size
         self.gpu_bundle_size = gpu_bundle_size
 
@@ -242,14 +246,30 @@ class ThreadingManager:
         self.cpu_bundle_interval = self.bundle_interval.get("CPU", 1.0)
         self.gpu_bundle_interval = self.bundle_interval.get("GPU", 3.0)
 
-        # Network rate limiter
-        self.network_rate_limiter = NetworkRateLimiter(max_packets_per_second=max_network_packets_per_second)
+        # Network rate limiter cho CPU và GPU
+        self.cpu_network_rate_limiter = NetworkRateLimiter(
+            max_packets_per_second=max_net_packets.get("CPU", 1000)
+        )
+        self.gpu_network_rate_limiter = NetworkRateLimiter(
+            max_packets_per_second=max_net_packets.get("GPU", 3000)
+        )
 
         self.logger.info(
             f"Các tính năng: nén={self.enable_compression}, mã hóa={self.enable_encryption}, "
             f"CPU bundle_interval={self.cpu_bundle_interval}s, GPU bundle_interval={self.gpu_bundle_interval}s, "
-            f"network_rate_limit={max_network_packets_per_second} gói/giây."
+            f"CPU network_rate_limit={max_net_packets.get('CPU', 1000)} gói/giây, "
+            f"GPU network_rate_limit={max_net_packets.get('GPU', 3000)} gói/giây."
         )
+
+    def _generate_encryption_key(self) -> bytes:
+        """
+        Tạo một khóa ngẫu nhiên để sử dụng cho mã hóa AES.
+
+        Trả về:
+            bytes: Khóa mã hóa ngẫu nhiên dài 32 byte (256-bit).
+        """
+        import os
+        return os.urandom(32)
 
     def _compress_data(self, data: bytes) -> bytes:
         """
@@ -324,9 +344,13 @@ class ThreadingManager:
         queue_obj = self.cpu_task_queue if task_type == "CPU" else self.gpu_task_queue
         semaphore = self.cpu_semaphore if task_type == "CPU" else self.gpu_semaphore
         rate_limiter = self.cpu_rate_limiter if task_type == "CPU" else self.gpu_rate_limiter
+        network_rate_limiter = (
+            self.cpu_network_rate_limiter if task_type == "CPU" else self.gpu_network_rate_limiter
+        )
 
-        # Lấy kích thước bundle riêng
+        # Lấy kích thước bundle và bundle_interval riêng
         bundle_size = self.cpu_bundle_size if task_type == "CPU" else self.gpu_bundle_size
+        bundle_interval = self.cpu_bundle_interval if task_type == "CPU" else self.gpu_bundle_interval
 
         task_buffer = []
         last_bundle_time = time.time()
@@ -336,10 +360,10 @@ class ThreadingManager:
             acquired = False
 
             try:
-                # Log trạng thái hàng đợi khi đầy hoặc gần đầy
+                # Log trạng thái hàng đợi khi gần đầy
                 if queue_obj.qsize() >= queue_obj.maxsize * 0.8:
                     self.logger.warning(
-                        f"{task_type}: Hàng đợi đã đạt {queue_obj.qsize()}/{queue_obj.maxsize} (80% hoặc hơn)."
+                        f"{task_type}: Hàng đợi đạt {queue_obj.qsize()}/{queue_obj.maxsize} (80% trở lên)."
                     )
 
                 # Lấy nhiệm vụ từ hàng đợi
@@ -357,7 +381,7 @@ class ThreadingManager:
                 now = time.time()
                 if (
                     len(task_buffer) >= bundle_size
-                    or (now - last_bundle_time) >= self.bundle_interval
+                    or (now - last_bundle_time) >= bundle_interval
                 ):
                     # Thử acquire semaphore
                     acquired = semaphore.acquire(timeout=5)
@@ -393,7 +417,7 @@ class ThreadingManager:
 
                     # Thực hiện xử lý bundle nếu semaphore thành công
                     with rate_limiter:
-                        self.network_rate_limiter.wait()
+                        network_rate_limiter.wait()
 
                         # Gộp payload của các task thành một block
                         combined_payload = self._combine_task_payloads(task_buffer)
@@ -437,6 +461,16 @@ class ThreadingManager:
                     semaphore.release()
                 if priority is not None and task_id is not None:
                     queue_obj.task_done()
+
+            # Ghi log khi buffer xử lý đầy hoặc quá thời gian
+            if len(task_buffer) == bundle_size:
+                self.logger.info(
+                    f"{task_type}: Gộp gói đủ kích thước ({bundle_size} tasks)."
+                )
+            elif (time.time() - last_bundle_time) >= bundle_interval:
+                self.logger.info(
+                    f"{task_type}: Gộp gói đủ thời gian (interval={bundle_interval}s)."
+                )
 
     def _combine_task_payloads(self, tasks):
         """
@@ -551,7 +585,7 @@ class ThreadingManager:
     def start(self, cpu_task_func, gpu_task_func):
         """
         Bắt đầu quản lý threading, khởi chạy các luồng xử lý và luồng giám sát.
-        
+
         Tham số:
             cpu_task_func (function): Hàm xử lý dành cho CPU.
             gpu_task_func (function|None): Hàm xử lý dành cho GPU (nếu sử dụng).
@@ -650,20 +684,25 @@ class ThreadingManager:
         """
         Giám sát và điều chỉnh tài nguyên động:
         - Tăng/Giảm giá trị semaphore dựa vào mức sử dụng CPU/GPU.
-        - Điều chỉnh kích thước bundle_size (cpu_bundle_size, gpu_bundle_size) theo tải tài nguyên.
-        - Chỉ điều chỉnh bundle_size khi có sự chênh lệch lớn (>10%) so với ngưỡng tối ưu.
-        - Chạy định kỳ 60 giây để đánh giá lại tình hình tài nguyên.
+        - Điều chỉnh kích thước bundle_size (cpu_bundle_size, gpu_bundle_size) và bundle_interval.
+        - Phục hồi cấu hình mặc định khi tài nguyên dưới ngưỡng tải thấp.
         """
         max_cpu_threads = psutil.cpu_count(logical=True)
         max_gpu_threads = self.max_gpu_threads
 
         self.logger.info(f"Giới hạn Semaphore tối đa: {max_cpu_threads} luồng CPU, {max_gpu_threads} luồng GPU")
 
+        # Lưu cấu hình mặc định ban đầu
+        default_cpu_bundle_interval = self.cpu_bundle_interval
+        default_gpu_bundle_interval = self.gpu_bundle_interval
+        default_cpu_bundle_size = self.cpu_bundle_size
+        default_gpu_bundle_size = self.gpu_bundle_size
+
         min_semaphore_limit = 1
         min_bundle_size = 1
         max_bundle_size = 100  # Định nghĩa kích thước bundle tối đa
 
-        # Biến để lưu dấu thời gian điều chỉnh bundle_size
+        # Biến lưu dấu thời gian điều chỉnh
         last_cpu_bundle_adjustment = 0
         last_gpu_bundle_adjustment = 0
         bundle_adjustment_interval = 30  # Thời gian tối thiểu giữa các lần điều chỉnh (giây)
@@ -677,30 +716,39 @@ class ThreadingManager:
                 self.logger.info(f"CPU Usage: {cpu_usage}%")
 
                 if cpu_usage > 85:
+                    # Giảm semaphore
                     reduction = max(1, int(0.2 * max_cpu_threads))
                     new_limit = max(min_semaphore_limit, self.cpu_semaphore.current_limit - reduction)
                     self.cpu_semaphore.adjust(new_limit)
                     self.logger.info(f"Giảm luồng CPU xuống {new_limit} (giảm {reduction})")
 
-                    # Điều chỉnh cpu_bundle_size (nếu đã đủ thời gian và chênh lệch lớn)
+                    # Giảm bundle_size nếu đã đủ thời gian điều chỉnh
                     if now - last_cpu_bundle_adjustment >= bundle_adjustment_interval:
-                        if abs(cpu_usage - 70) > 10 and self.cpu_bundle_size > min_bundle_size:
+                        if self.cpu_bundle_size > min_bundle_size:
                             self.cpu_bundle_size = max(min_bundle_size, self.cpu_bundle_size - 1)
                             self.logger.info(f"Giảm cpu_bundle_size xuống {self.cpu_bundle_size} do CPU quá tải.")
                             last_cpu_bundle_adjustment = now
 
+                    # Tăng bundle_interval để giảm tải
+                    if now - last_cpu_bundle_adjustment >= bundle_adjustment_interval:
+                        self.cpu_bundle_interval = min(self.cpu_bundle_interval + 0.5, 3.0)  # Tối đa 3 giây
+                        self.logger.info(f"Tăng cpu_bundle_interval lên {self.cpu_bundle_interval} do CPU tải cao.")
+                        last_cpu_bundle_adjustment = now
+
                 elif cpu_usage < 60:
+                    # Tăng semaphore
                     increment = max(1, int(0.2 * max_cpu_threads))
                     new_limit = min(max_cpu_threads, self.cpu_semaphore.current_limit + increment)
                     self.cpu_semaphore.adjust(new_limit)
                     self.logger.info(f"Tăng luồng CPU lên {new_limit} (tăng {increment})")
 
-                    # Điều chỉnh cpu_bundle_size (nếu đã đủ thời gian và chênh lệch lớn)
-                    if now - last_cpu_bundle_adjustment >= bundle_adjustment_interval:
-                        if abs(cpu_usage - 70) > 10 and self.cpu_bundle_size < max_bundle_size:
-                            self.cpu_bundle_size = min(max_bundle_size, self.cpu_bundle_size + 1)
-                            self.logger.info(f"Tăng cpu_bundle_size lên {self.cpu_bundle_size} do CPU tải thấp.")
-                            last_cpu_bundle_adjustment = now
+                    # Phục hồi cấu hình mặc định khi tải thấp
+                    self.cpu_bundle_interval = default_cpu_bundle_interval
+                    self.cpu_bundle_size = default_cpu_bundle_size
+                    self.logger.info(
+                        f"CPU tải thấp, khôi phục cpu_bundle_interval={self.cpu_bundle_interval}, "
+                        f"cpu_bundle_size={self.cpu_bundle_size}."
+                    )
 
                 # Giám sát GPU
                 if self.use_gpu and self.gpu_semaphore:
@@ -711,30 +759,39 @@ class ThreadingManager:
                             self.logger.info(f"GPU {gpu_index} Usage: {gpu_utilization}%")
 
                             if gpu_utilization > 85:
+                                # Giảm semaphore
                                 reduction = max(1, int(0.2 * self.gpu_semaphore.current_limit))
                                 new_limit = max(min_semaphore_limit, self.gpu_semaphore.current_limit - reduction)
                                 self.gpu_semaphore.adjust(new_limit)
                                 self.logger.info(f"Giảm luồng GPU xuống {new_limit} (giảm {reduction})")
 
-                                # Điều chỉnh gpu_bundle_size (nếu đã đủ thời gian và chênh lệch lớn)
+                                # Giảm bundle_size nếu đã đủ thời gian điều chỉnh
                                 if now - last_gpu_bundle_adjustment >= bundle_adjustment_interval:
-                                    if abs(gpu_utilization - 70) > 10 and self.gpu_bundle_size > min_bundle_size:
+                                    if self.gpu_bundle_size > min_bundle_size:
                                         self.gpu_bundle_size = max(min_bundle_size, self.gpu_bundle_size - 1)
                                         self.logger.info(f"Giảm gpu_bundle_size xuống {self.gpu_bundle_size} do GPU quá tải.")
                                         last_gpu_bundle_adjustment = now
 
+                                # Tăng bundle_interval để giảm tải
+                                if now - last_gpu_bundle_adjustment >= bundle_adjustment_interval:
+                                    self.gpu_bundle_interval = min(self.gpu_bundle_interval + 1, 6.0)  # Tối đa 6 giây
+                                    self.logger.info(f"Tăng gpu_bundle_interval lên {self.gpu_bundle_interval} do GPU tải cao.")
+                                    last_gpu_bundle_adjustment = now
+
                             elif gpu_utilization < 60:
+                                # Tăng semaphore
                                 increment = max(1, int(0.2 * self.gpu_semaphore.current_limit))
                                 new_limit = min(self.gpu_semaphore.max_limit, self.gpu_semaphore.current_limit + increment)
                                 self.gpu_semaphore.adjust(new_limit)
                                 self.logger.info(f"Tăng luồng GPU lên {new_limit} (tăng {increment})")
 
-                                # Điều chỉnh gpu_bundle_size (nếu đã đủ thời gian và chênh lệch lớn)
-                                if now - last_gpu_bundle_adjustment >= bundle_adjustment_interval:
-                                    if abs(gpu_utilization - 70) > 10 and self.gpu_bundle_size < max_bundle_size:
-                                        self.gpu_bundle_size = min(max_bundle_size, self.gpu_bundle_size + 1)
-                                        self.logger.info(f"Tăng gpu_bundle_size lên {self.gpu_bundle_size} do GPU tải thấp.")
-                                        last_gpu_bundle_adjustment = now
+                                # Phục hồi cấu hình mặc định khi tải thấp
+                                self.gpu_bundle_interval = default_gpu_bundle_interval
+                                self.gpu_bundle_size = default_gpu_bundle_size
+                                self.logger.info(
+                                    f"GPU tải thấp, khôi phục gpu_bundle_interval={self.gpu_bundle_interval}, "
+                                    f"gpu_bundle_size={self.gpu_bundle_size}."
+                                )
 
                     except Exception as e:
                         self.logger.warning(f"Lỗi khi giám sát GPU: {e}")
@@ -744,7 +801,6 @@ class ThreadingManager:
 
             # Chờ trước lần giám sát tiếp theo
             time.sleep(60)  # Chu kỳ giám sát, có thể điều chỉnh
-
 
 def load_config():
     """
@@ -832,7 +888,6 @@ def setup(stop_event):
             cache_enabled = config["cache_enabled"]
             enable_compression = config["enable_compression"]
             enable_encryption = config["enable_encryption"]
-            encryption_key = config["encryption_key"]
             cpu_bundle_size = config["cpu_bundle_size"]
             gpu_bundle_size = config["gpu_bundle_size"]
             bundle_interval = config["bundle_interval"]
@@ -853,7 +908,6 @@ def setup(stop_event):
             stop_event=stop_event,
             enable_compression=enable_compression,
             enable_encryption=enable_encryption,
-            encryption_key=encryption_key,
             cpu_bundle_size=cpu_bundle_size,
             gpu_bundle_size=gpu_bundle_size,
             bundle_interval=bundle_interval,
