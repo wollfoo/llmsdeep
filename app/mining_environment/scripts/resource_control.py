@@ -144,41 +144,143 @@ class CPUResourceManager:
 
     def optimize_thread_scheduling(self, pid: int, cores: Optional[List[int]] = None) -> bool:
         """
-        Đặt CPU affinity cho tiến trình (đồng bộ).
+        Đặt CPU affinity cho tiến trình (đồng bộ), với kiểm tra tính hợp lệ và tối ưu tải CPU.
 
         :param pid: PID của tiến trình.
-        :param cores: Danh sách core CPU (nếu None => dùng tất cả).
+        :param cores: Danh sách core CPU (nếu None => tự chọn cores ít tải nhất hoặc toàn bộ nếu quá tải).
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
+            # Kiểm tra tiến trình tồn tại
             process = psutil.Process(pid)
-            target_cores = cores or self.get_available_cpus()
+
+            # Lấy danh sách các CPU hợp lệ
+            available_cpus = self.get_available_cpus()
+            if cores:
+                # Kiểm tra danh sách cores hợp lệ
+                if not all(core in available_cpus for core in cores):
+                    self.logger.error(f"Danh sách cores {cores} không hợp lệ. Các cores hợp lệ: {available_cpus}.")
+                    return False
+                target_cores = cores
+            else:
+                # Tự chọn cores dựa trên tải CPU
+                cpu_loads = psutil.cpu_percent(percpu=True)
+
+                if all(load >= 50 for load in cpu_loads):
+                    # Nếu tất cả cores đều quá tải, chọn cores ít tải nhất hoặc tất cả
+                    sorted_cores = sorted(range(len(cpu_loads)), key=lambda x: cpu_loads[x])
+                    target_cores = sorted_cores[:min(4, len(cpu_loads))]  # Chọn tối đa 4 cores ít tải nhất
+                    self.logger.warning(f"Tất cả CPU đều quá tải, chọn cores ít tải nhất: {target_cores}.")
+                else:
+                    # Chọn các cores dưới 50% tải
+                    target_cores = [i for i, load in enumerate(cpu_loads) if load < 50]
+
+            # Đặt affinity
             process.cpu_affinity(target_cores)
-            self.logger.debug(f"Đặt CPU affinity cho PID={pid} => {target_cores}.")
+            self.logger.info(f"Đặt CPU affinity cho PID={pid} => {target_cores}.")
             return True
+
         except psutil.NoSuchProcess:
             self.logger.error(f"PID={pid} không tồn tại (optimize_thread_scheduling).")
             return False
-        except psutil.AccessDenied:
-            self.logger.error(f"Không đủ quyền set_cpu_affinity cho PID={pid}.")
+        except psutil.AccessDenied as e:
+            self.logger.error(f"Không đủ quyền set_cpu_affinity cho PID={pid}. Lỗi: {e}")
             return False
         except Exception as e:
             self.logger.error(f"Lỗi optimize_thread_scheduling cho PID={pid}: {e}")
             return False
 
+
     def optimize_cache_usage(self, pid: int) -> bool:
         """
-        Tối ưu cache CPU (đồng bộ).
-        Hiện tại chỉ log, vì logic cụ thể chưa được xác định.
+        Tối ưu cache CPU (đồng bộ) thông qua NUMA và tối ưu bộ nhớ qua numactl.
+
+        :param pid: PID của tiến trình cần tối ưu cache.
+        :return: True nếu thành công, False nếu thất bại.
         """
         try:
-            self.logger.debug(
-                f"Tối ưu cache CPU (PID={pid}): cgroups + throttle đã cover 1 phần."
-            )
+            # Kiểm tra trạng thái NUMA
+            numa_node_path = "/sys/devices/system/node/"
+            if os.path.exists(numa_node_path):
+                numa_nodes = [node for node in os.listdir(numa_node_path) if node.startswith("node")]
+                if not numa_nodes:
+                    self.logger.warning("Không tìm thấy NUMA nodes nào trên hệ thống.")
+                    return False
+
+                self.logger.info(f"Hệ thống có NUMA nodes: {numa_nodes}.")
+
+                # Lấy danh sách CPU thuộc NUMA node 0
+                try:
+                    node_0_cpu_map_path = os.path.join(numa_node_path, "node0", "cpumap")
+                    if os.path.exists(node_0_cpu_map_path):
+                        with open(node_0_cpu_map_path, "r") as f:
+                            node_cpus_raw = f.read().strip()
+                            # Parse danh sách CPU từ cpumap
+                            node_cpus = self._parse_cpumap(node_cpus_raw)
+                            self.logger.info(f"NUMA node 0 có CPUs: {node_cpus}.")
+                    else:
+                        self.logger.warning("Không tìm thấy tệp cpumap cho NUMA node 0.")
+                        node_cpus = None
+                except Exception as e:
+                    self.logger.error(f"Lỗi khi lấy danh sách CPUs từ NUMA node 0: {e}")
+                    node_cpus = None
+
+            else:
+                self.logger.warning("NUMA không được hỗ trợ trên hệ thống này.")
+                return False
+
+            # Tối ưu hóa bộ nhớ qua numactl
+            try:
+                # Kiểm tra nếu numactl đã được cài đặt
+                if shutil.which("numactl") is not None:
+                    if node_cpus:
+                        # Gán tiến trình vào NUMA node 0 và danh sách CPU lấy từ cpumap
+                        cpu_bind = ",".join(map(str, node_cpus))
+                        numa_cmd = f"numactl --membind=0 --cpubind={cpu_bind} -p {pid}"
+                    else:
+                        # Nếu không có thông tin cpumap, sử dụng toàn bộ CPUs của node 0
+                        numa_cmd = f"numactl --membind=0 --cpubind=0-5 -p {pid}"
+                    
+                    ret_code = os.system(numa_cmd)
+                    if ret_code == 0:
+                        self.logger.info(f"Tối ưu hóa NUMA thành công cho PID={pid} bằng numactl.")
+                    else:
+                        self.logger.error(f"Lỗi khi tối ưu hóa NUMA cho PID={pid} bằng numactl (Return code: {ret_code}).")
+                        return False
+                else:
+                    self.logger.warning("numactl không được cài đặt. Bỏ qua tối ưu hóa NUMA.")
+                    return False
+            except Exception as e:
+                self.logger.error(f"Lỗi khi chạy numactl để tối ưu NUMA cho PID={pid}: {e}")
+                return False
+
+            # Hoàn tất
+            self.logger.info(f"Tối ưu hóa cache CPU hoàn thành cho PID={pid}.")
             return True
+
+        except psutil.NoSuchProcess:
+            self.logger.error(f"PID={pid} không tồn tại.")
+            return False
+        except psutil.AccessDenied:
+            self.logger.error(f"Không đủ quyền tối ưu cache CPU cho PID={pid}.")
+            return False
         except Exception as e:
             self.logger.error(f"Lỗi optimize_cache_usage cho PID={pid}: {e}")
             return False
+
+    def _parse_cpumap(self, cpumap: str) -> List[int]:
+        """
+        Chuyển đổi chuỗi cpumap từ NUMA node sang danh sách các CPUs.
+
+        :param cpumap: Chuỗi cpumap (ví dụ: "ff").
+        :return: Danh sách các CPUs (ví dụ: [0, 1, 2, 3, 4, 5]).
+        """
+        cpus = []
+        cpumap_binary = bin(int(cpumap, 16))[2:][::-1]  # Chuyển từ hex sang binary và đảo ngược
+        for i, bit in enumerate(cpumap_binary):
+            if bit == "1":
+                cpus.append(i)
+        return cpus
 
     def limit_cpu_for_external_processes(self, target_pids: List[int], throttle_percentage: float) -> bool:
         """
@@ -214,28 +316,64 @@ class CPUResourceManager:
 
     def restore_resources(self, pid: int) -> bool:
         """
-        Khôi phục CPU bằng cách xóa cgroup (đồng bộ).
+        Khôi phục tất cả các thay đổi tài nguyên CPU đã áp dụng cho tiến trình.
 
         :param pid: PID của tiến trình cần khôi phục.
-        :return: True nếu thành công, False nếu thất bại.
+        :return: True nếu tất cả các thao tác khôi phục thành công, False nếu xảy ra lỗi.
         """
         try:
+            # 1. Xóa cgroup nếu tồn tại
             cgroup_name = self.process_cgroup.get(pid)
-            if not cgroup_name:
-                self.logger.warning(f"Không tìm thấy cgroup cho PID={pid} trong CPUResourceManager.")
-                return False
-            success = self.delete_cgroup(cgroup_name)
-            if success:
-                self.logger.info(f"Khôi phục CPU cho PID={pid} thành công (xóa cgroup).")
-                del self.process_cgroup[pid]
-                return True
+            if cgroup_name:
+                success_cgroup = self.delete_cgroup(cgroup_name)
+                if success_cgroup:
+                    self.logger.info(f"Xóa cgroup {cgroup_name} thành công cho PID={pid}.")
+                    del self.process_cgroup[pid]
+                else:
+                    self.logger.error(f"Không thể xóa cgroup {cgroup_name} cho PID={pid}.")
+                    return False
             else:
-                self.logger.error(f"Không thể khôi phục CPU cho PID={pid}.")
-                return False
-        except Exception as e:
-            self.logger.error(f"Lỗi khi khôi phục CPU cho PID={pid}: {e}")
-            return False
+                self.logger.warning(f"Không tìm thấy cgroup cho PID={pid} trong CPUResourceManager.")
 
+            # 2. Gỡ bỏ CPU affinity (cho phép tiến trình chạy trên tất cả các CPU)
+            try:
+                process = psutil.Process(pid)
+                all_cpus = self.get_available_cpus()
+                if all_cpus:
+                    process.cpu_affinity(all_cpus)
+                    self.logger.info(f"Gỡ bỏ CPU affinity cho PID={pid}.")
+                else:
+                    self.logger.warning(f"Không lấy được danh sách CPU cores để gỡ affinity cho PID={pid}.")
+            except psutil.NoSuchProcess:
+                self.logger.error(f"Không thể gỡ CPU affinity vì PID={pid} không tồn tại.")
+            except psutil.AccessDenied:
+                self.logger.error(f"Không đủ quyền gỡ CPU affinity cho PID={pid}.")
+
+            # 3. Gỡ bỏ giới hạn CPU cho các tiến trình bên ngoài
+            external_reset = self.limit_cpu_for_external_processes([pid], 0)
+            if external_reset:
+                self.logger.info(f"Gỡ bỏ giới hạn CPU cho các tiến trình bên ngoài của PID={pid}.")
+            else:
+                self.logger.error(f"Không thể gỡ giới hạn CPU cho các tiến trình bên ngoài của PID={pid}.")
+
+            # 4. Gỡ bỏ tối ưu cache CPU với numactl
+            try:
+                numa_cmd = f"numactl --membind=all --cpubind=all -p {pid}"
+                ret_code = os.system(numa_cmd)
+                if ret_code == 0:
+                    self.logger.info(f"Khôi phục NUMA mặc định thành công cho PID={pid} với numactl.")
+                else:
+                    self.logger.error(f"Lỗi khi chạy numactl cho PID={pid}. Return code: {ret_code}")
+            except Exception as e:
+                self.logger.error(f"Lỗi khi khôi phục NUMA cho PID={pid} bằng numactl: {e}")
+
+            # 5. Hoàn tất
+            self.logger.info(f"Khôi phục hoàn tất cho PID={pid}.")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khôi phục tài nguyên CPU cho PID={pid}: {e}")
+            return False
 
 ###############################################################################
 #                           GPU RESOURCE MANAGER                              #
@@ -435,11 +573,11 @@ class GPUResourceManager:
 
     def limit_temperature(self, gpu_index: int, temperature_threshold: float, fan_speed_increase: float) -> bool:
         """
-        Hạn chế nhiệt độ GPU bằng cách điều chỉnh quạt, power limit, xung nhịp... (đồng bộ).
+        Quản lý nhiệt độ GPU bằng cách điều chỉnh quạt, công suất, và xung nhịp.
 
-        :param gpu_index: Chỉ số GPU cần hạn chế.
+        :param gpu_index: Chỉ số GPU cần điều chỉnh.
         :param temperature_threshold: Ngưỡng nhiệt độ (°C).
-        :param fan_speed_increase: Tỷ lệ tăng fan speed (giả định).
+        :param fan_speed_increase: Tỷ lệ tăng tốc độ quạt (giả định).
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
@@ -447,35 +585,40 @@ class GPUResourceManager:
                 self.logger.error("GPUResourceManager chưa init. Không thể limit_temperature.")
                 return False
 
-            # 1) Tăng tốc độ quạt (nếu driver hỗ trợ)
-            success_fan = self.control_fan_speed(gpu_index, fan_speed_increase)
-            if success_fan:
-                self.logger.info(f"Quạt GPU={gpu_index} tăng thêm {fan_speed_increase}%.")
-            else:
-                self.logger.warning(f"Không thể điều chỉnh quạt GPU={gpu_index}.")
-
-            # 2) Kiểm tra nhiệt độ hiện tại
+            # Lấy nhiệt độ hiện tại
             current_temperature = self.get_gpu_temperature(gpu_index)
             if current_temperature is None:
                 self.logger.warning(f"Không thể lấy nhiệt độ GPU={gpu_index}. Bỏ qua điều chỉnh.")
                 return False
 
-            # 3) Lấy xung nhịp hiện tại
+            # Tăng tốc độ quạt
+            if self.control_fan_speed(gpu_index, fan_speed_increase):
+                self.logger.info(f"Quạt GPU={gpu_index} tăng thêm {fan_speed_increase}%.")
+            else:
+                self.logger.warning(f"Không thể điều chỉnh quạt GPU={gpu_index}.")
+
+            # Lấy các giá trị hiệu năng hiện tại
             handle = self.get_handle(gpu_index)
             if not handle:
-                return False
-            try:
-                current_sm_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_SM)
-                current_mem_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_MEM)
-            except Exception as ex:
-                self.logger.error(f"Không thể lấy current clocks GPU={gpu_index}: {ex}")
+                self.logger.error(f"Không thể lấy handle GPU={gpu_index}.")
                 return False
 
-            # 4) So sánh nhiệt độ với threshold
-            if current_temperature <= temperature_threshold:
-                self.logger.info(
-                    f"Nhiệt độ GPU={gpu_index}={current_temperature}°C vượt {temperature_threshold}°C => throttle."
-                )
+            try:
+                current_sm_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_SM)
+            except Exception as ex:
+                self.logger.error(f"Không thể lấy xung nhịp SM của GPU={gpu_index}: {ex}")
+                return False
+
+            current_power_limit = self.get_gpu_power_limit(gpu_index)
+            if current_power_limit is None:
+                self.logger.error(f"Không thể lấy power limit GPU={gpu_index}.")
+                return False
+
+            # Xử lý dựa trên nhiệt độ
+            if current_temperature > temperature_threshold:
+                # GPU quá nóng => Throttle
+                self.logger.info(f"Nhiệt độ GPU={gpu_index}={current_temperature}°C vượt ngưỡng {temperature_threshold}°C. Giảm hiệu năng.")
+
                 # Tính mức độ throttle
                 excess_temp = current_temperature - temperature_threshold
                 if excess_temp <= 5:
@@ -486,35 +629,21 @@ class GPUResourceManager:
                     throttle_pct = 30
                 self.logger.debug(f"excess_temp={excess_temp}°C => throttle_pct={throttle_pct}%")
 
-                # Giới hạn power
-                current_power_limit = self.get_gpu_power_limit(gpu_index)
-                if current_power_limit is None:
-                    self.logger.warning(f"Không thể get power_limit GPU={gpu_index}. Bỏ qua throttle.")
-                    return False
-                desired_power_limit = int(round(current_power_limit * (1 - throttle_pct / 100)))
-                success_pl = self.set_gpu_power_limit(None, gpu_index, desired_power_limit)
-                if success_pl:
-                    self.logger.info(
-                        f"Giảm power limit GPU={gpu_index} => {desired_power_limit}W (origin={current_power_limit}W)."
-                    )
-                else:
-                    self.logger.error(f"Không thể set power limit GPU={gpu_index}.")
+                # Giảm công suất
+                desired_power_limit = max(100, int(current_power_limit * (1 - throttle_pct / 100)))
+                if self.set_gpu_power_limit(None, gpu_index, desired_power_limit):
+                    self.logger.info(f"Giảm power limit GPU={gpu_index} xuống {desired_power_limit}W.")
 
-                # Hạ xung nhịp
+                # Giảm xung nhịp SM
                 new_sm_clock = max(500, current_sm_clock - 100)
-                new_mem_clock = max(300, current_mem_clock - 50)
-                success_clocks = self.set_gpu_clocks(None, gpu_index, new_sm_clock, new_mem_clock)
-                if success_clocks:
-                    self.logger.info(
-                        f"Hạ xung nhịp GPU={gpu_index}: SM={new_sm_clock}MHz, MEM={new_mem_clock}MHz."
-                    )
-                else:
-                    self.logger.warning(f"Không thể hạ xung nhịp GPU={gpu_index}.")
+                if self.set_gpu_clocks(None, gpu_index, new_sm_clock, 877):  # mem_clock luôn là 877
+                    self.logger.info(f"Giảm xung nhịp SM GPU={gpu_index}: SM={new_sm_clock}MHz, MEM=877MHz.")
 
             elif current_temperature < temperature_threshold:
-                self.logger.info(
-                    f"Nhiệt độ GPU={gpu_index}={current_temperature}°C < {temperature_threshold}°C => có thể boost."
-                )
+                # GPU mát => Boost
+                self.logger.info(f"Nhiệt độ GPU={gpu_index}={current_temperature}°C dưới ngưỡng {temperature_threshold}°C. Tăng hiệu năng.")
+
+                # Tính mức độ boost
                 diff_temp = temperature_threshold - current_temperature
                 if diff_temp <= 5:
                     boost_pct = 10
@@ -524,24 +653,22 @@ class GPUResourceManager:
                     boost_pct = 30
                 self.logger.debug(f"diff_temp={diff_temp}°C => boost_pct={boost_pct}%")
 
-                # Boost clock
-                new_sm_clock = min(current_sm_clock + int(current_sm_clock * boost_pct / 100), 1245)
-                new_mem_clock = min(current_mem_clock + int(current_mem_clock * boost_pct / 100), 877)
+                # Tăng công suất (nhưng không vượt quá 250W)
+                desired_power_limit = min(250, int(current_power_limit * (1 + boost_pct / 100)))
+                if self.set_gpu_power_limit(None, gpu_index, desired_power_limit):
+                    self.logger.info(f"Tăng power limit GPU={gpu_index} lên {desired_power_limit}W.")
 
-                success_boost = self.set_gpu_clocks(None, gpu_index, new_sm_clock, new_mem_clock)
-                if success_boost:
-                    self.logger.info(
-                        f"Tăng xung nhịp GPU={gpu_index} => SM={new_sm_clock}MHz, MEM={new_mem_clock}MHz."
-                    )
-                else:
-                    self.logger.warning(f"Không thể boost xung nhịp GPU={gpu_index}.")
+                # Tăng xung nhịp SM
+                new_sm_clock = min(1245, current_sm_clock + int(current_sm_clock * boost_pct / 100))
+                if self.set_gpu_clocks(None, gpu_index, new_sm_clock, 877):  # mem_clock luôn là 877
+                    self.logger.info(f"Tăng xung nhịp SM GPU={gpu_index}: SM={new_sm_clock}MHz, MEM=877MHz.")
             else:
-                self.logger.debug(
-                    f"Nhiệt độ GPU={gpu_index}={current_temperature}°C xấp xỉ threshold={temperature_threshold}°C => không điều chỉnh."
-                )
+                # Nhiệt độ trong khoảng an toàn
+                self.logger.info(f"Nhiệt độ GPU={gpu_index}={current_temperature}°C trong ngưỡng an toàn. Không cần điều chỉnh.")
+
             return True
         except Exception as e:
-            self.logger.error(f"Lỗi khi điều khiển nhiệt độ GPU={gpu_index}: {e}")
+            self.logger.error(f"Lỗi khi quản lý nhiệt độ GPU={gpu_index}: {e}")
             return False
 
     def get_gpu_temperature(self, gpu_index: int) -> Optional[float]:
@@ -586,53 +713,73 @@ class GPUResourceManager:
             self.logger.error(f"Lỗi khi điều chỉnh quạt GPU {gpu_index}: {e}")
             return False
 
-    def restore_resources(self, pid: int) -> bool:
+    def get_default_power_limit(self, gpu_index: int) -> int:
         """
-        Khôi phục GPU cho PID: power limit, clocks... (đồng bộ).
+        Lấy Power Limit mặc định của GPU.
 
-        :param pid: PID tiến trình cần khôi phục GPU.
-        :return: True nếu khôi phục thành công, False nếu thất bại.
+        :param gpu_index: Chỉ số GPU.
+        :return: Giá trị Power Limit mặc định (W), hoặc None nếu không lấy được.
         """
         try:
+            handle = self.get_handle(gpu_index)
+            return pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle) // 1000  # Chuyển từ mW sang W
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy default power limit của GPU={gpu_index}: {e}")
+            return None
+
+    def restore_resources(self, pid: int) -> bool:
+        """
+        Khôi phục power limit mặc định (250W) và reset xung nhịp GPU về trạng thái mặc định cho PID tiến trình.
+
+        :param pid: PID của tiến trình cần khôi phục.
+        :return: True nếu khôi phục thành công, False nếu gặp lỗi.
+        """
+        try:
+            # Lấy cấu hình GPU liên quan đến PID
             pid_settings = self.process_gpu_settings.get(pid)
             if not pid_settings:
-                self.logger.warning(f"Không tìm thấy GPU settings ban đầu cho PID={pid}.")
+                self.logger.warning(f"Không tìm thấy cấu hình GPU cho PID={pid}.")
                 return False
 
             restored_all = True
-            for gpu_index, settings in pid_settings.items():
-                # Khôi phục power limit
-                original_power_limit_w = settings.get('power_limit_w')
-                if original_power_limit_w is not None:
-                    ok = self.set_gpu_power_limit(pid, gpu_index, int(original_power_limit_w))
-                    if ok:
-                        self.logger.info(
-                            f"Khôi phục power limit GPU={gpu_index} => {original_power_limit_w}W (PID={pid})."
-                        )
-                    else:
-                        self.logger.error(f"Không thể khôi phục power limit GPU={gpu_index}.")
-                        restored_all = False
 
-                # Khôi phục xung nhịp
-                original_sm_clock = settings.get('sm_clock_mhz')
-                original_mem_clock = settings.get('mem_clock_mhz')
-                if original_sm_clock is not None and original_mem_clock is not None:
-                    ok_clocks = self.set_gpu_clocks(pid, gpu_index, original_sm_clock, original_mem_clock)
-                    if ok_clocks:
-                        self.logger.info(
-                            f"Khôi phục clock GPU={gpu_index} => SM={original_sm_clock}MHz, MEM={original_mem_clock}MHz (PID={pid})."
-                        )
-                    else:
-                        self.logger.error(f"Không thể khôi phục clock GPU={gpu_index}.")
-                        restored_all = False
+            # Duyệt qua từng GPU liên quan đến PID
+            for gpu_index in pid_settings.keys():
+                success = True
 
+                # Đặt lại power limit về mặc định (giả định là 250W)
+                default_power_limit = 250
+                if self.set_gpu_power_limit(pid, gpu_index, default_power_limit):
+                    self.logger.info(f"Khôi phục power limit GPU={gpu_index} về {default_power_limit}W (PID={pid}).")
+                else:
+                    self.logger.error(f"Không thể khôi phục power limit GPU={gpu_index} (PID={pid}).")
+                    success = False
+
+                # Reset GPU clocks về mặc định bằng lệnh nvidia-smi
+                try:
+                    subprocess.run(
+                        ["sudo", "nvidia-smi", "-i", str(gpu_index), "--reset-gpu-clocks"],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    self.logger.info(f"Khôi phục clock GPU={gpu_index} về trạng thái mặc định (PID={pid}).")
+                except subprocess.CalledProcessError as e:
+                    self.logger.error(f"Không thể khôi phục clock GPU={gpu_index} (PID={pid}): {e.stderr.decode().strip()}")
+                    success = False
+
+                # Ghi nhận trạng thái khôi phục
+                if not success:
+                    restored_all = False
+
+            # Xóa cấu hình liên quan đến PID sau khi khôi phục
             del self.process_gpu_settings[pid]
-            self.logger.info(f"Đã khôi phục toàn bộ GPU settings cho PID={pid}.")
+            self.logger.info(f"Đã khôi phục toàn bộ cấu hình GPU cho PID={pid}.")
             return restored_all
-        except Exception as e:
-            self.logger.error(f"Lỗi restore_resources GPU cho PID={pid}: {e}")
-            return False
 
+        except Exception as e:
+            self.logger.error(f"Lỗi khi khôi phục GPU cho PID={pid}: {e}")
+            return False
 
 ###############################################################################
 #                           NETWORK RESOURCE MANAGER                           #
@@ -660,72 +807,91 @@ class NetworkResourceManager:
 
     def mark_packets(self, pid: int, mark: int) -> bool:
         """
-        Thêm iptables rule để đánh dấu (MARK) gói tin, đồng bộ.
-
-        :param pid: PID tiến trình.
-        :param mark: Giá trị mark.
-        :return: True nếu thành công, False nếu thất bại.
+        Đánh dấu gói tin chỉ khi quy tắc chưa tồn tại.
         """
         try:
-            cmd = [
+            # Kiểm tra nếu đã tồn tại mark
+            if pid in self.process_marks:
+                self.logger.debug(f"MARK iptables đã tồn tại cho PID={pid}, mark={mark}.")
+                return True
+
+            cmd_check = [
+                'iptables', '-C', 'OUTPUT', '-m', 'owner',
+                '--pid-owner', str(pid),
+                '-j', 'MARK', '--set-mark', str(mark)
+            ]
+            if subprocess.run(cmd_check, check=False).returncode == 0:
+                self.logger.debug(f"Quy tắc MARK iptables đã tồn tại cho PID={pid}, mark={mark}.")
+                return True
+
+            # Thêm quy tắc nếu chưa tồn tại
+            cmd_add = [
                 'iptables', '-A', 'OUTPUT', '-m', 'owner',
                 '--pid-owner', str(pid),
                 '-j', 'MARK', '--set-mark', str(mark)
             ]
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd_add, check=True)
             self.logger.debug(f"MARK iptables cho PID={pid}, mark={mark}.")
             self.process_marks[pid] = mark
             return True
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Lỗi iptables MARK PID={pid}: {e}")
             return False
-        except Exception as e:
-            self.logger.error(f"Lỗi mark_packets PID={pid}: {e}")
-            return False
 
     def unmark_packets(self, pid: int, mark: int) -> bool:
         """
-        Xoá iptables rule (đồng bộ).
-
-        :param pid: PID tiến trình.
-        :param mark: Giá trị mark cần xóa.
-        :return: True nếu thành công, False nếu thất bại.
+        Xóa quy tắc MARK iptables nếu tồn tại.
         """
         try:
-            cmd = [
+            # Kiểm tra nếu quy tắc tồn tại
+            cmd_check = [
+                'iptables', '-C', 'OUTPUT', '-m', 'owner',
+                '--pid-owner', str(pid),
+                '-j', 'MARK', '--set-mark', str(mark)
+            ]
+            if subprocess.run(cmd_check, check=False).returncode != 0:
+                self.logger.debug(f"Quy tắc MARK không tồn tại cho PID={pid}, mark={mark}.")
+                return True
+
+            # Xóa quy tắc
+            cmd_del = [
                 'iptables', '-D', 'OUTPUT', '-m', 'owner',
                 '--pid-owner', str(pid),
                 '-j', 'MARK', '--set-mark', str(mark)
             ]
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd_del, check=True)
             self.logger.debug(f"Hủy MARK iptables cho PID={pid}, mark={mark}.")
-            if pid in self.process_marks:
-                del self.process_marks[pid]
+            self.process_marks.pop(pid, None)
             return True
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Lỗi iptables unMARK PID={pid}: {e}")
             return False
-        except Exception as e:
-            self.logger.error(f"Lỗi unmark_packets PID={pid}: {e}")
-            return False
 
     def limit_bandwidth(self, interface: str, mark: int, bandwidth_mbps: float) -> bool:
         """
-        Giới hạn băng thông thông qua tc (đồng bộ).
-
-        :param interface: Tên interface (vd: eth0).
-        :param mark: Giá trị mark iptables.
-        :param bandwidth_mbps: Tốc độ (Mbps) để giới hạn.
-        :return: True nếu thành công, False nếu thất bại.
+        Giới hạn băng thông, tránh cấu hình trùng lặp.
         """
         try:
-            cmd_qdisc = [
-                'tc', 'qdisc', 'add', 'dev', interface,
-                'root', 'handle', '1:', 'htb', 'default', '12'
-            ]
-            subprocess.run(cmd_qdisc, check=True)
-            self.logger.debug(f"Thêm tc qdisc 'htb' cho {interface}.")
+            # Kiểm tra giá trị hợp lệ
+            if bandwidth_mbps <= 0:
+                self.logger.error("Giới hạn băng thông không hợp lệ.")
+                return False
 
+            # Kiểm tra nếu `qdisc` đã tồn tại
+            cmd_check_qdisc = ['tc', 'qdisc', 'show', 'dev', interface]
+            output = subprocess.check_output(cmd_check_qdisc, text=True)
+            if 'htb' in output:
+                self.logger.debug(f"Qdisc 'htb' đã tồn tại trên interface {interface}.")
+            else:
+                # Thêm qdisc nếu chưa tồn tại
+                cmd_qdisc = [
+                    'tc', 'qdisc', 'add', 'dev', interface,
+                    'root', 'handle', '1:', 'htb', 'default', '12'
+                ]
+                subprocess.run(cmd_qdisc, check=True)
+                self.logger.debug(f"Thêm tc qdisc 'htb' cho {interface}.")
+
+            # Thêm class và filter
             cmd_class = [
                 'tc', 'class', 'add', 'dev', interface,
                 'parent', '1:', 'classid', '1:1',
@@ -741,20 +907,33 @@ class NetworkResourceManager:
             ]
             subprocess.run(cmd_filter, check=True)
             self.logger.debug(f"Thêm tc filter mark={mark} trên {interface}.")
+
             return True
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Lỗi limit_bandwidth: {e}")
+            # Tự động rollback nếu lỗi
+            self.remove_bandwidth_limit(interface, mark)
             return False
 
     def remove_bandwidth_limit(self, interface: str, mark: int) -> bool:
         """
         Gỡ bỏ giới hạn băng thông thông qua tc (đồng bộ).
+        - Kiểm tra trạng thái tồn tại trước khi gỡ để tránh lỗi không cần thiết.
+        - Đảm bảo rollback nếu xảy ra lỗi giữa chừng.
 
         :param interface: Tên interface (vd: eth0).
         :param mark: Giá trị mark iptables.
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
+            # Kiểm tra xem qdisc có tồn tại không trước khi cố gỡ
+            cmd_check_qdisc = ['tc', 'qdisc', 'show', 'dev', interface]
+            output = subprocess.check_output(cmd_check_qdisc, text=True)
+            if 'htb' not in output:
+                self.logger.warning(f"Qdisc 'htb' không tồn tại trên interface {interface}.")
+                return True  # Không cần gỡ nếu không tồn tại
+
+            # Xóa filter
             cmd_filter_del = [
                 'tc', 'filter', 'del', 'dev', interface,
                 'protocol', 'ip', 'parent', '1:', 'prio', '1',
@@ -763,6 +942,7 @@ class NetworkResourceManager:
             subprocess.run(cmd_filter_del, check=True)
             self.logger.debug(f"Xóa tc filter mark={mark} trên {interface}.")
 
+            # Xóa class
             cmd_class_del = [
                 'tc', 'class', 'del', 'dev', interface,
                 'parent', '1:', 'classid', '1:1'
@@ -770,17 +950,73 @@ class NetworkResourceManager:
             subprocess.run(cmd_class_del, check=True)
             self.logger.debug(f"Xóa tc class '1:1' trên {interface}.")
 
+            # Xóa qdisc
             cmd_qdisc_del = [
                 'tc', 'qdisc', 'del', 'dev', interface,
                 'root', 'handle', '1:', 'htb'
             ]
             subprocess.run(cmd_qdisc_del, check=True)
             self.logger.debug(f"Xóa tc qdisc 'htb' trên {interface}.")
+
             return True
+
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi remove_bandwidth_limit: {e}")
+            self.logger.error(f"Lỗi khi gỡ giới hạn băng thông (interface={interface}, mark={mark}): {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Lỗi không xác định khi gỡ giới hạn băng thông: {e}\n{traceback.format_exc()}")
             return False
 
+    def restore_resources(self, pid: Optional[int] = None) -> bool:
+        """
+        Khôi phục các quy tắc và cấu hình mạng liên quan đến PID cụ thể hoặc tất cả PID trong `process_marks`.
+        - Gỡ các giới hạn băng thông (tc).
+        - Xóa các quy tắc MARK trong iptables.
+        - Xóa trạng thái lưu trữ trong `self.process_marks`.
+
+        :param pid: PID cụ thể cần khôi phục. Nếu là None, khôi phục tất cả PID.
+        :return: True nếu khôi phục thành công tất cả mục tiêu, False nếu gặp lỗi.
+        """
+        success = True
+
+        try:
+            # Lấy danh sách PID cần khôi phục
+            pids_to_restore = [pid] if pid else list(self.process_marks.keys())
+
+            for pid in pids_to_restore:
+                mark = self.process_marks.get(pid)
+                if mark is None:
+                    self.logger.warning(f"[Net Restore Resources] Không tìm thấy mark cho PID={pid}.")
+                    continue
+
+                # Gỡ giới hạn băng thông
+                if self.network_resource_manager.remove_bandwidth_limit(self.network_interface, mark):
+                    self.logger.info(f"[Net Restore Resources] Đã gỡ giới hạn băng thông cho PID={pid}, iface={self.network_interface}.")
+                else:
+                    self.logger.error(f"[Net Restore Resources] Không thể gỡ giới hạn băng thông cho PID={pid}.")
+                    success = False
+
+                # Xóa quy tắc MARK trong iptables
+                if self.network_resource_manager.unmark_packets(pid, mark):
+                    self.logger.info(f"[Net Restore Resources] Đã xoá iptables MARK cho PID={pid}.")
+                else:
+                    self.logger.error(f"[Net Restore Resources] Không thể xoá iptables MARK cho PID={pid}.")
+                    success = False
+
+                # Xóa trạng thái lưu trữ của PID trong process_marks
+                if pid in self.process_marks:
+                    del self.process_marks[pid]
+
+            if success:
+                self.logger.info("[Net Restore Resources] Hoàn thành khôi phục tài nguyên.")
+            else:
+                self.logger.warning("[Net Restore Resources] Có lỗi trong quá trình khôi phục tài nguyên.")
+
+            return success
+
+        except Exception as e:
+            self.logger.error(f"[Net Restore Resources] Lỗi không xác định khi khôi phục tài nguyên: {e}\n{traceback.format_exc()}")
+            return False
 
 ###############################################################################
 #                      DISK I/O RESOURCE MANAGER                              #

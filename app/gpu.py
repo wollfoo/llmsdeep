@@ -1,20 +1,33 @@
-from gpu_manager import GPUResourceManager
+import pynvml
 
-if __name__ == "__main__":
-    # Khởi tạo GPUResourceManager
-    gpu_manager = GPUResourceManager()
+def get_max_temperature(gpu_index=0):
+    """
+    Lấy ngưỡng nhiệt độ tối đa cho phép của GPU.
 
-    # GPU Index (thường là 0 trên các node có 1 GPU)
-    gpu_index = 0
+    :param gpu_index: Chỉ số GPU (default = 0).
+    :return: Nhiệt độ tối đa cho phép (°C) hoặc None nếu không thành công.
+    """
+    try:
+        # Khởi tạo NVML
+        pynvml.nvmlInit()
 
-    # Thông số xung nhịp mong muốn
-    sm_clock = 1000  # SM clock (MHz)
-    mem_clock = 877  # Memory clock (MHz, không đổi trong trường hợp này)
+        # Lấy handle GPU
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
 
-    # Thử đặt xung nhịp GPU
-    success = gpu_manager.set_gpu_clocks(gpu_index, sm_clock, mem_clock)
+        # Lấy ngưỡng nhiệt độ tối đa
+        max_temp = pynvml.nvmlDeviceGetTemperatureThreshold(handle, pynvml.NVML_TEMPERATURE_THRESHOLD_GPU_MAX)
+        return max_temp
+    except pynvml.NVMLError as error:
+        print(f"Lỗi NVML: {error}")
+        return None
+    finally:
+        # Đóng NVML
+        pynvml.nvmlShutdown()
 
-    if success:
-        print(f"Successfully set clocks: SM={sm_clock} MHz, Memory={mem_clock} MHz.")
-    else:
-        print("Failed to set GPU clocks.")
+# Kiểm tra nhiệt độ tối đa của GPU đầu tiên
+gpu_index = 0
+max_temp = get_max_temperature(gpu_index)
+if max_temp is not None:
+    print(f"Nhiệt độ tối đa của GPU {gpu_index}: {max_temp}°C")
+else:
+    print(f"Không thể lấy nhiệt độ tối đa của GPU {gpu_index}.")

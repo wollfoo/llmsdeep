@@ -43,7 +43,7 @@ RUN set -eux; \
         libssl-dev libeigen3-dev libnuma-dev stunnel4 \
         cpufrequtils iproute2 util-linux \
         pciutils openssl lm-sensors powerstat stress-ng bash \
-        htop locales iptables powertop tzdata \
+        htop locales iptables powertop tzdata numactl \
         pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg locales \
         libuv1 libudev1 libssl3 cgroup-tools libcgroup1 libcap2-bin nvidia-container-toolkit && \
     rm -rf /var/lib/apt/lists/*
