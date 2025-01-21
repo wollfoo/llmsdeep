@@ -175,8 +175,8 @@ class ThreadingManager:
         self.stop_event = stop_event if stop_event else Event()
 
         # Tính toán số luồng tối đa cho CPU và GPU
-        max_cpu_threads = get_max_cpu_threads()
-        max_gpu_threads = get_max_gpu_threads() if use_gpu else 0
+        max_cpu_threads = self._get_max_cpu_threads()
+        max_gpu_threads = self._get_max_gpu_threads() if use_gpu else 0
 
         # Semaphore cho CPU và GPU
         self.cpu_semaphore = AdjustableSemaphore(max_cpu_threads, max_cpu_threads)
@@ -261,7 +261,7 @@ class ThreadingManager:
             f"GPU network_rate_limit={max_net_packets.get('GPU', 3000)} gói/giây."
         )
 
-    def get_max_cpu_threads():
+    def _get_max_cpu_threads(self):
         """
         Tính toán số luồng tối đa có thể sử dụng cho CPU.
         Dựa trên số lõi logic của hệ thống và giới hạn tài nguyên.
@@ -272,7 +272,7 @@ class ThreadingManager:
         cpu_count = psutil.cpu_count(logical=True)
         return max(1, int(cpu_count * 0.8))  # Sử dụng 80% số lõi logic
 
-    def get_max_gpu_threads():
+    def _get_max_gpu_threads(self):
         """
         Tính toán số luồng tối đa có thể sử dụng cho GPU.
         Dựa trên số GPU khả dụng và thông số tài nguyên của từng GPU.
@@ -733,8 +733,8 @@ class ThreadingManager:
         - Điều chỉnh kích thước bundle_size (cpu_bundle_size, gpu_bundle_size) và bundle_interval.
         - Phục hồi cấu hình mặc định khi tài nguyên dưới ngưỡng tải thấp.
         """
-        max_cpu_threads = psutil.cpu_count(logical=True)
-        max_gpu_threads = self.max_gpu_threads
+        max_cpu_threads = self._get_max_cpu_threads()
+        max_gpu_threads = self._get_max_gpu_threads()  # Sử dụng phương thức nội bộ để tính toán
 
         self.logger.info(f"Giới hạn Semaphore tối đa: {max_cpu_threads} luồng CPU, {max_gpu_threads} luồng GPU")
 
