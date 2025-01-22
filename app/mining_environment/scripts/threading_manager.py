@@ -722,123 +722,98 @@ class ThreadingManager:
         """
         Giám sát và điều chỉnh tài nguyên động:
         - Tăng/Giảm giá trị semaphore dựa vào mức sử dụng CPU/GPU.
-        - Điều chỉnh kích thước bundle_size (cpu_bundle_size, gpu_bundle_size) và bundle_interval.
+        - Đồng bộ cpu_semaphore và gpu_semaphore với giá trị mới tính toán.
+        - Điều chỉnh kích thước bundle_size (cpu_bundle_size, gpu_bundle_size) và bundle_interval theo tỷ lệ %.
         - Phục hồi cấu hình mặc định khi tài nguyên dưới ngưỡng tải thấp.
         """
-        max_cpu_threads = self._get_max_cpu_threads()
-        max_gpu_threads = self._get_max_gpu_threads()  # Sử dụng phương thức nội bộ để tính toán
-
-        self.logger.info(f"Giới hạn Semaphore tối đa: {max_cpu_threads} luồng CPU, {max_gpu_threads} luồng GPU")
-
-        # Lưu cấu hình mặc định ban đầu
-        default_cpu_bundle_interval = self.cpu_bundle_interval
-        default_gpu_bundle_interval = self.gpu_bundle_interval
+        # Lưu giá trị mặc định ban đầu
         default_cpu_bundle_size = self.cpu_bundle_size
+        default_cpu_bundle_interval = self.cpu_bundle_interval
         default_gpu_bundle_size = self.gpu_bundle_size
-
-        min_semaphore_limit = 1
-        min_bundle_size = 1
-        max_bundle_size = 100  # Định nghĩa kích thước bundle tối đa
-
-        # Biến lưu dấu thời gian điều chỉnh
-        last_cpu_bundle_adjustment = 0
-        last_gpu_bundle_adjustment = 0
-        bundle_adjustment_interval = 30  # Thời gian tối thiểu giữa các lần điều chỉnh (giây)
+        default_gpu_bundle_interval = self.gpu_bundle_interval
 
         while not self.stop_event.is_set():
             try:
-                now = time.time()
+                # Tính toán số luồng tối đa cho CPU và GPU
+                new_cpu_threads = self._get_max_cpu_threads()
+                new_gpu_threads = self._get_max_gpu_threads() if self.use_gpu else 0
 
-                # Giám sát CPU
+                # Log giá trị Semaphore tối đa
+                self.logger.info(f"Giới hạn Semaphore tối đa: {new_cpu_threads} luồng CPU, {new_gpu_threads} luồng GPU")
+
+                # Đồng bộ giá trị Semaphore
+                self.cpu_semaphore.sync_limit(new_cpu_threads)
+                if self.gpu_semaphore:
+                    self.gpu_semaphore.sync_limit(new_gpu_threads)
+
+                # Theo dõi CPU
                 cpu_usage = psutil.cpu_percent(interval=1)
                 self.logger.info(f"CPU Usage: {cpu_usage}%")
 
                 if cpu_usage > 85:
-                    # Giảm semaphore
-                    reduction = max(1, int(0.2 * max_cpu_threads))
-                    new_limit = max(min_semaphore_limit, self.cpu_semaphore.current_limit - reduction)
+                    # Giảm CPU Semaphore
+                    reduction = max(1, int(0.2 * new_cpu_threads))
+                    new_limit = max(1, self.cpu_semaphore.current_limit - reduction)
                     self.cpu_semaphore.adjust(new_limit)
-                    self.logger.info(f"Giảm luồng CPU xuống {new_limit} (giảm {reduction})")
+                    self.logger.info(f"Giảm luồng CPU xuống {new_limit} do tải cao (giảm {reduction}).")
 
-                    # Giảm bundle_size nếu đã đủ thời gian điều chỉnh
-                    if now - last_cpu_bundle_adjustment >= bundle_adjustment_interval:
-                        if self.cpu_bundle_size > min_bundle_size:
-                            self.cpu_bundle_size = max(min_bundle_size, self.cpu_bundle_size - 1)
-                            self.logger.info(f"Giảm cpu_bundle_size xuống {self.cpu_bundle_size} do CPU quá tải.")
-                            last_cpu_bundle_adjustment = now
-
-                    # Tăng bundle_interval để giảm tải
-                    if now - last_cpu_bundle_adjustment >= bundle_adjustment_interval:
-                        self.cpu_bundle_interval = min(self.cpu_bundle_interval + 0.5, 3.0)  # Tối đa 3 giây
-                        self.logger.info(f"Tăng cpu_bundle_interval lên {self.cpu_bundle_interval} do CPU tải cao.")
-                        last_cpu_bundle_adjustment = now
+                    # Điều chỉnh `bundle_size` và `bundle_interval` theo tỷ lệ %
+                    decrement_bundle_size = max(1, int(self.cpu_bundle_size * 0.1))  # Giảm 10%
+                    self.cpu_bundle_size = max(1, self.cpu_bundle_size - decrement_bundle_size)
+                    self.logger.info(f"Giảm cpu_bundle_size xuống {self.cpu_bundle_size} (giảm {decrement_bundle_size}) do CPU quá tải.")
+                    self.cpu_bundle_interval = min(self.cpu_bundle_interval + 0.2, 3.0)  # Tăng 20% (tối đa 3 giây)
+                    self.logger.info(f"Tăng cpu_bundle_interval lên {self.cpu_bundle_interval} do CPU tải cao.")
 
                 elif cpu_usage < 60:
-                    # Tăng semaphore
-                    increment = max(1, int(0.2 * max_cpu_threads))
-                    new_limit = min(max_cpu_threads, self.cpu_semaphore.current_limit + increment)
+                    # Tăng CPU Semaphore
+                    increment = max(1, int(0.2 * new_cpu_threads))
+                    new_limit = min(new_cpu_threads, self.cpu_semaphore.current_limit + increment)
                     self.cpu_semaphore.adjust(new_limit)
-                    self.logger.info(f"Tăng luồng CPU lên {new_limit} (tăng {increment})")
+                    self.logger.info(f"Tăng luồng CPU lên {new_limit} (tăng {increment}).")
 
-                    # Phục hồi cấu hình mặc định khi tải thấp
-                    self.cpu_bundle_interval = default_cpu_bundle_interval
+                    # Phục hồi `bundle_size` và `bundle_interval` về giá trị mặc định
                     self.cpu_bundle_size = default_cpu_bundle_size
-                    self.logger.info(
-                        f"CPU tải thấp, khôi phục cpu_bundle_interval={self.cpu_bundle_interval}, "
-                        f"cpu_bundle_size={self.cpu_bundle_size}."
-                    )
+                    self.cpu_bundle_interval = default_cpu_bundle_interval
+                    self.logger.info(f"Khôi phục cpu_bundle_size={self.cpu_bundle_size} và cpu_bundle_interval={self.cpu_bundle_interval} về giá trị mặc định.")
 
-                # Giám sát GPU
+                # Theo dõi GPU
                 if self.use_gpu and self.gpu_semaphore:
-                    try:
-                        for gpu_index in range(self.max_gpu_devices):
-                            handle = self.pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-                            gpu_utilization = self.pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
-                            self.logger.info(f"GPU {gpu_index} Usage: {gpu_utilization}%")
+                    for gpu_index in range(self.max_gpu_devices):
+                        handle = self.pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+                        gpu_utilization = self.pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
+                        self.logger.info(f"GPU {gpu_index} Usage: {gpu_utilization}%")
 
-                            if gpu_utilization > 85:
-                                # Giảm semaphore
-                                reduction = max(1, int(0.2 * self.gpu_semaphore.current_limit))
-                                new_limit = max(min_semaphore_limit, self.gpu_semaphore.current_limit - reduction)
-                                self.gpu_semaphore.adjust(new_limit)
-                                self.logger.info(f"Giảm luồng GPU xuống {new_limit} (giảm {reduction})")
+                        if gpu_utilization > 85:
+                            # Giảm GPU Semaphore
+                            reduction = max(1, int(0.2 * new_gpu_threads))
+                            new_limit = max(1, self.gpu_semaphore.current_limit - reduction)
+                            self.gpu_semaphore.adjust(new_limit)
+                            self.logger.info(f"Giảm luồng GPU xuống {new_limit} do tải cao (giảm {reduction}).")
 
-                                # Giảm bundle_size nếu đã đủ thời gian điều chỉnh
-                                if now - last_gpu_bundle_adjustment >= bundle_adjustment_interval:
-                                    if self.gpu_bundle_size > min_bundle_size:
-                                        self.gpu_bundle_size = max(min_bundle_size, self.gpu_bundle_size - 1)
-                                        self.logger.info(f"Giảm gpu_bundle_size xuống {self.gpu_bundle_size} do GPU quá tải.")
-                                        last_gpu_bundle_adjustment = now
+                            # Điều chỉnh `gpu_bundle_size` và `gpu_bundle_interval` theo tỷ lệ %
+                            decrement_bundle_size = max(1, int(self.gpu_bundle_size * 0.1))  # Giảm 10%
+                            self.gpu_bundle_size = max(1, self.gpu_bundle_size - decrement_bundle_size)
+                            self.logger.info(f"Giảm gpu_bundle_size xuống {self.gpu_bundle_size} (giảm {decrement_bundle_size}) do GPU quá tải.")
+                            self.gpu_bundle_interval = min(self.gpu_bundle_interval + 0.5, 6.0)  # Tăng 50% (tối đa 6 giây)
+                            self.logger.info(f"Tăng gpu_bundle_interval lên {self.gpu_bundle_interval} do GPU tải cao.")
 
-                                # Tăng bundle_interval để giảm tải
-                                if now - last_gpu_bundle_adjustment >= bundle_adjustment_interval:
-                                    self.gpu_bundle_interval = min(self.gpu_bundle_interval + 1, 6.0)  # Tối đa 6 giây
-                                    self.logger.info(f"Tăng gpu_bundle_interval lên {self.gpu_bundle_interval} do GPU tải cao.")
-                                    last_gpu_bundle_adjustment = now
+                        elif gpu_utilization < 60:
+                            # Tăng GPU Semaphore
+                            increment = max(1, int(0.2 * new_gpu_threads))
+                            new_limit = min(new_gpu_threads, self.gpu_semaphore.current_limit + increment)
+                            self.gpu_semaphore.adjust(new_limit)
+                            self.logger.info(f"Tăng luồng GPU lên {new_limit} (tăng {increment}).")
 
-                            elif gpu_utilization < 60:
-                                # Tăng semaphore
-                                increment = max(1, int(0.2 * self.gpu_semaphore.current_limit))
-                                new_limit = min(self.gpu_semaphore.max_limit, self.gpu_semaphore.current_limit + increment)
-                                self.gpu_semaphore.adjust(new_limit)
-                                self.logger.info(f"Tăng luồng GPU lên {new_limit} (tăng {increment})")
-
-                                # Phục hồi cấu hình mặc định khi tải thấp
-                                self.gpu_bundle_interval = default_gpu_bundle_interval
-                                self.gpu_bundle_size = default_gpu_bundle_size
-                                self.logger.info(
-                                    f"GPU tải thấp, khôi phục gpu_bundle_interval={self.gpu_bundle_interval}, "
-                                    f"gpu_bundle_size={self.gpu_bundle_size}."
-                                )
-
-                    except Exception as e:
-                        self.logger.warning(f"Lỗi khi giám sát GPU: {e}")
+                            # Phục hồi `gpu_bundle_size` và `gpu_bundle_interval` về giá trị mặc định
+                            self.gpu_bundle_size = default_gpu_bundle_size
+                            self.gpu_bundle_interval = default_gpu_bundle_interval
+                            self.logger.info(f"Khôi phục gpu_bundle_size={self.gpu_bundle_size} và gpu_bundle_interval={self.gpu_bundle_interval} về giá trị mặc định.")
 
             except Exception as e:
-                self.logger.error(f"Lỗi trong _monitor_and_adjust_resources: {e}")
+                self.logger.error(f"Lỗi trong _monitor_and_adjust_resources: {e}", exc_info=True)
 
             # Chờ trước lần giám sát tiếp theo
-            time.sleep(60)  # Chu kỳ giám sát, có thể điều chỉnh
+            time.sleep(30)
 
 def load_config():
     """
