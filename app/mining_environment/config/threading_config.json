@@ -1,16 +1,16 @@
 {
+    "use_gpu": true,
     "processes": {
         "CPU": "ml-inference",
         "GPU": "inference-cuda"
     },
     "cpu_rate_limit": 25,
     "gpu_rate_limit": 20,
-    "cpu_bundle_size": 8,
-    "gpu_bundle_size": 16,
     "cache_enabled": true,
-    "use_gpu": true,
     "enable_compression": true,
     "enable_encryption": true,
+    "cpu_bundle_size": 8,
+    "gpu_bundle_size": 16,
     "bundle_interval": {
         "CPU": 1.0,
         "GPU": 3.0

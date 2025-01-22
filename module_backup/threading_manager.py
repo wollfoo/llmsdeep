@@ -10,6 +10,7 @@ Cung cấp các lớp và hàm quản lý luồng nâng cao, đồng thời bổ
 Tất cả nhằm tối ưu băng thông và bảo mật thông tin khi truyền dữ liệu.
 """
 
+import os
 import json
 import logging
 import time
@@ -31,72 +32,59 @@ from Crypto.Util.Padding import pad, unpad
 
 class AdjustableSemaphore:
     """
-    Lớp bao bọc (wrapper) giúp điều chỉnh giá trị Semaphore một cách an toàn và ghi nhận trạng thái hoạt động.
+    Lớp bao bọc (wrapper) giúp điều chỉnh giá trị Semaphore một cách an toàn.
+    
+    Thuộc tính:
+        semaphore (threading.Semaphore): Semaphore nội bộ để giới hạn số luồng.
+        max_limit (int): Giới hạn tối đa cho semaphore.
+        current_limit (int): Trạng thái hiện tại của semaphore.
+        lock (threading.Lock): Khóa để tránh cạnh tranh khi điều chỉnh semaphore.
     """
-    def __init__(self, initial, max_limit, logger=None):
+    def __init__(self, initial, max_limit):
         """
         Khởi tạo AdjustableSemaphore.
-
+        
         Tham số:
             initial (int): Số luồng ban đầu.
             max_limit (int): Số luồng tối đa cho phép.
-            logger (logging.Logger|None): Logger để ghi log (nếu có).
         """
         self.semaphore = Semaphore(initial)
         self.max_limit = max_limit
         self.current_limit = initial
-        self.active_threads = 0  # Bộ đếm luồng đang hoạt động
         self.lock = Lock()
-        self.logger = logger or logging.getLogger(__name__)
-        self.logger.info(f"AdjustableSemaphore initialized with initial={initial}, max_limit={max_limit}")
 
     def acquire(self, timeout=None):
         """
-        Thử acquire semaphore trong thời gian cho phép (timeout) và ghi nhận trạng thái.
-
+        Thử acquire semaphore trong thời gian cho phép (timeout).
+        
         Tham số:
             timeout (float|None): Giới hạn thời gian chờ, hoặc None nếu không giới hạn.
-
+        
         Trả về:
             bool: True nếu acquire thành công, False nếu ngược lại.
         """
-        result = self.semaphore.acquire(timeout=timeout)
-        if result:
-            with self.lock:
-                self.active_threads += 1
-                self.logger.info(f"Semaphore acquired. Active threads: {self.active_threads}/{self.current_limit}")
-        else:
-            self.logger.warning(f"Failed to acquire semaphore. Active threads: {self.active_threads}/{self.current_limit}")
-        return result
+        return self.semaphore.acquire(timeout=timeout)
 
     def release(self):
         """
-        Giải phóng semaphore và cập nhật trạng thái.
+        Giải phóng semaphore (release).
         """
-        with self.lock:
-            if self.active_threads > 0:
-                self.active_threads -= 1
-                self.logger.info(f"Semaphore released. Active threads: {self.active_threads}/{self.current_limit}")
-            else:
-                self.logger.error("Semaphore release called, but no active threads to release.")
         self.semaphore.release()
 
     def adjust(self, new_limit):
         """
         Điều chỉnh giá trị semaphore sang giá trị mới (new_limit).
-        Đảm bảo không vượt quá max_limit và không nhỏ hơn 1.
-
+        Bảo đảm không vượt quá max_limit và không nhỏ hơn 1.
+        
         Tham số:
             new_limit (int): Giá trị mới cần đặt cho semaphore.
         """
         with self.lock:
-            old_limit = self.current_limit
             if new_limit > self.max_limit:
                 new_limit = self.max_limit
             elif new_limit < 1:
                 new_limit = 1
 
-            # Điều chỉnh Semaphore
             if new_limit > self.current_limit:
                 for _ in range(new_limit - self.current_limit):
                     self.semaphore.release()
@@ -105,9 +93,7 @@ class AdjustableSemaphore:
                     acquired = self.semaphore.acquire(timeout=0)
                     if not acquired:
                         break
-
             self.current_limit = new_limit
-            self.logger.info(f"Semaphore adjusted from {old_limit} to {self.current_limit}")
 
     def sync_limit(self, new_limit):
         """
@@ -120,36 +106,22 @@ class AdjustableSemaphore:
             if new_limit != self.current_limit:
                 self.adjust(new_limit)
 
-    def verify_integrity(self):
-        """
-        Xác minh tính toàn vẹn của Semaphore: kiểm tra sự không khớp giữa số luồng hoạt động và giới hạn hiện tại.
-        """
-        with self.lock:
-            if self.active_threads > self.current_limit:
-                self.logger.error(
-                    f"Integrity issue detected! Active threads ({self.active_threads}) exceed current limit ({self.current_limit})."
-                )
-            else:
-                self.logger.info(f"Semaphore integrity verified: Active threads ({self.active_threads}) within limit ({self.current_limit}).")
-
 class NetworkRateLimiter:
     """
     Lớp giúp giới hạn tần suất gửi gói tin ở tầng ứng dụng (network rate limiting).
     Ví dụ: 100 gói/giây hoặc 10 gói/giây, tùy cấu hình.
     """
-    def __init__(self, max_packets_per_second=10, logger=None):
+    def __init__(self, max_packets_per_second=10):
         """
         Khởi tạo NetworkRateLimiter.
         
         Tham số:
             max_packets_per_second (int): Giới hạn số gói tin mỗi giây.
-            logger (logging.Logger|None): Logger để ghi log (nếu có).
         """
         self.max_packets_per_second = max_packets_per_second
         self.period = 1.0 / max_packets_per_second
         self.last_send_time = time.time()
         self.lock = Lock()
-        self.logger = logger or logging.getLogger(__name__)
 
     def wait(self):
         """
@@ -159,9 +131,9 @@ class NetworkRateLimiter:
             now = time.time()
             delta = self.period - (now - self.last_send_time)
             if delta > 0:
-                self.logger.debug(f"NetworkRateLimiter: Sleeping for {delta:.4f} seconds.")
                 time.sleep(delta)
             self.last_send_time = time.time()
+
 
 class ThreadingManager:
     """
@@ -217,25 +189,12 @@ class ThreadingManager:
         max_gpu_threads = self._get_max_gpu_threads() if use_gpu else 0
 
         # Semaphore cho CPU và GPU
-        self.cpu_semaphore = AdjustableSemaphore(max_cpu_threads, max_cpu_threads, logger=self.logger)
-        self.logger.info(
-            f"Khởi tạo CPU Semaphore: max_limit={max_cpu_threads}, current_limit={self.cpu_semaphore.current_limit}"
-        )
+        self.cpu_semaphore = AdjustableSemaphore(max_cpu_threads, max_cpu_threads)
+        self.gpu_semaphore = AdjustableSemaphore(max_gpu_threads, max_gpu_threads) if use_gpu and max_gpu_threads > 0 else None
 
-        if use_gpu and max_gpu_threads > 0:
-            self.gpu_semaphore = AdjustableSemaphore(max_gpu_threads, max_gpu_threads, logger=self.logger)
-            self.logger.info(
-                f"Khởi tạo GPU Semaphore: max_limit={max_gpu_threads}, current_limit={self.gpu_semaphore.current_limit}"
-            )
-        else:
-            self.gpu_semaphore = None
-            self.logger.warning("Không sử dụng GPU hoặc không tìm thấy GPU khả dụng.")
- 
-        # Kiểm tra tính toàn vẹn của Semaphore
-        self.cpu_semaphore.verify_integrity()
+        self.logger.info(f"Khởi tạo CPU Semaphore: {max_cpu_threads} luồng.")
         if self.gpu_semaphore:
-            self.gpu_semaphore.verify_integrity()
-
+            self.logger.info(f"Khởi tạo GPU Semaphore: {max_gpu_threads} luồng.")
 
         # RateLimiter cho CPU/GPU
         self.cpu_rate_limiter = RateLimiter(max_calls=cpu_rate_limit, period=1)
@@ -295,13 +254,11 @@ class ThreadingManager:
 
         # Network rate limiter cho CPU và GPU
         self.cpu_network_rate_limiter = NetworkRateLimiter(
-            max_packets_per_second=max_net_packets.get("CPU", 1000),
-            logger=self.logger
+            max_packets_per_second=max_net_packets.get("CPU", 1000)
         )
         self.gpu_network_rate_limiter = NetworkRateLimiter(
-            max_packets_per_second=max_net_packets.get("GPU", 3000),
-            logger=self.logger
-        ) if self.gpu_semaphore else None
+            max_packets_per_second=max_net_packets.get("GPU", 3000)
+        )
 
         self.logger.info(
             f"Các tính năng: nén={self.enable_compression}, mã hóa={self.enable_encryption}, "
@@ -311,9 +268,9 @@ class ThreadingManager:
         )
 
     def _get_max_cpu_threads(self):
-        physical_cores = psutil.cpu_count(logical=False)
-        max_threads = max(1, int(physical_cores * 0.7))  # Giảm từ 70% → 50%
-        self.logger.info(f"Tính toán số luồng tối đa CPU: {max_threads} (50% của {physical_cores} lõi vật lý)")
+        cpu_count = psutil.cpu_count(logical=True)
+        max_threads = max(1, int(cpu_count * 0.7))
+        self.logger.info(f"Tính toán số luồng tối đa CPU: {max_threads}")
         return max_threads
 
     def _get_max_gpu_threads(self):
@@ -349,6 +306,7 @@ class ThreadingManager:
         Trả về:
             bytes: Khóa mã hóa ngẫu nhiên dài 32 byte (256-bit).
         """
+        import os
         return os.urandom(32)
 
     def _compress_data(self, data: bytes) -> bytes:
@@ -436,8 +394,8 @@ class ThreadingManager:
         last_bundle_time = time.time()
 
         while not self.stop_event.is_set():
-            priority, task_id, task_payload = None, None, None
-            acquired = False  # Biến theo dõi trạng thái acquire Semaphore
+            priority, task_id = None, None
+            acquired = False
 
             try:
                 # Log trạng thái hàng đợi khi gần đầy
@@ -452,7 +410,6 @@ class ThreadingManager:
                 # Kiểm tra cache (nếu đã xử lý thì bỏ qua)
                 if self.cache_enabled and task_id in self.task_cache:
                     self.logger.info(f"{task_type}: Task {task_id} đã xử lý trước đó. Bỏ qua.")
-                    queue_obj.task_done()
                     continue
 
                 # Thêm nhiệm vụ vào buffer
@@ -465,7 +422,7 @@ class ThreadingManager:
                     or (now - last_bundle_time) >= bundle_interval
                 ):
                     # Thử acquire semaphore
-                    acquired = semaphore.acquire(timeout=5)  # Acquire Semaphore trước khi xử lý
+                    acquired = semaphore.acquire(timeout=5)
                     if not acquired:
                         self.logger.warning(
                             f"{task_type}: Semaphore timeout khi xử lý bundle với {len(task_buffer)} tasks."
@@ -494,7 +451,6 @@ class ThreadingManager:
                         # Loại bỏ các nhiệm vụ không thể đưa lại và làm sạch buffer
                         task_buffer = []
                         last_bundle_time = now
-                        queue_obj.task_done()
                         continue
 
                     # Thực hiện xử lý bundle nếu semaphore thành công
@@ -529,6 +485,8 @@ class ThreadingManager:
             except queue.Empty:
                 # Hàng đợi trống, tiếp tục chờ
                 continue
+            except Full:
+                self.logger.warning(f"{task_type}: Hàng đợi đầy khi thêm nhiệm vụ trở lại.")
             except Exception as e:
                 # Log lỗi khi xảy ra vấn đề
                 if task_id is not None:
@@ -538,7 +496,7 @@ class ThreadingManager:
             finally:
                 # Đảm bảo semaphore được giải phóng
                 if acquired:
-                    semaphore.release()  # Giải phóng Semaphore sau khi xử lý
+                    semaphore.release()
                 if priority is not None and task_id is not None:
                     queue_obj.task_done()
 
@@ -670,64 +628,50 @@ class ThreadingManager:
             cpu_task_func (function): Hàm xử lý dành cho CPU.
             gpu_task_func (function|None): Hàm xử lý dành cho GPU (nếu sử dụng).
         """
-        # Khởi tạo các worker thread cho CPU
-        self.cpu_worker_threads = []
-        for i in range(self.cpu_semaphore.current_limit):
-            thread = Thread(
+        # Khởi tạo các worker thread
+        self.cpu_worker_thread = Thread(
+            target=self._bundle_and_process_tasks,
+            args=(cpu_task_func, "CPU"),
+            daemon=True
+        )
+        self.gpu_worker_thread = (
+            Thread(
                 target=self._bundle_and_process_tasks,
-                args=(cpu_task_func, "CPU"),
+                args=(gpu_task_func, "GPU"),
                 daemon=True
-            )
-            thread.start()
-            self.cpu_worker_threads.append(thread)
-            self.logger.info(f"Khởi tạo CPU Worker Thread {i+1}/{self.cpu_semaphore.max_limit}.")
-
-        # Khởi tạo các worker thread cho GPU
-        self.gpu_worker_threads = []
-        if self.gpu_semaphore:
-            for i in range(self.gpu_semaphore.current_limit):
-                thread = Thread(
-                    target=self._bundle_and_process_tasks,
-                    args=(gpu_task_func, "GPU"),
-                    daemon=True
-                )
-                thread.start()
-                self.gpu_worker_threads.append(thread)
-                self.logger.info(f"Khởi tạo GPU Worker Thread {i+1}/{self.gpu_semaphore.max_limit}.")
+            ) if self.use_gpu else None
+        )
 
         # Khởi tạo luồng giám sát và điều chỉnh tài nguyên
         self.monitor_and_adjust_thread = Thread(
             target=self._monitor_and_adjust_resources,
             daemon=False
         )
-        self.monitor_and_adjust_thread.start()
 
-        # Luồng giám sát worker threads
+        # Luồng giám sát trạng thái các worker
         def _monitor_worker_threads():
+            """
+            Giám sát trạng thái các worker thread để đảm bảo không bị dừng bất thường.
+            Nếu phát hiện thread dừng, tự động khởi động lại.
+            """
             while not self.stop_event.is_set():
-                for idx, worker in enumerate(self.cpu_worker_threads):
-                    if not worker.is_alive():
-                        self.logger.error(f"Luồng xử lý CPU {idx+1} đã dừng bất thường. Đang khởi động lại.")
-                        new_thread = Thread(
-                            target=self._bundle_and_process_tasks,
-                            args=(cpu_task_func, "CPU"),
-                            daemon=True
-                        )
-                        new_thread.start()
-                        self.cpu_worker_threads[idx] = new_thread
-                        self.logger.info(f"Khởi động lại CPU Worker Thread {idx+1}.")
+                if not self.cpu_worker_thread.is_alive():
+                    self.logger.error("Luồng xử lý CPU đã dừng bất thường. Đang khởi động lại.")
+                    self.cpu_worker_thread = Thread(
+                        target=self._bundle_and_process_tasks,
+                        args=(cpu_task_func, "CPU"),
+                        daemon=True
+                    )
+                    self.cpu_worker_thread.start()
 
-                for idx, worker in enumerate(self.gpu_worker_threads):
-                    if not worker.is_alive():
-                        self.logger.error(f"Luồng xử lý GPU {idx+1} đã dừng bất thường. Đang khởi động lại.")
-                        new_thread = Thread(
-                            target=self._bundle_and_process_tasks,
-                            args=(gpu_task_func, "GPU"),
-                            daemon=True
-                        )
-                        new_thread.start()
-                        self.gpu_worker_threads[idx] = new_thread
-                        self.logger.info(f"Khởi động lại GPU Worker Thread {idx+1}.")
+                if self.use_gpu and self.gpu_worker_thread and not self.gpu_worker_thread.is_alive():
+                    self.logger.error("Luồng xử lý GPU đã dừng bất thường. Đang khởi động lại.")
+                    self.gpu_worker_thread = Thread(
+                        target=self._bundle_and_process_tasks,
+                        args=(gpu_task_func, "GPU"),
+                        daemon=True
+                    )
+                    self.gpu_worker_thread.start()
 
                 if not self.monitor_and_adjust_thread.is_alive():
                     self.logger.error("Luồng giám sát và điều chỉnh tài nguyên đã dừng. Đang khởi động lại.")
@@ -736,15 +680,20 @@ class ThreadingManager:
                         daemon=False
                     )
                     self.monitor_and_adjust_thread.start()
-                    self.logger.info("Khởi động lại luồng giám sát và điều chỉnh tài nguyên.")
 
-                time.sleep(10)
+                time.sleep(10)  # Tần suất kiểm tra định kỳ
 
         # Luồng giám sát worker threads
         self.worker_monitor_thread = Thread(
             target=_monitor_worker_threads,
             daemon=True
         )
+
+        # Bắt đầu tất cả các luồng
+        self.cpu_worker_thread.start()
+        if self.gpu_worker_thread:
+            self.gpu_worker_thread.start()
+        self.monitor_and_adjust_thread.start()
         self.worker_monitor_thread.start()
 
         self.logger.info("ThreadingManager khởi động thành công.")
@@ -762,13 +711,10 @@ class ThreadingManager:
             self.gpu_task_queue.join()
 
         # Chờ các luồng kết thúc
-        for thread in self.cpu_worker_threads:
-            thread.join()
-        if self.gpu_worker_threads:
-            for thread in self.gpu_worker_threads:
-                thread.join()
+        self.cpu_worker_thread.join()
+        if self.gpu_worker_thread:
+            self.gpu_worker_thread.join()
         self.monitor_and_adjust_thread.join()
-        self.worker_monitor_thread.join()
 
         self.logger.info("ThreadingManager đã dừng.")
 
@@ -777,7 +723,6 @@ class ThreadingManager:
         Giám sát và điều chỉnh tài nguyên động:
         - Tăng/Giảm giá trị semaphore dựa vào mức sử dụng CPU/GPU.
         - Đồng bộ cpu_semaphore và gpu_semaphore với giá trị mới tính toán.
-        - Dừng các worker threads dư thừa khi giảm Semaphore.
         - Điều chỉnh kích thước bundle_size (cpu_bundle_size, gpu_bundle_size) và bundle_interval theo tỷ lệ %.
         - Phục hồi cấu hình mặc định khi tài nguyên dưới ngưỡng tải thấp.
         """
@@ -793,6 +738,7 @@ class ThreadingManager:
                 new_cpu_threads = self._get_max_cpu_threads()
                 new_gpu_threads = self._get_max_gpu_threads() if self.use_gpu else 0
 
+                # Log giá trị Semaphore tối đa
                 self.logger.info(f"Giới hạn Semaphore tối đa: {new_cpu_threads} luồng CPU, {new_gpu_threads} luồng GPU")
 
                 # Đồng bộ giá trị Semaphore
@@ -800,7 +746,7 @@ class ThreadingManager:
                 if self.gpu_semaphore:
                     self.gpu_semaphore.sync_limit(new_gpu_threads)
 
-                # Theo dõi mức sử dụng CPU
+                # Theo dõi CPU
                 cpu_usage = psutil.cpu_percent(interval=1)
                 self.logger.info(f"CPU Usage: {cpu_usage}%")
 
@@ -811,16 +757,12 @@ class ThreadingManager:
                     self.cpu_semaphore.adjust(new_limit)
                     self.logger.info(f"Giảm luồng CPU xuống {new_limit} do tải cao (giảm {reduction}).")
 
-                    # Điều chỉnh kích thước và thời gian gộp gói (bundle_size, bundle_interval)
+                    # Điều chỉnh `bundle_size` và `bundle_interval` theo tỷ lệ %
                     decrement_bundle_size = max(1, int(self.cpu_bundle_size * 0.1))  # Giảm 10%
                     self.cpu_bundle_size = max(1, self.cpu_bundle_size - decrement_bundle_size)
                     self.logger.info(f"Giảm cpu_bundle_size xuống {self.cpu_bundle_size} (giảm {decrement_bundle_size}) do CPU quá tải.")
                     self.cpu_bundle_interval = min(self.cpu_bundle_interval + 0.2, 3.0)  # Tăng 20% (tối đa 3 giây)
                     self.logger.info(f"Tăng cpu_bundle_interval lên {self.cpu_bundle_interval} do CPU tải cao.")
-
-                    # Dừng các worker threads dư thừa nếu cần
-                    if len(self.cpu_worker_threads) > new_limit:
-                        self._reduce_worker_threads("CPU", new_limit)
 
                 elif cpu_usage < 60:
                     # Tăng CPU Semaphore
@@ -829,16 +771,12 @@ class ThreadingManager:
                     self.cpu_semaphore.adjust(new_limit)
                     self.logger.info(f"Tăng luồng CPU lên {new_limit} (tăng {increment}).")
 
-                    # Phục hồi cấu hình bundle về mặc định
+                    # Phục hồi `bundle_size` và `bundle_interval` về giá trị mặc định
                     self.cpu_bundle_size = default_cpu_bundle_size
                     self.cpu_bundle_interval = default_cpu_bundle_interval
                     self.logger.info(f"Khôi phục cpu_bundle_size={self.cpu_bundle_size} và cpu_bundle_interval={self.cpu_bundle_interval} về giá trị mặc định.")
 
-                    # Tăng worker threads nếu cần
-                    if len(self.cpu_worker_threads) < new_limit:
-                        self._increase_worker_threads("CPU", new_limit)
-
-                # Theo dõi mức sử dụng GPU (nếu sử dụng)
+                # Theo dõi GPU
                 if self.use_gpu and self.gpu_semaphore:
                     for gpu_index in range(self.max_gpu_devices):
                         handle = self.pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
@@ -852,16 +790,12 @@ class ThreadingManager:
                             self.gpu_semaphore.adjust(new_limit)
                             self.logger.info(f"Giảm luồng GPU xuống {new_limit} do tải cao (giảm {reduction}).")
 
-                            # Điều chỉnh kích thước và thời gian gộp gói GPU
+                            # Điều chỉnh `gpu_bundle_size` và `gpu_bundle_interval` theo tỷ lệ %
                             decrement_bundle_size = max(1, int(self.gpu_bundle_size * 0.1))  # Giảm 10%
                             self.gpu_bundle_size = max(1, self.gpu_bundle_size - decrement_bundle_size)
                             self.logger.info(f"Giảm gpu_bundle_size xuống {self.gpu_bundle_size} (giảm {decrement_bundle_size}) do GPU quá tải.")
                             self.gpu_bundle_interval = min(self.gpu_bundle_interval + 0.5, 6.0)  # Tăng 50% (tối đa 6 giây)
                             self.logger.info(f"Tăng gpu_bundle_interval lên {self.gpu_bundle_interval} do GPU tải cao.")
-
-                            # Dừng worker threads dư thừa nếu cần
-                            if len(self.gpu_worker_threads) > new_limit:
-                                self._reduce_worker_threads("GPU", new_limit)
 
                         elif gpu_utilization < 60:
                             # Tăng GPU Semaphore
@@ -870,48 +804,16 @@ class ThreadingManager:
                             self.gpu_semaphore.adjust(new_limit)
                             self.logger.info(f"Tăng luồng GPU lên {new_limit} (tăng {increment}).")
 
-                            # Phục hồi cấu hình bundle về mặc định
+                            # Phục hồi `gpu_bundle_size` và `gpu_bundle_interval` về giá trị mặc định
                             self.gpu_bundle_size = default_gpu_bundle_size
                             self.gpu_bundle_interval = default_gpu_bundle_interval
                             self.logger.info(f"Khôi phục gpu_bundle_size={self.gpu_bundle_size} và gpu_bundle_interval={self.gpu_bundle_interval} về giá trị mặc định.")
-
-                            # Tăng worker threads nếu cần
-                            if len(self.gpu_worker_threads) < new_limit:
-                                self._increase_worker_threads("GPU", new_limit)
 
             except Exception as e:
                 self.logger.error(f"Lỗi trong _monitor_and_adjust_resources: {e}", exc_info=True)
 
             # Chờ trước lần giám sát tiếp theo
             time.sleep(30)
-
-
-    def _reduce_worker_threads(self, task_type: str, new_limit: int):
-        """
-        Dừng các worker threads dư thừa khi giảm Semaphore.
-        """
-        threads = self.cpu_worker_threads if task_type == "CPU" else self.gpu_worker_threads
-        excess_threads = len(threads) - new_limit
-        for _ in range(excess_threads):
-            thread = threads.pop()
-            self.logger.info(f"Dừng {task_type} Worker Thread {thread.name}.")
-            thread.join()  # Chờ thread kết thúc
-
-
-    def _increase_worker_threads(self, task_type: str, new_limit: int):
-        """
-        Tăng số lượng worker threads nếu Semaphore được mở rộng.
-        """
-        threads = self.cpu_worker_threads if task_type == "CPU" else self.gpu_worker_threads
-        semaphore = self.cpu_semaphore if task_type == "CPU" else self.gpu_semaphore
-        task_func = self._cpu_task_func if task_type == "CPU" else self._gpu_task_func
-
-        for _ in range(new_limit - len(threads)):
-            thread = Thread(target=self._bundle_and_process_tasks, args=(task_func, task_type), daemon=True)
-            thread.start()
-            threads.append(thread)
-            self.logger.info(f"Khởi tạo {task_type} Worker Thread {thread.name}.")
-
 
 def load_config():
     """
@@ -956,8 +858,8 @@ def setup(stop_event):
         use_gpu = config.get("use_gpu", True)
 
         # Lấy thông tin tiến trình CPU và GPU
-        cpu_process_name = config["processes"].get("CPU", "ml-inference")
-        gpu_process_name = config["processes"].get("GPU", "inference-cuda") if use_gpu else None
+        cpu_process_name = config["processes"].get("CPU", "CPU Process")
+        gpu_process_name = config["processes"].get("GPU", "GPU Process") if use_gpu else None
 
         logger.info(f"Tiến trình CPU: {cpu_process_name}")
         if use_gpu:
@@ -993,8 +895,7 @@ def setup(stop_event):
         # Định nghĩa các hàm xử lý CPU và GPU
         def cpu_task(task_id):
             logger.info(f"[{cpu_process_name}] Đang xử lý nhiệm vụ CPU {task_id}")
-            # Đảm bảo không tạo thêm threads hoặc vòng lặp vô hạn
-            time.sleep(1)  # Simulate CPU-intensive task
+            time.sleep(1)
 
         def gpu_task(task_id):
             if gpu_process_name:
