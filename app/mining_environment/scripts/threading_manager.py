@@ -95,6 +95,16 @@ class AdjustableSemaphore:
                         break
             self.current_limit = new_limit
 
+    def sync_limit(self, new_limit):
+        """
+        Đồng bộ giá trị Semaphore với giới hạn mới mà không cần kiểm tra thủ công.
+
+        Tham số:
+            new_limit (int): Giới hạn mới cần đồng bộ.
+        """
+        with self.lock:
+            if new_limit != self.current_limit:
+                self.adjust(new_limit)
 
 class NetworkRateLimiter:
     """
@@ -174,21 +184,17 @@ class ThreadingManager:
         # Sử dụng stop_event từ bên ngoài hoặc tạo mới
         self.stop_event = stop_event if stop_event else Event()
 
-        # Tính toán số luồng tối đa cho CPU và GPU
+        # Khởi tạo giá trị Semaphore
         max_cpu_threads = self._get_max_cpu_threads()
         max_gpu_threads = self._get_max_gpu_threads() if use_gpu else 0
 
         # Semaphore cho CPU và GPU
         self.cpu_semaphore = AdjustableSemaphore(max_cpu_threads, max_cpu_threads)
-        self.gpu_semaphore = (
-            AdjustableSemaphore(max_gpu_threads, max_gpu_threads)
-            if use_gpu and max_gpu_threads > 0
-            else None
-        )
+        self.gpu_semaphore = AdjustableSemaphore(max_gpu_threads, max_gpu_threads) if use_gpu and max_gpu_threads > 0 else None
 
-        self.logger.info(
-            f"Semaphore thiết lập động: {max_cpu_threads} luồng CPU, {max_gpu_threads} luồng GPU."
-        )
+        self.logger.info(f"Khởi tạo CPU Semaphore: {max_cpu_threads} luồng.")
+        if self.gpu_semaphore:
+            self.logger.info(f"Khởi tạo GPU Semaphore: {max_gpu_threads} luồng.")
 
         # RateLimiter cho CPU/GPU
         self.cpu_rate_limiter = RateLimiter(max_calls=cpu_rate_limit, period=1)
@@ -262,24 +268,12 @@ class ThreadingManager:
         )
 
     def _get_max_cpu_threads(self):
-        """
-        Tính toán số luồng tối đa có thể sử dụng cho CPU.
-        Dựa trên số lõi logic của hệ thống và giới hạn tài nguyên.
-        
-        Trả về:
-            int: Số luồng tối đa cho CPU.
-        """
         cpu_count = psutil.cpu_count(logical=True)
-        return max(1, int(cpu_count * 0.8))  # Sử dụng 80% số lõi logic
+        max_threads = max(1, int(cpu_count * 0.8))
+        self.logger.info(f"Tính toán số luồng tối đa CPU: {max_threads}")
+        return max_threads
 
     def _get_max_gpu_threads(self):
-        """
-        Tính toán số luồng tối đa có thể sử dụng cho GPU.
-        Dựa trên số GPU khả dụng và thông số tài nguyên của từng GPU.
-        
-        Trả về:
-            int: Số luồng tối đa cho GPU.
-        """
         try:
             import pynvml
             pynvml.nvmlInit()
@@ -288,23 +282,21 @@ class ThreadingManager:
 
             for gpu_index in range(gpu_count):
                 handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-
-                # Số lõi CUDA và bộ nhớ khả dụng
                 sm_count = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
-                cores_per_sm = 128  # Giả định mỗi SM có 128 lõi CUDA
+                cores_per_sm = 128
                 cuda_cores = sm_count[0] * cores_per_sm
 
                 memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                free_memory = memory_info.free // (1024 ** 2)  # Đổi sang MB
+                free_memory = memory_info.free // (1024 ** 2)
 
-                # Tính số luồng tối ưu (giả định mỗi luồng cần 512 lõi CUDA và 512MB bộ nhớ)
                 optimal_threads = max(1, min(cuda_cores // 512, free_memory // 512))
                 total_threads += optimal_threads
 
             pynvml.nvmlShutdown()
+            self.logger.info(f"Tính toán số luồng tối đa GPU: {total_threads}")
             return total_threads
         except Exception as e:
-            print(f"Lỗi khi tính toán luồng GPU: {e}")
+            self.logger.warning(f"Lỗi khi tính toán luồng GPU: {e}")
             return 0
 
     def _generate_encryption_key(self) -> bytes:
