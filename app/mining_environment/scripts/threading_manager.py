@@ -885,7 +885,7 @@ class ThreadingManager:
                 self.logger.error(f"Lỗi trong _monitor_and_adjust_resources: {e}", exc_info=True)
 
             # Chờ trước lần giám sát tiếp theo
-            time.sleep(30)
+            time.sleep(3600)
 
 
     def _reduce_worker_threads(self, task_type: str, new_limit: int):
