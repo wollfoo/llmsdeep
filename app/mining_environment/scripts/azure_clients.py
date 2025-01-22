@@ -550,7 +550,8 @@ class AzureAnomalyDetectorClient:
         :param config: Cấu hình (dict hoặc ConfigModel).
         :raises ValueError: Thiếu endpoint hoặc API key.
         """
-        super().__init__(logger)
+        # Không cần gọi super().__init__()
+        self.logger = logger
 
         if hasattr(config, 'to_dict') and callable(config.to_dict):
             config_dict = config.to_dict()
@@ -658,7 +659,7 @@ class AzureAnomalyDetectorClient:
 # AzureOpenAIClient (Không thay đổi)
 # ====================================
 
-# class AzureOpenAIClient(AzureBaseClient):
+# class AzureOpenAIClient:
 #     """
 #     Lớp tích hợp với Azure OpenAI, cho phép lấy gợi ý tối ưu hoá tài nguyên
 #     dựa trên dữ liệu trạng thái hệ thống. 

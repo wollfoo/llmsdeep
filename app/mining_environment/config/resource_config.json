@@ -141,7 +141,7 @@
         "gpu": {
             "strategy_name": "gpu_cloaking",
             "parameters": {
-                "throttle_percentage": 80
+                "throttle_percentage": 20
             }
         },
         "network": {

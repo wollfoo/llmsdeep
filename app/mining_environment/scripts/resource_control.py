@@ -7,6 +7,7 @@ import subprocess
 from typing import Any, Dict, List, Optional
 import psutil
 import pynvml
+import shutil
 
 ###############################################################################
 #                           CPU RESOURCE MANAGER                              #
@@ -453,10 +454,14 @@ class GPUResourceManager:
         :return: Handle thiết bị GPU, hoặc None nếu lỗi.
         """
         if not self.gpu_initialized:
+            self.logger.error("GPUResourceManager chưa init. Không thể lấy handle GPU.")
             return None
         try:
-            return pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-        except pynvml.NVMLError:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+            self.logger.debug(f"Đã lấy handle cho GPU={gpu_index}")
+            return handle
+        except pynvml.NVMLError as e:
+            self.logger.error(f"Lỗi khi lấy handle GPU={gpu_index}: {e}")
             return None
 
     def get_gpu_power_limit(self, gpu_index: int) -> Optional[int]:
@@ -467,13 +472,17 @@ class GPUResourceManager:
         :return: Power limit (int) hoặc None nếu lỗi.
         """
         if not self.gpu_initialized:
+            self.logger.error("GPUResourceManager chưa init. Không thể lấy power limit.")
             return None
         try:
             handle = self.get_handle(gpu_index)
             if not handle:
+                self.logger.error(f"Không thể lấy handle cho GPU={gpu_index}.")
                 return None
             limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
-            return int(limit_mw // 1000)  # convert mW -> W
+            limit_w = int(limit_mw // 1000)  # convert mW -> W
+            self.logger.debug(f"Power limit hiện tại GPU={gpu_index}: {limit_w}W")
+            return limit_w
         except Exception as e:
             self.logger.error(f"Lỗi get_gpu_power_limit GPU={gpu_index}: {e}")
             return None
@@ -535,8 +544,9 @@ class GPUResourceManager:
                 return False
 
             # Lấy SM/MEM clock hiện tại
-            current_sm_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_SM)
-            current_mem_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_MEM)
+            current_sm_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_SM, pynvml.NVML_CLOCK_ID_CURRENT)
+            current_mem_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_MEM, pynvml.NVML_CLOCK_ID_CURRENT)
+
             if pid is not None:
                 if pid not in self.process_gpu_settings:
                     self.process_gpu_settings[pid] = {}
@@ -604,7 +614,7 @@ class GPUResourceManager:
                 return False
 
             try:
-                current_sm_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_SM)
+                current_sm_clock = pynvml.nvmlDeviceGetClock(handle, pynvml.NVML_CLOCK_SM, pynvml.NVML_CLOCK_ID_CURRENT)
             except Exception as ex:
                 self.logger.error(f"Không thể lấy xung nhịp SM của GPU={gpu_index}: {ex}")
                 return False
@@ -680,11 +690,14 @@ class GPUResourceManager:
         """
         try:
             if not self.gpu_initialized:
+                self.logger.error("GPUResourceManager chưa init. Không thể lấy nhiệt độ GPU.")
                 return None
             handle = self.get_handle(gpu_index)
             if not handle:
+                self.logger.error(f"Không thể lấy handle cho GPU={gpu_index}.")
                 return None
             temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            self.logger.debug(f"Nhiệt độ GPU={gpu_index}: {temp}°C")
             return float(temp)
         except Exception as e:
             self.logger.error(f"Lỗi get_gpu_temperature GPU={gpu_index}: {e}")
@@ -698,20 +711,8 @@ class GPUResourceManager:
         :param increase_percentage: Mức tăng quạt (giả lập).
         :return: True nếu thành công, False nếu thất bại.
         """
-        try:
-            cmd = [
-                'nvidia-settings',
-                '-a', f'[fan:{gpu_index}]/GPUFanControlState=1',
-                '-a', f'[fan:{gpu_index}]/GPUTargetFanSpeed={int(increase_percentage)}'
-            ]
-            subprocess.run(cmd, check=True)
-            return True
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi khi điều chỉnh quạt GPU {gpu_index}: {e}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Lỗi khi điều chỉnh quạt GPU {gpu_index}: {e}")
-            return False
+        self.logger.info(f"[GPU Fan] control_fan_speed đã bị vô hiệu hóa.")
+        return True
 
     def get_default_power_limit(self, gpu_index: int) -> int:
         """

