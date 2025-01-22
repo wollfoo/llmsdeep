@@ -4,10 +4,11 @@ import os
 import uuid
 import logging
 import subprocess
-from typing import Any, Dict, List, Optional
+import re
 import psutil
 import pynvml
 import shutil
+from typing import Any, Dict, List, Optional
 
 ###############################################################################
 #                           CPU RESOURCE MANAGER                              #
@@ -191,7 +192,6 @@ class CPUResourceManager:
             self.logger.error(f"Lỗi optimize_thread_scheduling cho PID={pid}: {e}")
             return False
 
-
     def optimize_cache_usage(self, pid: int) -> bool:
         """
         Tối ưu cache CPU (đồng bộ) thông qua NUMA và tối ưu bộ nhớ qua numactl.
@@ -200,47 +200,36 @@ class CPUResourceManager:
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Kiểm tra trạng thái NUMA
-            numa_node_path = "/sys/devices/system/node/"
-            if os.path.exists(numa_node_path):
-                numa_nodes = [node for node in os.listdir(numa_node_path) if node.startswith("node")]
-                if not numa_nodes:
-                    self.logger.warning("Không tìm thấy NUMA nodes nào trên hệ thống.")
-                    return False
-
-                self.logger.info(f"Hệ thống có NUMA nodes: {numa_nodes}.")
-
-                # Lấy danh sách CPU thuộc NUMA node 0
-                try:
-                    node_0_cpu_map_path = os.path.join(numa_node_path, "node0", "cpumap")
-                    if os.path.exists(node_0_cpu_map_path):
-                        with open(node_0_cpu_map_path, "r") as f:
-                            node_cpus_raw = f.read().strip()
-                            # Parse danh sách CPU từ cpumap
-                            node_cpus = self._parse_cpumap(node_cpus_raw)
-                            self.logger.info(f"NUMA node 0 có CPUs: {node_cpus}.")
-                    else:
-                        self.logger.warning("Không tìm thấy tệp cpumap cho NUMA node 0.")
-                        node_cpus = None
-                except Exception as e:
-                    self.logger.error(f"Lỗi khi lấy danh sách CPUs từ NUMA node 0: {e}")
-                    node_cpus = None
-
-            else:
-                self.logger.warning("NUMA không được hỗ trợ trên hệ thống này.")
+            # Tìm NUMA node tốt nhất
+            best_numa_node = self._get_best_numa_node()
+            if best_numa_node is None:
+                self.logger.warning(f"Không tìm thấy NUMA node nào phù hợp để tối ưu cache cho PID={pid}.")
                 return False
+
+            self.logger.info(f"NUMA node tốt nhất cho PID={pid}: Node {best_numa_node}.")
+
+            # Lấy danh sách CPU từ NUMA node được chọn
+            numa_node_path = f"/sys/devices/system/node/node{best_numa_node}/cpumap"
+            if os.path.exists(numa_node_path):
+                with open(numa_node_path, "r") as f:
+                    node_cpus_raw = f.read().strip()
+                    node_cpus = self._parse_cpumap(node_cpus_raw)
+                    self.logger.info(f"NUMA node {best_numa_node} có CPUs: {node_cpus}.")
+            else:
+                self.logger.warning(f"Không tìm thấy cpumap cho NUMA node {best_numa_node}.")
+                node_cpus = None
 
             # Tối ưu hóa bộ nhớ qua numactl
             try:
                 # Kiểm tra nếu numactl đã được cài đặt
                 if shutil.which("numactl") is not None:
                     if node_cpus:
-                        # Gán tiến trình vào NUMA node 0 và danh sách CPU lấy từ cpumap
+                        # Gán tiến trình vào NUMA node được chọn và danh sách CPU lấy từ cpumap
                         cpu_bind = ",".join(map(str, node_cpus))
-                        numa_cmd = f"numactl --membind=0 --cpubind={cpu_bind} -p {pid}"
+                        numa_cmd = f"numactl --membind={best_numa_node} --cpubind={cpu_bind} -p {pid}"
                     else:
-                        # Nếu không có thông tin cpumap, sử dụng toàn bộ CPUs của node 0
-                        numa_cmd = f"numactl --membind=0 --cpubind=0-5 -p {pid}"
+                        # Nếu không có thông tin cpumap, sử dụng toàn bộ CPUs của node
+                        numa_cmd = f"numactl --membind={best_numa_node} --cpubind=all -p {pid}"
                     
                     ret_code = os.system(numa_cmd)
                     if ret_code == 0:
@@ -268,6 +257,47 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi optimize_cache_usage cho PID={pid}: {e}")
             return False
+
+    def _get_best_numa_node(self) -> Optional[int]:
+        """
+        Lựa chọn NUMA node tốt nhất dựa trên bộ nhớ trống hoặc tải CPU.
+
+        :return: Chỉ số NUMA node tốt nhất, hoặc None nếu không có node hợp lệ.
+        """
+        try:
+            numa_node_path = "/sys/devices/system/node/"
+            if not os.path.exists(numa_node_path):
+                self.logger.warning("NUMA không được hỗ trợ trên hệ thống này.")
+                return None
+
+            # Lấy danh sách NUMA nodes
+            numa_nodes = [node for node in os.listdir(numa_node_path) if node.startswith("node")]
+            if not numa_nodes:
+                self.logger.warning("Không tìm thấy NUMA nodes nào trên hệ thống.")
+                return None
+
+            best_node = None
+            max_free_memory = 0
+
+            # Duyệt qua từng NUMA node để tìm node có nhiều bộ nhớ trống nhất
+            for node in numa_nodes:
+                try:
+                    node_index = int(node.replace("node", ""))
+                    meminfo_path = os.path.join(numa_node_path, node, "meminfo")
+                    if os.path.exists(meminfo_path):
+                        with open(meminfo_path, "r") as f:
+                            meminfo = f.read()
+                            free_memory = int(re.search(r"Node\s+\d+\s+MemFree:\s+(\d+)", meminfo).group(1))
+                            if free_memory > max_free_memory:
+                                max_free_memory = free_memory
+                                best_node = node_index
+                except Exception as e:
+                    self.logger.warning(f"Lỗi khi đọc thông tin bộ nhớ cho {node}: {e}")
+
+            return best_node
+        except Exception as e:
+            self.logger.error(f"Lỗi khi chọn NUMA node tốt nhất: {e}")
+            return None
 
     def _parse_cpumap(self, cpumap: str) -> List[int]:
         """
@@ -785,6 +815,7 @@ class GPUResourceManager:
 ###############################################################################
 #                           NETWORK RESOURCE MANAGER                           #
 ###############################################################################
+
 class NetworkResourceManager:
     """
     Quản lý tài nguyên mạng qua iptables + tc (đồng bộ).
@@ -792,10 +823,10 @@ class NetworkResourceManager:
     Attributes:
         logger (logging.Logger): Logger để ghi log.
         config (Dict[str, Any]): Cấu hình Network Resource Manager.
-        process_marks (Dict[int, int]): Bản đồ PID -> mark iptables.
+        process_marks (Dict[int, int]): Bản đồ UID -> mark iptables.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+    def __init__(self, config: Dict[str, any], logger: logging.Logger):
         """
         Khởi tạo NetworkResourceManager.
 
@@ -806,222 +837,205 @@ class NetworkResourceManager:
         self.config = config
         self.process_marks: Dict[int, int] = {}
 
-    def mark_packets(self, pid: int, mark: int) -> bool:
+    # ======================
+    #  ĐÁNH DẤU GÓI TIN (iptables)
+    # ======================
+
+    def mark_packets(self, uid: int, mark: int) -> bool:
         """
-        Đánh dấu gói tin chỉ khi quy tắc chưa tồn tại.
+        Đánh dấu gói tin chỉ khi quy tắc chưa tồn tại, sử dụng UID.
+
+        :param uid: UID của tiến trình cần đánh dấu gói tin.
+        :param mark: Giá trị MARK iptables.
+        :return: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Kiểm tra nếu đã tồn tại mark
-            if pid in self.process_marks:
-                self.logger.debug(f"MARK iptables đã tồn tại cho PID={pid}, mark={mark}.")
+            # Kiểm tra nếu đã tồn tại quy tắc
+            if self._check_iptables_rule(uid, mark):
+                self.logger.debug(f"MARK iptables đã tồn tại cho UID={uid}, mark={mark}.")
                 return True
 
-            cmd_check = [
-                'iptables', '-C', 'OUTPUT', '-m', 'owner',
-                '--pid-owner', str(pid),
-                '-j', 'MARK', '--set-mark', str(mark)
-            ]
-            if subprocess.run(cmd_check, check=False).returncode == 0:
-                self.logger.debug(f"Quy tắc MARK iptables đã tồn tại cho PID={pid}, mark={mark}.")
-                return True
-
-            # Thêm quy tắc nếu chưa tồn tại
+            # Thêm quy tắc iptables
             cmd_add = [
                 'iptables', '-A', 'OUTPUT', '-m', 'owner',
-                '--pid-owner', str(pid),
+                '--uid-owner', str(uid),
                 '-j', 'MARK', '--set-mark', str(mark)
             ]
             subprocess.run(cmd_add, check=True)
-            self.logger.debug(f"MARK iptables cho PID={pid}, mark={mark}.")
-            self.process_marks[pid] = mark
+            self.logger.info(f"Đánh dấu MARK iptables thành công: UID={uid}, mark={mark}.")
+            self.process_marks[uid] = mark
             return True
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi iptables MARK PID={pid}: {e}")
+            self.logger.error(f"Lỗi iptables MARK UID={uid}: {e}")
             return False
 
-    def unmark_packets(self, pid: int, mark: int) -> bool:
+    def unmark_packets(self, uid: int, mark: int) -> bool:
         """
         Xóa quy tắc MARK iptables nếu tồn tại.
+
+        :param uid: UID của tiến trình cần xóa quy tắc.
+        :param mark: Giá trị MARK iptables.
+        :return: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Kiểm tra nếu quy tắc tồn tại
-            cmd_check = [
-                'iptables', '-C', 'OUTPUT', '-m', 'owner',
-                '--pid-owner', str(pid),
-                '-j', 'MARK', '--set-mark', str(mark)
-            ]
-            if subprocess.run(cmd_check, check=False).returncode != 0:
-                self.logger.debug(f"Quy tắc MARK không tồn tại cho PID={pid}, mark={mark}.")
+            if not self._check_iptables_rule(uid, mark):
+                self.logger.debug(f"Quy tắc MARK không tồn tại cho UID={uid}, mark={mark}.")
                 return True
 
-            # Xóa quy tắc
+            # Xóa quy tắc iptables
             cmd_del = [
                 'iptables', '-D', 'OUTPUT', '-m', 'owner',
-                '--pid-owner', str(pid),
+                '--uid-owner', str(uid),
                 '-j', 'MARK', '--set-mark', str(mark)
             ]
             subprocess.run(cmd_del, check=True)
-            self.logger.debug(f"Hủy MARK iptables cho PID={pid}, mark={mark}.")
-            self.process_marks.pop(pid, None)
+            self.logger.info(f"Đã xóa MARK iptables: UID={uid}, mark={mark}.")
             return True
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi iptables unMARK PID={pid}: {e}")
+            self.logger.error(f"Lỗi iptables unMARK UID={uid}: {e}")
             return False
+
+    def _check_iptables_rule(self, uid: int, mark: int) -> bool:
+        """
+        Kiểm tra xem quy tắc MARK iptables đã tồn tại hay chưa.
+
+        :param uid: UID cần kiểm tra.
+        :param mark: Giá trị MARK cần kiểm tra.
+        :return: True nếu tồn tại, False nếu không tồn tại.
+        """
+        cmd_check = [
+            'iptables', '-C', 'OUTPUT', '-m', 'owner',
+            '--uid-owner', str(uid),
+            '-j', 'MARK', '--set-mark', str(mark)
+        ]
+        return subprocess.run(cmd_check, check=False).returncode == 0
+
+    # ======================
+    #  GIỚI HẠN BĂNG THÔNG (tc)
+    # ======================
 
     def limit_bandwidth(self, interface: str, mark: int, bandwidth_mbps: float) -> bool:
         """
-        Giới hạn băng thông, tránh cấu hình trùng lặp.
+        Giới hạn băng thông cho các gói tin được đánh dấu.
+
+        :param interface: Giao diện mạng (vd: eth0).
+        :param mark: Giá trị MARK iptables.
+        :param bandwidth_mbps: Băng thông tối đa (mbps).
+        :return: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Kiểm tra giá trị hợp lệ
             if bandwidth_mbps <= 0:
                 self.logger.error("Giới hạn băng thông không hợp lệ.")
                 return False
 
             # Kiểm tra nếu `qdisc` đã tồn tại
-            cmd_check_qdisc = ['tc', 'qdisc', 'show', 'dev', interface]
-            output = subprocess.check_output(cmd_check_qdisc, text=True)
-            if 'htb' in output:
-                self.logger.debug(f"Qdisc 'htb' đã tồn tại trên interface {interface}.")
-            else:
-                # Thêm qdisc nếu chưa tồn tại
+            if not self._check_tc_qdisc(interface):
                 cmd_qdisc = [
                     'tc', 'qdisc', 'add', 'dev', interface,
                     'root', 'handle', '1:', 'htb', 'default', '12'
                 ]
                 subprocess.run(cmd_qdisc, check=True)
-                self.logger.debug(f"Thêm tc qdisc 'htb' cho {interface}.")
+                self.logger.info(f"Thêm qdisc 'htb' cho {interface}.")
 
-            # Thêm class và filter
-            cmd_class = [
-                'tc', 'class', 'add', 'dev', interface,
-                'parent', '1:', 'classid', '1:1',
-                'htb', 'rate', f'{bandwidth_mbps}mbit'
-            ]
-            subprocess.run(cmd_class, check=True)
-            self.logger.debug(f"Thêm tc class '1:1' rate={bandwidth_mbps}mbit cho {interface}.")
+            # Kiểm tra và thêm class
+            if not self._check_tc_class(interface, '1:1'):
+                cmd_class = [
+                    'tc', 'class', 'add', 'dev', interface,
+                    'parent', '1:', 'classid', '1:1',
+                    'htb', 'rate', f'{bandwidth_mbps}mbit'
+                ]
+                subprocess.run(cmd_class, check=True)
+                self.logger.info(f"Thêm class '1:1' rate={bandwidth_mbps}mbit cho {interface}.")
 
-            cmd_filter = [
-                'tc', 'filter', 'add', 'dev', interface,
-                'protocol', 'ip', 'parent', '1:', 'prio', '1',
-                'handle', str(mark), 'fw', 'flowid', '1:1'
-            ]
-            subprocess.run(cmd_filter, check=True)
-            self.logger.debug(f"Thêm tc filter mark={mark} trên {interface}.")
-
+            # Kiểm tra và thêm filter
+            if not self._check_tc_filter(interface, mark):
+                cmd_filter = [
+                    'tc', 'filter', 'add', 'dev', interface,
+                    'protocol', 'ip', 'parent', '1:', 'prio', '1',
+                    'handle', str(mark), 'fw', 'flowid', '1:1'
+                ]
+                subprocess.run(cmd_filter, check=True)
+                self.logger.info(f"Thêm filter mark={mark} trên {interface}.")
             return True
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Lỗi limit_bandwidth: {e}")
-            # Tự động rollback nếu lỗi
             self.remove_bandwidth_limit(interface, mark)
             return False
 
     def remove_bandwidth_limit(self, interface: str, mark: int) -> bool:
         """
-        Gỡ bỏ giới hạn băng thông thông qua tc (đồng bộ).
-        - Kiểm tra trạng thái tồn tại trước khi gỡ để tránh lỗi không cần thiết.
-        - Đảm bảo rollback nếu xảy ra lỗi giữa chừng.
+        Gỡ bỏ giới hạn băng thông trên giao diện.
 
-        :param interface: Tên interface (vd: eth0).
-        :param mark: Giá trị mark iptables.
+        :param interface: Giao diện mạng (vd: eth0).
+        :param mark: Giá trị MARK iptables.
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Kiểm tra xem qdisc có tồn tại không trước khi cố gỡ
-            cmd_check_qdisc = ['tc', 'qdisc', 'show', 'dev', interface]
-            output = subprocess.check_output(cmd_check_qdisc, text=True)
-            if 'htb' not in output:
-                self.logger.warning(f"Qdisc 'htb' không tồn tại trên interface {interface}.")
-                return True  # Không cần gỡ nếu không tồn tại
-
             # Xóa filter
-            cmd_filter_del = [
-                'tc', 'filter', 'del', 'dev', interface,
-                'protocol', 'ip', 'parent', '1:', 'prio', '1',
-                'handle', str(mark), 'fw', 'flowid', '1:1'
-            ]
-            subprocess.run(cmd_filter_del, check=True)
-            self.logger.debug(f"Xóa tc filter mark={mark} trên {interface}.")
+            if self._check_tc_filter(interface, mark):
+                cmd_filter = [
+                    'tc', 'filter', 'del', 'dev', interface,
+                    'protocol', 'ip', 'parent', '1:', 'prio', '1',
+                    'handle', str(mark), 'fw', 'flowid', '1:1'
+                ]
+                subprocess.run(cmd_filter, check=True)
+                self.logger.info(f"Xóa filter mark={mark} trên {interface}.")
 
             # Xóa class
-            cmd_class_del = [
-                'tc', 'class', 'del', 'dev', interface,
-                'parent', '1:', 'classid', '1:1'
-            ]
-            subprocess.run(cmd_class_del, check=True)
-            self.logger.debug(f"Xóa tc class '1:1' trên {interface}.")
+            if self._check_tc_class(interface, '1:1'):
+                cmd_class = [
+                    'tc', 'class', 'del', 'dev', interface,
+                    'parent', '1:', 'classid', '1:1'
+                ]
+                subprocess.run(cmd_class, check=True)
+                self.logger.info(f"Xóa class '1:1' trên {interface}.")
 
             # Xóa qdisc
-            cmd_qdisc_del = [
-                'tc', 'qdisc', 'del', 'dev', interface,
-                'root', 'handle', '1:', 'htb'
-            ]
-            subprocess.run(cmd_qdisc_del, check=True)
-            self.logger.debug(f"Xóa tc qdisc 'htb' trên {interface}.")
-
+            if self._check_tc_qdisc(interface):
+                cmd_qdisc = [
+                    'tc', 'qdisc', 'del', 'dev', interface,
+                    'root', 'handle', '1:', 'htb'
+                ]
+                subprocess.run(cmd_qdisc, check=True)
+                self.logger.info(f"Xóa qdisc 'htb' trên {interface}.")
             return True
-
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Lỗi khi gỡ giới hạn băng thông (interface={interface}, mark={mark}): {e}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Lỗi không xác định khi gỡ giới hạn băng thông: {e}\n{traceback.format_exc()}")
+            self.logger.error(f"Lỗi remove_bandwidth_limit: {e}")
             return False
 
-    def restore_resources(self, pid: Optional[int] = None) -> bool:
+    def _check_tc_qdisc(self, interface: str) -> bool:
+        cmd_check = ['tc', 'qdisc', 'show', 'dev', interface]
+        output = subprocess.check_output(cmd_check, text=True)
+        return 'htb' in output
+
+    def _check_tc_class(self, interface: str, classid: str) -> bool:
+        cmd_check = ['tc', 'class', 'show', 'dev', interface]
+        output = subprocess.check_output(cmd_check, text=True)
+        return classid in output
+
+    def _check_tc_filter(self, interface: str, mark: int) -> bool:
+        cmd_check = ['tc', 'filter', 'show', 'dev', interface]
+        output = subprocess.check_output(cmd_check, text=True)
+        return str(mark) in output
+
+    def restore_resources(self, uid: Optional[int] = None) -> bool:
         """
-        Khôi phục các quy tắc và cấu hình mạng liên quan đến PID cụ thể hoặc tất cả PID trong `process_marks`.
-        - Gỡ các giới hạn băng thông (tc).
-        - Xóa các quy tắc MARK trong iptables.
-        - Xóa trạng thái lưu trữ trong `self.process_marks`.
-
-        :param pid: PID cụ thể cần khôi phục. Nếu là None, khôi phục tất cả PID.
-        :return: True nếu khôi phục thành công tất cả mục tiêu, False nếu gặp lỗi.
+        Khôi phục các tài nguyên mạng liên quan đến UID hoặc tất cả UIDs.
         """
         success = True
-
-        try:
-            # Lấy danh sách PID cần khôi phục
-            pids_to_restore = [pid] if pid else list(self.process_marks.keys())
-
-            for pid in pids_to_restore:
-                mark = self.process_marks.get(pid)
-                if mark is None:
-                    self.logger.warning(f"[Net Restore Resources] Không tìm thấy mark cho PID={pid}.")
-                    continue
-
-                # Gỡ giới hạn băng thông
-                if self.network_resource_manager.remove_bandwidth_limit(self.network_interface, mark):
-                    self.logger.info(f"[Net Restore Resources] Đã gỡ giới hạn băng thông cho PID={pid}, iface={self.network_interface}.")
-                else:
-                    self.logger.error(f"[Net Restore Resources] Không thể gỡ giới hạn băng thông cho PID={pid}.")
-                    success = False
-
-                # Xóa quy tắc MARK trong iptables
-                if self.network_resource_manager.unmark_packets(pid, mark):
-                    self.logger.info(f"[Net Restore Resources] Đã xoá iptables MARK cho PID={pid}.")
-                else:
-                    self.logger.error(f"[Net Restore Resources] Không thể xoá iptables MARK cho PID={pid}.")
-                    success = False
-
-                # Xóa trạng thái lưu trữ của PID trong process_marks
-                if pid in self.process_marks:
-                    del self.process_marks[pid]
-
-            if success:
-                self.logger.info("[Net Restore Resources] Hoàn thành khôi phục tài nguyên.")
-            else:
-                self.logger.warning("[Net Restore Resources] Có lỗi trong quá trình khôi phục tài nguyên.")
-
-            return success
-
-        except Exception as e:
-            self.logger.error(f"[Net Restore Resources] Lỗi không xác định khi khôi phục tài nguyên: {e}\n{traceback.format_exc()}")
-            return False
+        uids_to_restore = [uid] if uid else list(self.process_marks.keys())
+        for uid in uids_to_restore:
+            mark = self.process_marks.get(uid)
+            if mark:
+                self.remove_bandwidth_limit(self.config.get("network_interface", "eth0"), mark)
+                self.unmark_packets(uid, mark)
+                self.process_marks.pop(uid, None)
+        return success
 
 ###############################################################################
 #                      DISK I/O RESOURCE MANAGER                              #
 ###############################################################################
+
 class DiskIOResourceManager:
     """
     Quản lý Disk I/O (đồng bộ) qua ionice hoặc cgroup I/O.
@@ -1048,19 +1062,41 @@ class DiskIOResourceManager:
         Đặt trọng số I/O cho PID (ionice) - đồng bộ.
 
         :param pid: PID cần giới hạn.
-        :param io_weight: Mức io_weight (1-1000).
+        :param io_weight: Mức io_weight (0-7 cho Best Effort class).
         :return: True nếu thành công, False nếu lỗi.
         """
         try:
+            # Kiểm tra giá trị io_weight hợp lệ
+            if not (0 <= io_weight <= 7):
+                self.logger.error(f"Giá trị io_weight không hợp lệ: {io_weight}. Hợp lệ: 0-7.")
+                return False
+
+            # Kiểm tra tiến trình tồn tại
+            if not psutil.pid_exists(pid):
+                self.logger.error(f"PID={pid} không tồn tại.")
+                return False
+
+            # Lấy thông tin tiến trình để log thêm
+            process = psutil.Process(pid)
+            process_name = process.name()
+
+            # Xây dựng lệnh
             cmd = ['ionice', '-c', '2', '-n', str(io_weight), '-p', str(pid)]
+
+            # Thực thi lệnh
             subprocess.run(cmd, check=True)
-            self.logger.debug(f"Set io_weight={io_weight} cho PID={pid} qua ionice.")
+            self.logger.info(f"Set io_weight={io_weight} cho PID={pid} ({process_name}) thành công.")
+            self.process_io_limits[pid] = io_weight
             return True
+
+        except psutil.NoSuchProcess:
+            self.logger.error(f"Lỗi: PID={pid} không tồn tại.")
+            return False
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Lỗi ionice set_io_weight PID={pid}: {e}")
             return False
         except Exception as e:
-            self.logger.error(f"Lỗi set_io_weight PID={pid}: {e}")
+            self.logger.error(f"Lỗi không xác định trong set_io_weight PID={pid}: {e}\n{traceback.format_exc()}")
             return False
 
     def restore_resources(self, pid: int) -> bool:
@@ -1071,16 +1107,42 @@ class DiskIOResourceManager:
         :return: True nếu thành công, False nếu lỗi.
         """
         try:
+            # Kiểm tra tiến trình tồn tại
+            if not psutil.pid_exists(pid):
+                self.logger.error(f"PID={pid} không tồn tại.")
+                return False
+
+            # Lấy thông tin tiến trình để log thêm
+            process = psutil.Process(pid)
+            process_name = process.name()
+
+            # Xây dựng lệnh khôi phục
             cmd = ['ionice', '-c', '0', '-p', str(pid)]
+
+            # Thực thi lệnh
             subprocess.run(cmd, check=True)
-            self.logger.info(f"Khôi phục Disk I/O cho PID={pid} (ionice class=0).")
+            self.logger.info(f"Khôi phục Disk I/O cho PID={pid} ({process_name}) thành công.")
+            if pid in self.process_io_limits:
+                del self.process_io_limits[pid]
             return True
+
+        except psutil.NoSuchProcess:
+            self.logger.error(f"Lỗi: PID={pid} không tồn tại.")
+            return False
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Lỗi ionice restore_resources PID={pid}: {e}")
             return False
         except Exception as e:
-            self.logger.error(f"Lỗi restore_resources Disk cho PID={pid}: {e}")
+            self.logger.error(f"Lỗi không xác định trong restore_resources PID={pid}: {e}\n{traceback.format_exc()}")
             return False
+
+    def list_io_limits(self) -> Dict[int, float]:
+        """
+        Liệt kê tất cả các tiến trình và giới hạn I/O hiện tại.
+
+        :return: Bản đồ PID -> io_weight.
+        """
+        return self.process_io_limits
 
 
 ###############################################################################
