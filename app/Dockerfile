@@ -43,7 +43,7 @@ RUN set -eux; \
         libssl-dev libeigen3-dev libnuma-dev stunnel4 \
         cpufrequtils iproute2 util-linux \
         pciutils openssl lm-sensors powerstat stress-ng bash \
-        htop locales iptables powertop tzdata numactl systemd  \
+        htop locales iptables powertop tzdata numactl systemd dbus  \
         pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg locales \
         libuv1 libudev1 libssl3 cgroup-tools libcgroup1 libcap2-bin nvidia-container-toolkit && \
     rm -rf /var/lib/apt/lists/*
@@ -58,9 +58,23 @@ RUN set -eux; \
     locale-gen en_US.UTF-8; \                         
     update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-# Đảm bảo các thư mục systemd cần thiết tồn tại
+# Đảm bảo các thư mục cần thiết
+RUN mkdir -p /run/user/0 && chmod 700 /run/user/0
+
+# Thiết lập biến môi trường
+ENV XDG_RUNTIME_DIR=/run/user/0 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+
+# Đảm bảo dbus-daemon hoạt động
+RUN set -eux; \
+    dbus-daemon --system --address=unix:path=/run/dbus/system_bus_socket --fork; \
+    dbus-daemon --session --address=$DBUS_SESSION_BUS_ADDRESS --fork
+
+# Thêm systemd entrypoints
 VOLUME [ "/sys/fs/cgroup" ]
-CMD ["/sbin/init"]
+RUN ln -sf /usr/bin/systemd /sbin/init
+CMD ["/usr/bin/systemd"]
+
 
 # Cài đặt Azure CLI
 RUN set -eux; \
