@@ -65,16 +65,6 @@ RUN mkdir -p /run/user/0 && chmod 700 /run/user/0
 ENV XDG_RUNTIME_DIR=/run/user/0 \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
 
-# Đảm bảo dbus-daemon hoạt động
-RUN set -eux; \
-    dbus-daemon --system --address=unix:path=/run/dbus/system_bus_socket --fork; \
-    dbus-daemon --session --address=$DBUS_SESSION_BUS_ADDRESS --fork
-
-# Thêm systemd entrypoints
-VOLUME [ "/sys/fs/cgroup" ]
-RUN ln -sf /usr/bin/systemd /sbin/init
-CMD ["/usr/bin/systemd"]
-
 
 # Cài đặt Azure CLI
 RUN set -eux; \
