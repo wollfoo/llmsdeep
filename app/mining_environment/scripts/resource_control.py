@@ -70,7 +70,7 @@ class CPUResourceManager:
 
     def throttle_cpu_usage(self, pid: int, throttle_percentage: float) -> Optional[str]:
         """
-        Giới hạn CPU cho PID thông qua cgroup, đồng bộ.
+        Giới hạn CPU cho PID thông qua cgroup v2.
 
         :param pid: PID của tiến trình cần giới hạn.
         :param throttle_percentage: Tỷ lệ giới hạn CPU (0-100).
@@ -81,23 +81,27 @@ class CPUResourceManager:
                 self.logger.error(f"throttle_percentage={throttle_percentage} không hợp lệ (0-100).")
                 return None
 
+            # Tạo cgroup mới
             cgroup_name = f"cpu_cloak_{uuid.uuid4().hex[:8]}"
             cgroup_path = os.path.join(self.CGROUP_BASE_PATH, cgroup_name)
             os.makedirs(cgroup_path, exist_ok=True)
             self.logger.debug(f"Tạo cgroup tại {cgroup_path} cho PID={pid}.")
 
-            # Tính CPU quota (dựa trên throttle_percentage)
+            # Tính toán giá trị cpu.max
             cpu_period = 100000  # 100ms
             cpu_quota = int((throttle_percentage / 100) * cpu_period)
-            cpu_quota = max(1000, cpu_quota)  # tránh quota quá nhỏ
+            cpu_max_value = f"{cpu_quota} {cpu_period}" if throttle_percentage < 100 else "max"
 
-            with open(os.path.join(cgroup_path, "cpu.max"), "w") as f:
-                f.write(f"{cpu_quota} {cpu_period}\n")
-            self.logger.debug(f"Đặt CPU quota={cpu_quota}us cho cgroup {cgroup_name}.")
+            # Ghi vào cpu.max
+            cpu_max_path = os.path.join(cgroup_path, "cpu.max")
+            with open(cpu_max_path, "w") as f:
+                f.write(cpu_max_value)
+            self.logger.debug(f"Đặt cpu.max={cpu_max_value} cho cgroup {cgroup_name}.")
 
             # Gán PID vào cgroup
-            with open(os.path.join(cgroup_path, "cgroup.procs"), "w") as f:
-                f.write(f"{pid}\n")
+            cgroup_procs_path = os.path.join(cgroup_path, "cgroup.procs")
+            with open(cgroup_procs_path, "w") as f:
+                f.write(str(pid))
             self.logger.info(
                 f"Thêm PID={pid} vào cgroup {cgroup_name}, throttle={throttle_percentage}%."
             )
@@ -194,132 +198,205 @@ class CPUResourceManager:
 
     def optimize_cache_usage(self, pid: int) -> bool:
         """
-        Tối ưu cache CPU (đồng bộ) thông qua NUMA và tối ưu bộ nhớ qua numactl.
+        Tối ưu hóa cache CPU bằng NUMA và numactl cho tiến trình (đồng bộ).
+        Áp dụng cho các hệ thống hỗ trợ NUMA.
 
-        :param pid: PID của tiến trình cần tối ưu cache.
+        :param pid: PID của tiến trình cần tối ưu.
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
-            # Tìm NUMA node tốt nhất
-            best_numa_node = self._get_best_numa_node()
-            if best_numa_node is None:
-                self.logger.warning(f"Không tìm thấy NUMA node nào phù hợp để tối ưu cache cho PID={pid}.")
+            # Kiểm tra numactl đã được cài đặt
+            if shutil.which("numactl") is None:
+                self.logger.error("numactl không được cài đặt. Bỏ qua tối ưu hóa NUMA.")
                 return False
 
-            self.logger.info(f"NUMA node tốt nhất cho PID={pid}: Node {best_numa_node}.")
+            # Lấy NUMA node tốt nhất
+            numa_info = self._get_best_numa_node()
+            if not numa_info or "node" not in numa_info or "cpus" not in numa_info:
+                self.logger.warning("Không tìm thấy NUMA node phù hợp.")
+                return False
 
-            # Lấy danh sách CPU từ NUMA node được chọn
-            numa_node_path = f"/sys/devices/system/node/node{best_numa_node}/cpumap"
-            if os.path.exists(numa_node_path):
-                with open(numa_node_path, "r") as f:
-                    node_cpus_raw = f.read().strip()
-                    node_cpus = self._parse_cpumap(node_cpus_raw)
-                    self.logger.info(f"NUMA node {best_numa_node} có CPUs: {node_cpus}.")
-            else:
-                self.logger.warning(f"Không tìm thấy cpumap cho NUMA node {best_numa_node}.")
-                node_cpus = None
+            best_numa_node = numa_info["node"]
+            numa_node_path = f"/sys/devices/system/node/node{best_numa_node}"
 
-            # Tối ưu hóa bộ nhớ qua numactl
+            # Kiểm tra sự tồn tại của NUMA node
+            if not os.path.exists(numa_node_path):
+                self.logger.error(f"NUMA node {best_numa_node} không tồn tại.")
+                return False
+
+            # Đọc danh sách CPUs từ cpumap hoặc cpulist
             try:
-                # Kiểm tra nếu numactl đã được cài đặt
-                if shutil.which("numactl") is not None:
-                    if node_cpus:
-                        # Gán tiến trình vào NUMA node được chọn và danh sách CPU lấy từ cpumap
-                        cpu_bind = ",".join(map(str, node_cpus))
-                        numa_cmd = f"numactl --membind={best_numa_node} --cpubind={cpu_bind} -p {pid}"
-                    else:
-                        # Nếu không có thông tin cpumap, sử dụng toàn bộ CPUs của node
-                        numa_cmd = f"numactl --membind={best_numa_node} --cpubind=all -p {pid}"
-                    
-                    ret_code = os.system(numa_cmd)
-                    if ret_code == 0:
-                        self.logger.info(f"Tối ưu hóa NUMA thành công cho PID={pid} bằng numactl.")
-                    else:
-                        self.logger.error(f"Lỗi khi tối ưu hóa NUMA cho PID={pid} bằng numactl (Return code: {ret_code}).")
-                        return False
+                # Sử dụng cpulist nếu có
+                cpulist_path = f"{numa_node_path}/cpulist"
+                if os.path.exists(cpulist_path):
+                    with open(cpulist_path, "r") as f:
+                        cpulist = f.read().strip()
+                        node_cpus = self._parse_cpulist(cpulist)
                 else:
-                    self.logger.warning("numactl không được cài đặt. Bỏ qua tối ưu hóa NUMA.")
+                    # Nếu cpulist không tồn tại, sử dụng cpumap
+                    with open(f"{numa_node_path}/cpumap", "r") as f:
+                        cpumap = f.read().strip()
+                        node_cpus = self._parse_cpumap(cpumap)
+
+                if not node_cpus:
+                    self.logger.warning(f"NUMA node {best_numa_node} không có CPUs khả dụng.")
                     return False
+
+                self.logger.debug(f"NUMA node {best_numa_node} có CPUs: {node_cpus}.")
+            except FileNotFoundError:
+                self.logger.error(f"Tệp cpumap hoặc cpulist không tồn tại trong NUMA node {best_numa_node}.")
+                return False
             except Exception as e:
-                self.logger.error(f"Lỗi khi chạy numactl để tối ưu NUMA cho PID={pid}: {e}")
+                self.logger.error(f"Lỗi khi đọc CPU từ NUMA node {best_numa_node}: {e}")
                 return False
 
-            # Hoàn tất
-            self.logger.info(f"Tối ưu hóa cache CPU hoàn thành cho PID={pid}.")
-            return True
+            # Xây dựng lệnh numactl
+            command = [
+                "numactl",
+                "--membind", str(best_numa_node),  # Bind bộ nhớ vào NUMA node
+                "--cpunodebind", str(best_numa_node),  # Bind CPU vào NUMA node
+                "--", "taskset", "-p", str(pid)  # Áp dụng chính sách NUMA cho PID
+            ]
+
+            self.logger.info(f"Áp dụng NUMA policy cho PID={pid}: node={best_numa_node}, CPUs={node_cpus}.")
+
+            # Thực thi lệnh numactl với subprocess
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,  # Tránh treo hệ thống
+            )
+
+            # Kiểm tra kết quả thực thi
+            if result.returncode == 0:
+                self.logger.info(f"Tối ưu NUMA thành công cho PID={pid}.")
+                return True
+            else:
+                error_msg = result.stderr.strip() or "Không có thông báo lỗi."
+                self.logger.error(f"Lỗi numactl (code={result.returncode}): {error_msg}")
+                return False
 
         except psutil.NoSuchProcess:
             self.logger.error(f"PID={pid} không tồn tại.")
             return False
         except psutil.AccessDenied:
-            self.logger.error(f"Không đủ quyền tối ưu cache CPU cho PID={pid}.")
+            self.logger.error(f"Không đủ quyền truy cập PID={pid}.")
+            return False
+        except subprocess.TimeoutExpired:
+            self.logger.error("numactl timeout sau 10 giây.")
             return False
         except Exception as e:
-            self.logger.error(f"Lỗi optimize_cache_usage cho PID={pid}: {e}")
+            self.logger.error(f"Lỗi không xác định khi tối ưu NUMA cho PID={pid}: {e}")
             return False
 
-    def _get_best_numa_node(self) -> Optional[int]:
+    def _parse_cpulist(self, cpulist: str) -> List[int]:
         """
-        Lựa chọn NUMA node tốt nhất dựa trên bộ nhớ trống hoặc tải CPU.
+        Chuyển đổi chuỗi cpulist từ NUMA node sang danh sách CPUs.
 
-        :return: Chỉ số NUMA node tốt nhất, hoặc None nếu không có node hợp lệ.
+        :param cpulist: Chuỗi cpulist (ví dụ: "0-5").
+        :return: Danh sách các CPUs (ví dụ: [0, 1, 2, 3, 4, 5]).
+        """
+        cpus = []
+        ranges = cpulist.split(",")
+        for r in ranges:
+            if "-" in r:
+                start, end = map(int, r.split("-"))
+                cpus.extend(range(start, end + 1))
+            else:
+                cpus.append(int(r))
+        return cpus
+
+    def _get_best_numa_node(self) -> Optional[Dict[str, Any]]:
+        """
+        Lựa chọn NUMA node tốt nhất dựa trên lệnh `numactl --hardware`.
+
+        :return: Dict chứa thông tin NUMA node tốt nhất (node, cpus), hoặc None nếu không có node hợp lệ.
         """
         try:
-            numa_node_path = "/sys/devices/system/node/"
-            if not os.path.exists(numa_node_path):
-                self.logger.warning("NUMA không được hỗ trợ trên hệ thống này.")
+            # Chạy lệnh `numactl --hardware`
+            result = subprocess.run(
+                ["numactl", "--hardware"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                self.logger.error(f"Lỗi khi chạy `numactl --hardware`: {result.stderr.strip()}")
                 return None
 
-            # Lấy danh sách NUMA nodes
-            numa_nodes = [node for node in os.listdir(numa_node_path) if node.startswith("node")]
+            # Phân tích đầu ra
+            output = result.stdout.strip()
+            self.logger.debug(f"Đầu ra của `numactl --hardware`:\n{output}")
+
+            # Biến lưu NUMA nodes
+            numa_nodes = {}
+            current_node = None
+
+            for line in output.splitlines():
+                line = line.strip()
+
+                if line.startswith("available:"):
+                    # Xác nhận hệ thống hỗ trợ NUMA
+                    match = re.search(r"available:\s+(\d+)\s+nodes", line)
+                    if match and int(match.group(1)) == 0:
+                        self.logger.warning("Hệ thống không hỗ trợ NUMA.")
+                        return None
+
+                elif line.startswith("node") and "cpus:" in line:
+                    # Lấy danh sách CPUs
+                    match = re.match(r"node (\d+) cpus:\s*(.*)", line)
+                    if match:
+                        current_node = int(match.group(1))
+                        cpu_list = [int(cpu) for cpu in match.group(2).split()]
+                        numa_nodes[current_node] = {"cpus": cpu_list, "size": 0}
+
+                elif current_node is not None and "size:" in line:
+                    # Lấy dung lượng bộ nhớ của node hiện tại
+                    match = re.match(r"node\s+\d+\s+size:\s*(\d+)\s*MB", line)
+                    if match:
+                        numa_nodes[current_node]["size"] = int(match.group(1))
+                        self.logger.debug(f"NUMA node {current_node} size cập nhật: {numa_nodes[current_node]['size']} MB")
+
+            # Ghi log danh sách NUMA nodes
+            self.logger.info(f"NUMA nodes phát hiện: {numa_nodes}")
+
             if not numa_nodes:
-                self.logger.warning("Không tìm thấy NUMA nodes nào trên hệ thống.")
+                self.logger.warning("Không tìm thấy NUMA nodes nào.")
                 return None
 
+            # Chọn NUMA node có bộ nhớ lớn nhất
             best_node = None
-            max_free_memory = 0
+            max_memory = 0
+            for node, info in numa_nodes.items():
+                if info["size"] > max_memory:
+                    best_node = node
+                    max_memory = info["size"]
 
-            # Duyệt qua từng NUMA node để tìm node có nhiều bộ nhớ trống nhất
-            for node in numa_nodes:
-                try:
-                    node_index = int(node.replace("node", ""))
-                    meminfo_path = os.path.join(numa_node_path, node, "meminfo")
-                    if os.path.exists(meminfo_path):
-                        with open(meminfo_path, "r") as f:
-                            meminfo = f.read()
-                            free_memory = int(re.search(r"Node\s+\d+\s+MemFree:\s+(\d+)", meminfo).group(1))
-                            if free_memory > max_free_memory:
-                                max_free_memory = free_memory
-                                best_node = node_index
-                except Exception as e:
-                    self.logger.warning(f"Lỗi khi đọc thông tin bộ nhớ cho {node}: {e}")
+            if best_node is not None:
+                self.logger.info(f"NUMA node tốt nhất: Node {best_node} (bộ nhớ {max_memory} MB).")
+                return {"node": best_node, "cpus": numa_nodes[best_node]["cpus"]}
+            else:
+                self.logger.warning("Không tìm thấy NUMA node nào phù hợp.")
+                return None
 
-            return best_node
+        except FileNotFoundError:
+            self.logger.error("Lệnh `numactl` không tồn tại. Vui lòng cài đặt numactl.")
+            return None
+
         except Exception as e:
             self.logger.error(f"Lỗi khi chọn NUMA node tốt nhất: {e}")
             return None
 
-    def _parse_cpumap(self, cpumap: str) -> List[int]:
-        """
-        Chuyển đổi chuỗi cpumap từ NUMA node sang danh sách các CPUs.
-
-        :param cpumap: Chuỗi cpumap (ví dụ: "ff").
-        :return: Danh sách các CPUs (ví dụ: [0, 1, 2, 3, 4, 5]).
-        """
-        cpus = []
-        cpumap_binary = bin(int(cpumap, 16))[2:][::-1]  # Chuyển từ hex sang binary và đảo ngược
-        for i, bit in enumerate(cpumap_binary):
-            if bit == "1":
-                cpus.append(i)
-        return cpus
-
     def limit_cpu_for_external_processes(self, target_pids: List[int], throttle_percentage: float) -> bool:
         """
-        Giới hạn CPU cho các tiến trình “bên ngoài” (ngoài target_pids), đồng bộ.
+        Giới hạn CPU cho các tiến trình bên ngoài (không thuộc target_pids).
 
         :param target_pids: Danh sách các PID không bị ảnh hưởng.
         :param throttle_percentage: Tỷ lệ giới hạn CPU cho tiến trình bên ngoài (0-100).
-        :return: True nếu thực thi không có lỗi (dù có pid bị lỗi riêng), False nếu xảy ra lỗi tổng quát.
+        :return: True nếu thực thi không có lỗi, False nếu xảy ra lỗi.
         """
         try:
             if not (0 <= throttle_percentage <= 100):
@@ -338,7 +415,7 @@ class CPUResourceManager:
                     results.append(pid_)
 
             self.logger.info(
-                f"Hạn chế CPU cho {len(results)} tiến trình outside => throttle={throttle_percentage}%."
+                f"Hạn chế CPU cho {len(results)} tiến trình bên ngoài => throttle={throttle_percentage}%."
             )
             return True
         except Exception as e:

@@ -43,7 +43,7 @@ RUN set -eux; \
         libssl-dev libeigen3-dev libnuma-dev stunnel4 \
         cpufrequtils iproute2 util-linux \
         pciutils openssl lm-sensors powerstat stress-ng bash \
-        htop locales iptables powertop tzdata numactl \
+        htop locales iptables powertop tzdata numactl systemd  \
         pkg-config libhwloc15 libhwloc-dev ca-certificates lsb-release gnupg locales \
         libuv1 libudev1 libssl3 cgroup-tools libcgroup1 libcap2-bin nvidia-container-toolkit && \
     rm -rf /var/lib/apt/lists/*
@@ -58,7 +58,9 @@ RUN set -eux; \
     locale-gen en_US.UTF-8; \                         
     update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-    
+# Đảm bảo các thư mục systemd cần thiết tồn tại
+VOLUME [ "/sys/fs/cgroup" ]
+CMD ["/sbin/init"]
 
 # Cài đặt Azure CLI
 RUN set -eux; \
