@@ -65,7 +65,7 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi tạo thư mục cgroup tại {self.CGROUP_CPU_BASE}: {e}")
 
-    def throttle_cpu_usage(self, pid: int, throttle_percentage: float, cgroup_name: Optional[str] = None) -> Optional[str]:
+    def throttle_cpu_usage(self, pid: int, throttle_percentage: float, cgroup_name: Optional[str] = None, cores: Optional[List[int]] = None) -> Optional[str]:
         """
         Giới hạn (throttle) CPU cho một tiến trình (PID) thông qua cgroup v1.
         Nếu cgroup đã tồn tại, chỉ cần cập nhật giá trị throttle_percentage.
@@ -73,6 +73,7 @@ class CPUResourceManager:
         :param pid: PID của tiến trình cần giới hạn.
         :param throttle_percentage: Tỷ lệ giới hạn CPU (0-100).
         :param cgroup_name: Tên cgroup, nếu None thì sẽ tạo mới.
+        :param cores: Danh sách các core được sử dụng (nếu None, sử dụng toàn bộ CPU logic).
         :return: Tên cgroup (str) nếu thành công, None nếu thất bại.
         """
         try:
@@ -101,8 +102,15 @@ class CPUResourceManager:
 
             # Chu kỳ CPU mặc định là 100ms = 100000 microseconds
             cpu_period = 100000
-            # Lấy tổng số CPU (logic)
-            n_cores = psutil.cpu_count(logical=True)
+
+            # Lấy tổng số core từ danh sách cores truyền vào
+            if cores is not None:
+                n_cores = len(cores)
+                if n_cores == 0:
+                    self.logger.error("Danh sách cores rỗng, không thể giới hạn CPU.")
+                    return None
+            else:
+                n_cores = psutil.cpu_count(logical=True)  # Mặc định toàn bộ CPU logic
 
             # Tính toán quota
             if throttle_percentage < 100:
@@ -122,7 +130,7 @@ class CPUResourceManager:
 
             self.logger.info(
                 f"Đặt cpu.cfs_period_us={cpu_period}, cpu.cfs_quota_us={cpu_quota} "
-                f"cho cgroup {cgroup_name}, throttle={throttle_percentage}%."
+                f"cho cgroup {cgroup_name}, throttle={throttle_percentage}%, cores={cores or 'toàn bộ'}."
             )
 
             return cgroup_name
@@ -133,7 +141,7 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi tạo hoặc cập nhật cgroup cho PID={pid}: {e}")
             return None
-
+            
     def delete_cgroup(self, cgroup_name: str) -> bool:
         """
         Xóa một cgroup (v1) đã được tạo.
@@ -148,23 +156,28 @@ class CPUResourceManager:
             # Kiểm tra xem cgroup có còn PID nào không
             if os.path.exists(procs_path):
                 with open(procs_path, "r") as f:
-                    procs = f.read().strip()
+                    procs = f.read().strip().splitlines()
                     if procs:
                         self.logger.warning(
-                            f"Cgroup {cgroup_name} vẫn còn PID={procs}. Không thể xóa."
+                            f"Cgroup {cgroup_name} vẫn chứa các PID: {', '.join(procs)}. Không thể xóa."
                         )
                         return False
 
-            # Xóa thư mục cgroup
-            os.rmdir(cgroup_path)
-            self.logger.info(f"Xóa cgroup {cgroup_name} thành công.")
-            return True
+            # Kiểm tra và xóa cgroup
+            if os.path.exists(cgroup_path):
+                try:
+                    os.rmdir(cgroup_path)  # Xóa nếu thư mục rỗng
+                    self.logger.info(f"Xóa cgroup {cgroup_name} thành công.")
+                    return True
+                except OSError as e:
+                    self.logger.error(f"Lỗi khi xóa thư mục cgroup {cgroup_name}: {e}")
+                    return False
+            else:
+                self.logger.warning(f"Cgroup {cgroup_name} không tồn tại khi xóa.")
+                return False
 
-        except FileNotFoundError:
-            self.logger.warning(f"Cgroup {cgroup_name} không tồn tại khi xóa.")
-            return False
         except PermissionError:
-            self.logger.error(f"Không đủ quyền để xóa cgroup {cgroup_name}.")
+            self.logger.error(f"Không đủ quyền để xóa cgroup {cgroup_name}. Vui lòng kiểm tra quyền truy cập.")
             return False
         except Exception as e:
             self.logger.error(f"Lỗi khi xóa cgroup {cgroup_name}: {e}")
@@ -185,15 +198,15 @@ class CPUResourceManager:
             self.logger.error(f"Lỗi khi lấy danh sách CPU cores: {e}")
             return []
 
-
     def optimize_thread_scheduling(
-        self, pid: int, cores: Optional[List[int]] = None, use_even_odd: Optional[str] = None) -> bool:
+        self, pid: int, cores: Optional[List[int]] = None, use_even_odd: Optional[str] = None, cgroup_name: Optional[str] = None) -> bool:
         """
-        Đặt CPU affinity cho tiến trình, chỉ chọn nhóm cores chẵn/lẻ.
+        Đặt CPU affinity và cập nhật CPU mask cho cgroup.
 
         :param pid: PID của tiến trình.
         :param cores: Danh sách core CPU được chỉ định (ưu tiên nếu có).
         :param use_even_odd: 'even' để chọn cores chẵn, 'odd' để chọn cores lẻ.
+        :param cgroup_name: Tên cgroup để cập nhật CPU mask (nếu có).
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
@@ -228,9 +241,24 @@ class CPUResourceManager:
                     self.logger.error("Tham số use_even_odd không hợp lệ. Chỉ nhận 'even' hoặc 'odd'.")
                     return False
 
-            # Đặt CPU affinity
+            # Đặt CPU affinity cho tiến trình
             process.cpu_affinity(target_cores)
             self.logger.info(f"Đặt CPU affinity cho PID={pid} => {target_cores}.")
+
+            # Nếu có cgroup_name, cập nhật cpuset.cpus trong cgroup
+            if cgroup_name:
+                cgroup_path = os.path.join(self.CGROUP_CPU_BASE, cgroup_name)
+                cpuset_cpus_path = os.path.join(cgroup_path, "cpuset.cpus")
+                if not os.path.exists(cpuset_cpus_path):
+                    self.logger.error(f"cpuset.cpus không tồn tại trong cgroup {cgroup_name}.")
+                    return False
+                # Ghi danh sách core vào cpuset.cpus
+                with open(cpuset_cpus_path, "w") as f:
+                    f.write(",".join(map(str, target_cores)))
+                self.logger.info(
+                    f"Cập nhật cpuset.cpus cho cgroup {cgroup_name} => {target_cores}."
+                )
+
             return True
 
         except psutil.NoSuchProcess:
@@ -242,7 +270,6 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi optimize_thread_scheduling cho PID={pid}: {e}")
             return False
-
 
     def optimize_cache_usage(self, pid: int) -> bool:
         """

