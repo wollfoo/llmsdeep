@@ -65,21 +65,6 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi tạo thư mục cgroup tại {self.CGROUP_CPU_BASE}: {e}")
 
-    def get_available_cpus(self) -> List[int]:
-        """
-        Lấy danh sách các core CPU (ID) để đặt affinity.
-
-        :return: Danh sách số hiệu core CPU (List[int]).
-        """
-        try:
-            cpu_count = psutil.cpu_count(logical=True)
-            available_cpus = list(range(cpu_count))
-            self.logger.debug(f"Available CPUs: {available_cpus}.")
-            return available_cpus
-        except Exception as e:
-            self.logger.error(f"Lỗi khi lấy danh sách CPU cores: {e}")
-            return []
-
     def throttle_cpu_usage(self, pid: int, throttle_percentage: float) -> Optional[str]:
         """
         Giới hạn (throttle) CPU cho một tiến trình (PID) thông qua cgroup v1.
@@ -188,6 +173,21 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi xóa cgroup {cgroup_name}: {e}")
             return False
+
+    def get_available_cpus(self) -> List[int]:
+        """
+        Lấy danh sách các core CPU (ID) để đặt affinity.
+
+        :return: Danh sách số hiệu core CPU (List[int]).
+        """
+        try:
+            cpu_count = psutil.cpu_count(logical=True)
+            available_cpus = list(range(cpu_count))
+            self.logger.debug(f"Available CPUs: {available_cpus}.")
+            return available_cpus
+        except Exception as e:
+            self.logger.error(f"Lỗi khi lấy danh sách CPU cores: {e}")
+            return []
 
     def optimize_thread_scheduling(self, pid: int, cores: Optional[List[int]] = None) -> bool:
         """
