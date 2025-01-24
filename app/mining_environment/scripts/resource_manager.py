@@ -814,7 +814,7 @@ class ResourceManager(IResourceManager):
 
     def shutdown(self):
         """
-        Dừng ResourceManager: khôi phục tài nguyên, tắt NVML, dừng watchers.
+        Dừng ResourceManager: khôi phục tài nguyên, tạm dừng, tắt NVML, dừng watchers.
         """
         self.logger.info("Dừng ResourceManager... (BẮT ĐẦU)")
         self._stop_flag = True
@@ -839,10 +839,15 @@ class ResourceManager(IResourceManager):
             except RuntimeError:
                 pass
 
+        # Thêm khoản thời gian chờ
+        delay_time = 10  # Thời gian chờ (giây), có thể điều chỉnh
+        self.logger.info(f"Chờ {delay_time} giây trước khi tiếp tục tắt NVML...")
+        time.sleep(delay_time)
+
         # 2. Tắt NVML
         if self.shared_resource_manager:
             self.shared_resource_manager.shutdown_nvml()
 
         # 3. Dừng các thread watchers
         for w in self.watchers:
-            w.join(timeout=10)
+            w.join(timeout=2)

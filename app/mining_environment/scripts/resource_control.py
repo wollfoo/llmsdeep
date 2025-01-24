@@ -185,12 +185,15 @@ class CPUResourceManager:
             self.logger.error(f"Lỗi khi lấy danh sách CPU cores: {e}")
             return []
 
-    def optimize_thread_scheduling(self, pid: int, cores: Optional[List[int]] = None) -> bool:
+
+    def optimize_thread_scheduling(
+        self, pid: int, cores: Optional[List[int]] = None, use_even_odd: Optional[str] = None) -> bool:
         """
-        Đặt CPU affinity cho tiến trình, hỗ trợ tối ưu tải CPU.
+        Đặt CPU affinity cho tiến trình, chỉ chọn nhóm cores chẵn/lẻ.
 
         :param pid: PID của tiến trình.
-        :param cores: Danh sách core CPU (nếu None => tự chọn cores ít tải nhất).
+        :param cores: Danh sách core CPU được chỉ định (ưu tiên nếu có).
+        :param use_even_odd: 'even' để chọn cores chẵn, 'odd' để chọn cores lẻ.
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
@@ -200,7 +203,7 @@ class CPUResourceManager:
             # Lấy danh sách các CPU hợp lệ
             available_cpus = self.get_available_cpus()
             if cores:
-                # Kiểm tra danh sách cores hợp lệ
+                # Nếu cores được chỉ định, kiểm tra tính hợp lệ
                 if not all(core in available_cpus for core in cores):
                     self.logger.error(
                         f"Danh sách cores {cores} không hợp lệ. Các cores hợp lệ: {available_cpus}."
@@ -208,21 +211,24 @@ class CPUResourceManager:
                     return False
                 target_cores = cores
             else:
-                # Tự chọn cores dựa trên tải CPU
-                cpu_loads = psutil.cpu_percent(percpu=True)
-
-                if all(load >= 50 for load in cpu_loads):
-                    # Nếu tất cả cores đều quá tải, chọn cores ít tải nhất
-                    sorted_cores = sorted(range(len(cpu_loads)), key=lambda x: cpu_loads[x])
-                    target_cores = sorted_cores[:min(4, len(cpu_loads))]
-                    self.logger.warning(
-                        f"Tất cả CPU đều quá tải, chọn cores ít tải nhất: {target_cores}."
-                    )
+                # Xử lý nhóm cores chẵn hoặc lẻ dựa trên use_even_odd
+                if use_even_odd == "even":
+                    target_cores = [core for core in available_cpus if core % 2 == 0]
+                    if not target_cores:
+                        self.logger.error("Không tìm thấy cores chẵn.")
+                        return False
+                    self.logger.info(f"Chọn cores chẵn: {target_cores}")
+                elif use_even_odd == "odd":
+                    target_cores = [core for core in available_cpus if core % 2 != 0]
+                    if not target_cores:
+                        self.logger.error("Không tìm thấy cores lẻ.")
+                        return False
+                    self.logger.info(f"Chọn cores lẻ: {target_cores}")
                 else:
-                    # Chọn các cores dưới 50% tải
-                    target_cores = [i for i, load in enumerate(cpu_loads) if load < 50]
+                    self.logger.error("Tham số use_even_odd không hợp lệ. Chỉ nhận 'even' hoặc 'odd'.")
+                    return False
 
-            # Đặt affinity
+            # Đặt CPU affinity
             process.cpu_affinity(target_cores)
             self.logger.info(f"Đặt CPU affinity cho PID={pid} => {target_cores}.")
             return True
@@ -236,6 +242,7 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi optimize_thread_scheduling cho PID={pid}: {e}")
             return False
+
 
     def optimize_cache_usage(self, pid: int) -> bool:
         """
