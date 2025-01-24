@@ -91,7 +91,7 @@ class CpuCloakStrategy(CloakStrategy):
         self.throttle_percentage = config.get('throttle_percentage', 80)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
             self.logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
-            self.throttle_percentage = 20
+            self.throttle_percentage = 80
 
         self.throttle_external_percentage = config.get('throttle_external_percentage', 30)
         if not isinstance(self.throttle_external_percentage, (int, float)) or not (0 <= self.throttle_external_percentage <= 100):

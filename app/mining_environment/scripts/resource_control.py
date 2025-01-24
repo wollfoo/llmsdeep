@@ -13,18 +13,29 @@ from typing import Any, Dict, List, Optional
 ###############################################################################
 #                           CPU RESOURCE MANAGER                              #
 ###############################################################################
+
+import os
+import re
+import uuid
+import psutil
+import shutil
+import logging
+import subprocess
+from typing import Dict, Any, List, Optional
+
 class CPUResourceManager:
     """
-    Quản lý tài nguyên CPU sử dụng cgroups, affinity, và tối ưu hóa CPU theo mô hình đồng bộ.
+    Quản lý tài nguyên CPU sử dụng cgroups (v1), affinity, và tối ưu hóa CPU.
 
     Attributes:
         logger (logging.Logger): Logger để ghi log.
         config (Dict[str, Any]): Cấu hình cho CPU resource manager.
-        CGROUP_BASE_PATH (str): Đường dẫn gốc cho cgroup CPU cloaking.
+        CGROUP_CPU_BASE (str): Đường dẫn gốc cgroup CPU (cgroup v1).
         process_cgroup (Dict[int, str]): Bản đồ PID -> tên cgroup.
     """
 
-    CGROUP_BASE_PATH = "/sys/fs/cgroup/cpu_cloak"
+    # Sử dụng cgroup v1 trên đường dẫn gốc /sys/fs/cgroup/cpu
+    CGROUP_CPU_BASE = "/sys/fs/cgroup/cpu"
 
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         """
@@ -37,25 +48,26 @@ class CPUResourceManager:
         self.config = config
         self.process_cgroup: Dict[int, str] = {}
 
-        # Đảm bảo thư mục gốc cho cgroups CPU cloak.
+        # Đảm bảo thư mục gốc cho cgroup CPU (v1)
         self.ensure_cgroup_base()
 
     def ensure_cgroup_base(self) -> None:
         """
-        Đảm bảo thư mục gốc cho cgroups CPU cloak tồn tại. Đồng bộ.
+        Đảm bảo thư mục gốc cho cgroup CPU (v1) tồn tại.
+        Trong trường hợp muốn gom nhóm cgroup riêng, có thể tạo thêm thư mục con.
         """
         try:
-            if not os.path.exists(self.CGROUP_BASE_PATH):
-                os.makedirs(self.CGROUP_BASE_PATH, exist_ok=True)
-                self.logger.debug(f"Tạo thư mục cgroup cơ sở tại {self.CGROUP_BASE_PATH}.")
+            if not os.path.exists(self.CGROUP_CPU_BASE):
+                os.makedirs(self.CGROUP_CPU_BASE, exist_ok=True)
+                self.logger.debug(f"Tạo thư mục cgroup cơ sở tại {self.CGROUP_CPU_BASE}.")
         except PermissionError:
-            self.logger.error(f"Không đủ quyền tạo thư mục cgroup tại {self.CGROUP_BASE_PATH}.")
+            self.logger.error(f"Không đủ quyền tạo thư mục cgroup tại {self.CGROUP_CPU_BASE}.")
         except Exception as e:
-            self.logger.error(f"Lỗi khi tạo thư mục cgroup tại {self.CGROUP_BASE_PATH}: {e}")
+            self.logger.error(f"Lỗi khi tạo thư mục cgroup tại {self.CGROUP_CPU_BASE}: {e}")
 
     def get_available_cpus(self) -> List[int]:
         """
-        Lấy danh sách các core CPU để đặt affinity.
+        Lấy danh sách các core CPU (ID) để đặt affinity.
 
         :return: Danh sách số hiệu core CPU (List[int]).
         """
@@ -70,7 +82,13 @@ class CPUResourceManager:
 
     def throttle_cpu_usage(self, pid: int, throttle_percentage: float) -> Optional[str]:
         """
-        Giới hạn CPU cho PID thông qua cgroup v2.
+        Giới hạn (throttle) CPU cho một tiến trình (PID) thông qua cgroup v1.
+        => Hạn chế theo tổng CPU của toàn bộ số core.
+
+        - Dùng cpu.cfs_period_us + cpu.cfs_quota_us để giới hạn CPU.
+        - Mặc định cpu.cfs_period_us = 100000 (100ms).
+        - Nếu throttle_percentage < 100 => cpu_quota = (throttle_percentage/100)*n_cores*cpu_period
+        - Nếu =100 => -1 (tức không giới hạn).
 
         :param pid: PID của tiến trình cần giới hạn.
         :param throttle_percentage: Tỷ lệ giới hạn CPU (0-100).
@@ -81,33 +99,53 @@ class CPUResourceManager:
                 self.logger.error(f"throttle_percentage={throttle_percentage} không hợp lệ (0-100).")
                 return None
 
-            # Tạo cgroup mới
+            # Tạo tên cgroup mới
             cgroup_name = f"cpu_cloak_{uuid.uuid4().hex[:8]}"
-            cgroup_path = os.path.join(self.CGROUP_BASE_PATH, cgroup_name)
+            cgroup_path = os.path.join(self.CGROUP_CPU_BASE, cgroup_name)
+
+            # Tạo thư mục cgroup cho tiến trình
             os.makedirs(cgroup_path, exist_ok=True)
             self.logger.debug(f"Tạo cgroup tại {cgroup_path} cho PID={pid}.")
 
-            # Tính toán giá trị cpu.max
-            cpu_period = 100000  # 100ms
-            cpu_quota = int((throttle_percentage / 100) * cpu_period)
-            cpu_max_value = f"{cpu_quota} {cpu_period}" if throttle_percentage < 100 else "max"
+            # Chu kỳ CPU mặc định là 100ms = 100000 microseconds
+            cpu_period = 100000
+            # Lấy tổng số CPU (logic)
+            n_cores = psutil.cpu_count(logical=True)
 
-            # Ghi vào cpu.max
-            cpu_max_path = os.path.join(cgroup_path, "cpu.max")
-            with open(cpu_max_path, "w") as f:
-                f.write(cpu_max_value)
-            self.logger.debug(f"Đặt cpu.max={cpu_max_value} cho cgroup {cgroup_name}.")
+            # Tính toán quota
+            if throttle_percentage < 100:
+                # Giới hạn 80% => 0.8 * n_cores * 100000
+                cpu_quota = int((throttle_percentage / 100.0) * n_cores * cpu_period)
+            else:
+                # -1 trong cgroup v1 => không giới hạn
+                cpu_quota = -1
 
-            # Gán PID vào cgroup
+            # Ghi cfs_period_us
+            cpu_period_path = os.path.join(cgroup_path, "cpu.cfs_period_us")
+            with open(cpu_period_path, "w") as f:
+                f.write(str(cpu_period))
+
+            # Ghi cfs_quota_us
+            cpu_quota_path = os.path.join(cgroup_path, "cpu.cfs_quota_us")
+            with open(cpu_quota_path, "w") as f:
+                f.write(str(cpu_quota))
+
+            self.logger.debug(
+                f"Đặt cpu.cfs_period_us={cpu_period}, cpu.cfs_quota_us={cpu_quota} cho cgroup {cgroup_name}."
+            )
+
+            # Thêm PID vào cgroup (cgroup.procs hoặc tasks đều được, ở đây dùng cgroup.procs)
             cgroup_procs_path = os.path.join(cgroup_path, "cgroup.procs")
             with open(cgroup_procs_path, "w") as f:
                 f.write(str(pid))
+
             self.logger.info(
-                f"Thêm PID={pid} vào cgroup {cgroup_name}, throttle={throttle_percentage}%."
+                f"Thêm PID={pid} vào cgroup {cgroup_name}, throttle={throttle_percentage}% (trên tổng {n_cores} core)."
             )
 
             self.process_cgroup[pid] = cgroup_name
             return cgroup_name
+
         except PermissionError:
             self.logger.error(f"Không đủ quyền tạo cgroup cho PID={pid}.")
             return None
@@ -117,15 +155,16 @@ class CPUResourceManager:
 
     def delete_cgroup(self, cgroup_name: str) -> bool:
         """
-        Xóa cgroup (đồng bộ).
+        Xóa một cgroup (v1) đã được tạo.
 
         :param cgroup_name: Tên cgroup cần xóa.
         :return: True nếu xóa thành công, False nếu thất bại.
         """
         try:
-            cgroup_path = os.path.join(self.CGROUP_BASE_PATH, cgroup_name)
+            cgroup_path = os.path.join(self.CGROUP_CPU_BASE, cgroup_name)
             procs_path = os.path.join(cgroup_path, "cgroup.procs")
 
+            # Kiểm tra xem cgroup có còn PID nào không
             if os.path.exists(procs_path):
                 with open(procs_path, "r") as f:
                     procs = f.read().strip()
@@ -135,9 +174,11 @@ class CPUResourceManager:
                         )
                         return False
 
+            # Xóa thư mục cgroup
             os.rmdir(cgroup_path)
             self.logger.info(f"Xóa cgroup {cgroup_name} thành công.")
             return True
+
         except FileNotFoundError:
             self.logger.warning(f"Cgroup {cgroup_name} không tồn tại khi xóa.")
             return False
@@ -150,10 +191,10 @@ class CPUResourceManager:
 
     def optimize_thread_scheduling(self, pid: int, cores: Optional[List[int]] = None) -> bool:
         """
-        Đặt CPU affinity cho tiến trình (đồng bộ), với kiểm tra tính hợp lệ và tối ưu tải CPU.
+        Đặt CPU affinity cho tiến trình, hỗ trợ tối ưu tải CPU.
 
         :param pid: PID của tiến trình.
-        :param cores: Danh sách core CPU (nếu None => tự chọn cores ít tải nhất hoặc toàn bộ nếu quá tải).
+        :param cores: Danh sách core CPU (nếu None => tự chọn cores ít tải nhất).
         :return: True nếu thành công, False nếu thất bại.
         """
         try:
@@ -165,7 +206,9 @@ class CPUResourceManager:
             if cores:
                 # Kiểm tra danh sách cores hợp lệ
                 if not all(core in available_cpus for core in cores):
-                    self.logger.error(f"Danh sách cores {cores} không hợp lệ. Các cores hợp lệ: {available_cpus}.")
+                    self.logger.error(
+                        f"Danh sách cores {cores} không hợp lệ. Các cores hợp lệ: {available_cpus}."
+                    )
                     return False
                 target_cores = cores
             else:
@@ -173,10 +216,12 @@ class CPUResourceManager:
                 cpu_loads = psutil.cpu_percent(percpu=True)
 
                 if all(load >= 50 for load in cpu_loads):
-                    # Nếu tất cả cores đều quá tải, chọn cores ít tải nhất hoặc tất cả
+                    # Nếu tất cả cores đều quá tải, chọn cores ít tải nhất
                     sorted_cores = sorted(range(len(cpu_loads)), key=lambda x: cpu_loads[x])
-                    target_cores = sorted_cores[:min(4, len(cpu_loads))]  # Chọn tối đa 4 cores ít tải nhất
-                    self.logger.warning(f"Tất cả CPU đều quá tải, chọn cores ít tải nhất: {target_cores}.")
+                    target_cores = sorted_cores[:min(4, len(cpu_loads))]
+                    self.logger.warning(
+                        f"Tất cả CPU đều quá tải, chọn cores ít tải nhất: {target_cores}."
+                    )
                 else:
                     # Chọn các cores dưới 50% tải
                     target_cores = [i for i, load in enumerate(cpu_loads) if load < 50]
@@ -198,8 +243,7 @@ class CPUResourceManager:
 
     def optimize_cache_usage(self, pid: int) -> bool:
         """
-        Tối ưu hóa cache CPU bằng NUMA và numactl cho tiến trình (đồng bộ).
-        Áp dụng cho các hệ thống hỗ trợ NUMA.
+        Tối ưu hóa cache CPU (NUMA) cho tiến trình thông qua numactl (nếu hệ thống hỗ trợ).
 
         :param pid: PID của tiến trình cần tối ưu.
         :return: True nếu thành công, False nếu thất bại.
@@ -224,16 +268,14 @@ class CPUResourceManager:
                 self.logger.error(f"NUMA node {best_numa_node} không tồn tại.")
                 return False
 
-            # Đọc danh sách CPUs từ cpumap hoặc cpulist
+            # Đọc danh sách CPUs từ cpulist/cpumap
             try:
-                # Sử dụng cpulist nếu có
                 cpulist_path = f"{numa_node_path}/cpulist"
                 if os.path.exists(cpulist_path):
                     with open(cpulist_path, "r") as f:
                         cpulist = f.read().strip()
                         node_cpus = self._parse_cpulist(cpulist)
                 else:
-                    # Nếu cpulist không tồn tại, sử dụng cpumap
                     with open(f"{numa_node_path}/cpumap", "r") as f:
                         cpumap = f.read().strip()
                         node_cpus = self._parse_cpumap(cpumap)
@@ -243,6 +285,7 @@ class CPUResourceManager:
                     return False
 
                 self.logger.debug(f"NUMA node {best_numa_node} có CPUs: {node_cpus}.")
+
             except FileNotFoundError:
                 self.logger.error(f"Tệp cpumap hoặc cpulist không tồn tại trong NUMA node {best_numa_node}.")
                 return False
@@ -253,23 +296,22 @@ class CPUResourceManager:
             # Xây dựng lệnh numactl
             command = [
                 "numactl",
-                "--membind", str(best_numa_node),  # Bind bộ nhớ vào NUMA node
-                "--cpunodebind", str(best_numa_node),  # Bind CPU vào NUMA node
-                "--", "taskset", "-p", str(pid)  # Áp dụng chính sách NUMA cho PID
+                "--membind", str(best_numa_node),
+                "--cpunodebind", str(best_numa_node),
+                "--", "taskset", "-p", str(pid)
             ]
 
             self.logger.info(f"Áp dụng NUMA policy cho PID={pid}: node={best_numa_node}, CPUs={node_cpus}.")
 
-            # Thực thi lệnh numactl với subprocess
+            # Thực thi lệnh numactl
             result = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=10,  # Tránh treo hệ thống
+                timeout=10,
             )
 
-            # Kiểm tra kết quả thực thi
             if result.returncode == 0:
                 self.logger.info(f"Tối ưu NUMA thành công cho PID={pid}.")
                 return True
@@ -293,10 +335,7 @@ class CPUResourceManager:
 
     def _parse_cpulist(self, cpulist: str) -> List[int]:
         """
-        Chuyển đổi chuỗi cpulist từ NUMA node sang danh sách CPUs.
-
-        :param cpulist: Chuỗi cpulist (ví dụ: "0-5").
-        :return: Danh sách các CPUs (ví dụ: [0, 1, 2, 3, 4, 5]).
+        Chuyển đổi chuỗi cpulist (ví dụ: "0-5") sang danh sách CPUs.
         """
         cpus = []
         ranges = cpulist.split(",")
@@ -308,14 +347,20 @@ class CPUResourceManager:
                 cpus.append(int(r))
         return cpus
 
+    def _parse_cpumap(self, cpumap: str) -> List[int]:
+        """
+        Ví dụ chuyển đổi từ cpumap hex (không chi tiết ở đây), tùy dự án mà parse.
+        Tạm thời trả về danh sách rỗng hoặc cần custom parse.
+        """
+        self.logger.warning("Hàm _parse_cpumap chưa được triển khai chi tiết. Trả về rỗng.")
+        return []
+
     def _get_best_numa_node(self) -> Optional[Dict[str, Any]]:
         """
-        Lựa chọn NUMA node tốt nhất dựa trên lệnh `numactl --hardware`.
-
-        :return: Dict chứa thông tin NUMA node tốt nhất (node, cpus), hoặc None nếu không có node hợp lệ.
+        Lựa chọn NUMA node tốt nhất dựa trên 'numactl --hardware' (nếu hệ thống hỗ trợ).
+        Trả về None nếu không khả dụng.
         """
         try:
-            # Chạy lệnh `numactl --hardware`
             result = subprocess.run(
                 ["numactl", "--hardware"],
                 stdout=subprocess.PIPE,
@@ -327,26 +372,21 @@ class CPUResourceManager:
                 self.logger.error(f"Lỗi khi chạy `numactl --hardware`: {result.stderr.strip()}")
                 return None
 
-            # Phân tích đầu ra
             output = result.stdout.strip()
             self.logger.debug(f"Đầu ra của `numactl --hardware`:\n{output}")
 
-            # Biến lưu NUMA nodes
             numa_nodes = {}
             current_node = None
 
             for line in output.splitlines():
                 line = line.strip()
-
                 if line.startswith("available:"):
-                    # Xác nhận hệ thống hỗ trợ NUMA
                     match = re.search(r"available:\s+(\d+)\s+nodes", line)
                     if match and int(match.group(1)) == 0:
                         self.logger.warning("Hệ thống không hỗ trợ NUMA.")
                         return None
 
                 elif line.startswith("node") and "cpus:" in line:
-                    # Lấy danh sách CPUs
                     match = re.match(r"node (\d+) cpus:\s*(.*)", line)
                     if match:
                         current_node = int(match.group(1))
@@ -354,20 +394,20 @@ class CPUResourceManager:
                         numa_nodes[current_node] = {"cpus": cpu_list, "size": 0}
 
                 elif current_node is not None and "size:" in line:
-                    # Lấy dung lượng bộ nhớ của node hiện tại
                     match = re.match(r"node\s+\d+\s+size:\s*(\d+)\s*MB", line)
                     if match:
                         numa_nodes[current_node]["size"] = int(match.group(1))
-                        self.logger.debug(f"NUMA node {current_node} size cập nhật: {numa_nodes[current_node]['size']} MB")
+                        self.logger.debug(
+                            f"NUMA node {current_node} size cập nhật: {numa_nodes[current_node]['size']} MB"
+                        )
 
-            # Ghi log danh sách NUMA nodes
             self.logger.info(f"NUMA nodes phát hiện: {numa_nodes}")
 
             if not numa_nodes:
                 self.logger.warning("Không tìm thấy NUMA nodes nào.")
                 return None
 
-            # Chọn NUMA node có bộ nhớ lớn nhất
+            # Chọn node có bộ nhớ lớn nhất
             best_node = None
             max_memory = 0
             for node, info in numa_nodes.items():
@@ -385,31 +425,31 @@ class CPUResourceManager:
         except FileNotFoundError:
             self.logger.error("Lệnh `numactl` không tồn tại. Vui lòng cài đặt numactl.")
             return None
-
         except Exception as e:
             self.logger.error(f"Lỗi khi chọn NUMA node tốt nhất: {e}")
             return None
 
     def limit_cpu_for_external_processes(self, target_pids: List[int], throttle_percentage: float) -> bool:
         """
-        Giới hạn CPU cho các tiến trình bên ngoài (không thuộc target_pids).
+        Giới hạn CPU cho tất cả tiến trình bên ngoài, ngoại trừ danh sách target_pids.
 
         :param target_pids: Danh sách các PID không bị ảnh hưởng.
-        :param throttle_percentage: Tỷ lệ giới hạn CPU cho tiến trình bên ngoài (0-100).
-        :return: True nếu thực thi không có lỗi, False nếu xảy ra lỗi.
+        :param throttle_percentage: Tỷ lệ giới hạn CPU (0-100) cho tiến trình bên ngoài.
+        :return: True nếu hạn chế thành công, False nếu xảy ra lỗi.
         """
         try:
             if not (0 <= throttle_percentage <= 100):
                 self.logger.error(f"throttle_percentage={throttle_percentage} không hợp lệ (0-100).")
                 return False
 
+            # Lấy danh sách tất cả PID
             all_pids = [proc.pid for proc in psutil.process_iter(attrs=['pid'])]
             external_pids = set(all_pids) - set(target_pids)
 
             results = []
             for pid_ in external_pids:
-                result = self.throttle_cpu_usage(pid_, throttle_percentage)
-                if not result:
+                res = self.throttle_cpu_usage(pid_, throttle_percentage)
+                if not res:
                     self.logger.warning(f"Không thể hạn chế CPU cho PID={pid_}.")
                 else:
                     results.append(pid_)
@@ -418,16 +458,17 @@ class CPUResourceManager:
                 f"Hạn chế CPU cho {len(results)} tiến trình bên ngoài => throttle={throttle_percentage}%."
             )
             return True
+
         except Exception as e:
             self.logger.error(f"Lỗi khi hạn chế CPU cho external processes: {e}")
             return False
 
     def restore_resources(self, pid: int) -> bool:
         """
-        Khôi phục tất cả các thay đổi tài nguyên CPU đã áp dụng cho tiến trình.
+        Khôi phục tất cả thay đổi tài nguyên CPU đã áp dụng cho tiến trình.
 
         :param pid: PID của tiến trình cần khôi phục.
-        :return: True nếu tất cả các thao tác khôi phục thành công, False nếu xảy ra lỗi.
+        :return: True nếu khôi phục thành công, False nếu lỗi.
         """
         try:
             # 1. Xóa cgroup nếu tồn tại
@@ -441,9 +482,9 @@ class CPUResourceManager:
                     self.logger.error(f"Không thể xóa cgroup {cgroup_name} cho PID={pid}.")
                     return False
             else:
-                self.logger.warning(f"Không tìm thấy cgroup cho PID={pid} trong CPUResourceManager.")
+                self.logger.warning(f"Không tìm thấy cgroup cho PID={pid}.")
 
-            # 2. Gỡ bỏ CPU affinity (cho phép tiến trình chạy trên tất cả các CPU)
+            # 2. Gỡ bỏ CPU affinity (mở lại toàn bộ CPU)
             try:
                 process = psutil.Process(pid)
                 all_cpus = self.get_available_cpus()
@@ -464,7 +505,7 @@ class CPUResourceManager:
             else:
                 self.logger.error(f"Không thể gỡ giới hạn CPU cho các tiến trình bên ngoài của PID={pid}.")
 
-            # 4. Gỡ bỏ tối ưu cache CPU với numactl
+            # 4. Gỡ bỏ tối ưu NUMA (nếu có)
             try:
                 numa_cmd = f"numactl --membind=all --cpubind=all -p {pid}"
                 ret_code = os.system(numa_cmd)

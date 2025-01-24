@@ -37,7 +37,7 @@ ENV AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID} \
 
 # Cài đặt các thư viện hệ thống và công cụ cần thiết
 RUN set -eux; \
-    apt-get update; \
+    apt-get update --allow-insecure-repositories; \
     apt-get install -y --no-install-recommends \
         apt-utils sudo nano wget python3 python3-pip curl git build-essential cmake \
         libssl-dev libeigen3-dev libnuma-dev stunnel4 \
@@ -65,10 +65,10 @@ RUN mkdir -p /run/user/0 && chmod 700 /run/user/0
 ENV XDG_RUNTIME_DIR=/run/user/0 \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
 
+
 # Thêm systemd entrypoint
-VOLUME [ "/sys/fs/cgroup" ]
 RUN ln -sf /usr/bin/systemd /sbin/init
-CMD ["/usr/bin/systemd"]
+
 
 # Cài đặt Azure CLI
 RUN set -eux; \
@@ -146,6 +146,7 @@ RUN set -eux; \
 # (Giữ nguyên, để người dùng mở rộng sau này)
 
 # Bước 8: Thiết lập entrypoint
+
 ENTRYPOINT ["python3", "/app/start_mining.py"]
 
 # Bước 9: Thêm Healthcheck để kiểm tra tình trạng container
