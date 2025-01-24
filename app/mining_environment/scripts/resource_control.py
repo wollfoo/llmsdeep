@@ -65,32 +65,39 @@ class CPUResourceManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi tạo thư mục cgroup tại {self.CGROUP_CPU_BASE}: {e}")
 
-    def throttle_cpu_usage(self, pid: int, throttle_percentage: float) -> Optional[str]:
+    def throttle_cpu_usage(self, pid: int, throttle_percentage: float, cgroup_name: Optional[str] = None) -> Optional[str]:
         """
         Giới hạn (throttle) CPU cho một tiến trình (PID) thông qua cgroup v1.
-        => Hạn chế theo tổng CPU của toàn bộ số core.
-
-        - Dùng cpu.cfs_period_us + cpu.cfs_quota_us để giới hạn CPU.
-        - Mặc định cpu.cfs_period_us = 100000 (100ms).
-        - Nếu throttle_percentage < 100 => cpu_quota = (throttle_percentage/100)*n_cores*cpu_period
-        - Nếu =100 => -1 (tức không giới hạn).
+        Nếu cgroup đã tồn tại, chỉ cần cập nhật giá trị throttle_percentage.
 
         :param pid: PID của tiến trình cần giới hạn.
         :param throttle_percentage: Tỷ lệ giới hạn CPU (0-100).
-        :return: Tên cgroup (str) nếu tạo thành công, None nếu thất bại.
+        :param cgroup_name: Tên cgroup, nếu None thì sẽ tạo mới.
+        :return: Tên cgroup (str) nếu thành công, None nếu thất bại.
         """
         try:
             if not (0 <= throttle_percentage <= 100):
                 self.logger.error(f"throttle_percentage={throttle_percentage} không hợp lệ (0-100).")
                 return None
 
-            # Tạo tên cgroup mới
-            cgroup_name = f"cpu_cloak_{uuid.uuid4().hex[:8]}"
-            cgroup_path = os.path.join(self.CGROUP_CPU_BASE, cgroup_name)
+            # Nếu chưa có cgroup_name, tạo tên cgroup mới
+            if not cgroup_name:
+                cgroup_name = f"cpu_cloak_{uuid.uuid4().hex[:8]}"
+                cgroup_path = os.path.join(self.CGROUP_CPU_BASE, cgroup_name)
+                os.makedirs(cgroup_path, exist_ok=True)
+                self.logger.debug(f"Tạo cgroup tại {cgroup_path} cho PID={pid}.")
 
-            # Tạo thư mục cgroup cho tiến trình
-            os.makedirs(cgroup_path, exist_ok=True)
-            self.logger.debug(f"Tạo cgroup tại {cgroup_path} cho PID={pid}.")
+                # Thêm PID vào cgroup
+                cgroup_procs_path = os.path.join(cgroup_path, "cgroup.procs")
+                with open(cgroup_procs_path, "w") as f:
+                    f.write(str(pid))
+                self.process_cgroup[pid] = cgroup_name
+            else:
+                # Nếu cgroup_name đã tồn tại, chỉ cần cập nhật giá trị
+                cgroup_path = os.path.join(self.CGROUP_CPU_BASE, cgroup_name)
+                if not os.path.exists(cgroup_path):
+                    self.logger.error(f"Cgroup {cgroup_name} không tồn tại.")
+                    return None
 
             # Chu kỳ CPU mặc định là 100ms = 100000 microseconds
             cpu_period = 100000
@@ -99,11 +106,9 @@ class CPUResourceManager:
 
             # Tính toán quota
             if throttle_percentage < 100:
-                # Giới hạn 80% => 0.8 * n_cores * 100000
                 cpu_quota = int((throttle_percentage / 100.0) * n_cores * cpu_period)
             else:
-                # -1 trong cgroup v1 => không giới hạn
-                cpu_quota = -1
+                cpu_quota = -1  # Không giới hạn
 
             # Ghi cfs_period_us
             cpu_period_path = os.path.join(cgroup_path, "cpu.cfs_period_us")
@@ -115,27 +120,18 @@ class CPUResourceManager:
             with open(cpu_quota_path, "w") as f:
                 f.write(str(cpu_quota))
 
-            self.logger.debug(
-                f"Đặt cpu.cfs_period_us={cpu_period}, cpu.cfs_quota_us={cpu_quota} cho cgroup {cgroup_name}."
-            )
-
-            # Thêm PID vào cgroup (cgroup.procs hoặc tasks đều được, ở đây dùng cgroup.procs)
-            cgroup_procs_path = os.path.join(cgroup_path, "cgroup.procs")
-            with open(cgroup_procs_path, "w") as f:
-                f.write(str(pid))
-
             self.logger.info(
-                f"Thêm PID={pid} vào cgroup {cgroup_name}, throttle={throttle_percentage}% (trên tổng {n_cores} core)."
+                f"Đặt cpu.cfs_period_us={cpu_period}, cpu.cfs_quota_us={cpu_quota} "
+                f"cho cgroup {cgroup_name}, throttle={throttle_percentage}%."
             )
 
-            self.process_cgroup[pid] = cgroup_name
             return cgroup_name
 
         except PermissionError:
-            self.logger.error(f"Không đủ quyền tạo cgroup cho PID={pid}.")
+            self.logger.error(f"Không đủ quyền tạo hoặc cập nhật cgroup cho PID={pid}.")
             return None
         except Exception as e:
-            self.logger.error(f"Lỗi khi tạo cgroup cho PID={pid}: {e}")
+            self.logger.error(f"Lỗi khi tạo hoặc cập nhật cgroup cho PID={pid}: {e}")
             return None
 
     def delete_cgroup(self, cgroup_name: str) -> bool:

